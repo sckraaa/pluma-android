@@ -30,6 +30,7 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_RSA_PUBLIC_KEY` | The server key as a PKCS#1 PEM: `openssl rsa -in server_pkcs1.key -RSAPublicKey_out` |
 | `PLUMA_GOOGLE_SERVICES_JSON` | Optional. The Firebase config of `chat.pluma.app`, for push notifications. |
 | `PLUMA_SIGNING_CERT_SHA256` | Optional. The SHA-256 of the release certificate. Signing with any other key fails. |
+| `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Signing](#signing). |
 
 None of these values is a secret: every APK carries them.
 
@@ -40,26 +41,41 @@ None of these values is a secret: every APK carries them.
 
 The build job never sees the release key. The `sign` job runs in the protected `release` environment and signs only builds for a real server.
 
-1. Create the key once:
+Anyone can read the workflow artifacts of a public repository. So an APK built for a real server leaves a job only encrypted with the owner's age key. Development builds stay plain.
+
+1. Create the release key once:
    ```sh
    keytool -genkeypair -keystore pluma-release.p12 -storetype PKCS12 -alias pluma \
      -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=Pluma"
    ```
    Back up the keystore and its password off-line. Android installs an update only if it is signed with the same key.
-2. Add the key to the `release` environment:
+2. Create the age key once, and back it up the same way:
+   ```sh
+   age-keygen -o pluma-apk.agekey        # prints the public key, age1...
+   gh variable set PLUMA_AGE_RECIPIENT --body age1...
+   ```
+3. Create the environment in *Settings → Environments → New environment*, named `release`:
+   - *Required reviewers*: yourself;
+   - *Deployment branches and tags*: `main` only.
+4. Add the secrets to the environment:
    ```sh
    base64 -i pluma-release.p12 | gh secret set PLUMA_KEYSTORE_B64 --env release
    gh secret set PLUMA_KEYSTORE_PASSWORD --env release
    gh secret set PLUMA_KEY_ALIAS --env release --body pluma
+   gh secret set PLUMA_AGE_IDENTITY --env release < pluma-apk.agekey
    ```
    A JKS keystore with a separate key password also needs `PLUMA_KEY_PASSWORD`.
-3. Protect the environment in *Settings → Environments → release*: *Deployment branches and tags* → `main` only.
+5. Set `PLUMA_SIGNING_CERT_SHA256` from `keytool -list -keystore pluma-release.p12`.
 
-The signed APK is the `pluma-android` artifact of the run, kept for 30 days:
+Each signing waits for your approval in the run. The signed APK is the `pluma-android` artifact of the run, kept for 30 days:
 
 ```sh
 gh run download <run id> -n pluma-android
+for f in pluma-android-*.apk.age; do age -d -i pluma-apk.agekey -o "${f%.age}" "$f"; done
+shasum -a 256 -c pluma-android-*.apk.sha256
 ```
+
+A failed signing (a wrong password, say) costs minutes: fix the secret and use *Re-run failed jobs*. The build's artifact is kept for three days.
 
 ## When it builds
 

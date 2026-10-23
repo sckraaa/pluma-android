@@ -6,6 +6,10 @@
 #   sign   the release key, in the protected "release" environment, for
 #          builds for a real server only.
 #
+# APKs for a real server leave a job only encrypted for the owner (age):
+# artifacts of a public repository are readable by anyone (ADR 0010 of the
+# server repository). Development builds stay plain.
+#
 # The weekly run is a canary: it builds the pinned upstream on a fresh
 # runner image, so a broken toolchain or dependency shows up before an
 # update is needed.
@@ -79,12 +83,21 @@ jobs:
           ABIS: ${{ inputs.abis }}
           CCACHE: "1"
         run: ci/configure.sh
+      - name: Preflight
+        if: steps.configure.outputs.target == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: |
+          if [[ ! "$PLUMA_AGE_RECIPIENT" =~ ^age1[0-9a-z]+$ ]]; then
+            echo "::error::PLUMA_AGE_RECIPIENT is not an age public key; the APK would have nowhere to go (README, Signing)."
+            exit 1
+          fi
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "17"
-      - name: Android SDK packages and ccache
-        run: ci/setup.sh
+      - name: Android SDK packages, ccache, age
+        run: ci/setup.sh build
       - name: Restore ccache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -110,6 +123,11 @@ jobs:
         with:
           path: .ccache
           key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+      - name: Encrypt APK
+        if: steps.configure.outputs.target == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: ci/encrypt.sh out
       - name: Upload APK
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -129,6 +147,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: apksigner and age
+        run: ci/setup.sh sign
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: apk-build
@@ -140,6 +160,8 @@ jobs:
           PLUMA_KEYSTORE_PASSWORD: ${{ secrets.PLUMA_KEYSTORE_PASSWORD }}
           PLUMA_KEY_ALIAS: ${{ secrets.PLUMA_KEY_ALIAS }}
           PLUMA_KEY_PASSWORD: ${{ secrets.PLUMA_KEY_PASSWORD }}
+          PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
           PLUMA_SIGNING_CERT_SHA256: ${{ vars.PLUMA_SIGNING_CERT_SHA256 }}
           APK: ${{ needs.build.outputs.apk }}
         run: |
@@ -147,11 +169,19 @@ jobs:
             echo "::warning::The release environment has no PLUMA_KEYSTORE_B64; nothing is signed (README, Signing)."
             exit 0
           fi
+          if [ -z "$PLUMA_AGE_IDENTITY" ]; then
+            echo "::error::The release environment has no PLUMA_AGE_IDENTITY to decrypt the build (README, Signing)."
+            exit 1
+          fi
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/age.key" "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/$APK"' EXIT
+          printf '%s\n' "$PLUMA_AGE_IDENTITY" >"$RUNNER_TEMP/age.key"
+          age --decrypt --identity "$RUNNER_TEMP/age.key" --output "$RUNNER_TEMP/$APK" "build/$APK.age"
           export PLUMA_KEYSTORE="$RUNNER_TEMP/release.keystore"
           printf '%s' "$KEYSTORE_B64" | base64 -d >"$PLUMA_KEYSTORE"
           mkdir -p signed
-          ci/sign.sh "build/$APK" "signed/$APK"
-          rm -f "$PLUMA_KEYSTORE"
+          ci/sign.sh "$RUNNER_TEMP/$APK" "signed/$APK"
+          ci/encrypt.sh signed
           echo "signed=true" >>"$GITHUB_OUTPUT"
       - name: Upload signed APK
         if: steps.sign.outputs.signed == 'true'
