@@ -1,0 +1,14 @@
+# Weekly update pull requests for the actions the workflow pins by commit SHA.
+# The upstream release, the NDK and CMake are pinned in upstream.env and
+# updated by hand together with ci/patch.py.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ["*"]

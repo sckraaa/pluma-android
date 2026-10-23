@@ -1,0 +1,5 @@
+/upstream/
+/out/
+*.jks
+*.keystore
+__pycache__/

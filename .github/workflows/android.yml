@@ -1,0 +1,163 @@
+# Builds the Pluma Android client from the upstream release upstream.env pins.
+#
+#   check  the patch script's tests and the shell scripts' lint;
+#   build  fetch, patch, compile (native code through ccache, Java through
+#          the Gradle build cache), APK with the upstream's test signature;
+#   sign   the release key, in the protected "release" environment, for
+#          builds for a real server only.
+#
+# The weekly run is a canary: it builds the pinned upstream on a fresh
+# runner image, so a broken toolchain or dependency shows up before an
+# update is needed.
+name: android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      abis:
+        description: "ABIs of the APK (default: PLUMA_ABIS of config/app.env), e.g. arm64-v8a,x86_64"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Patch script tests
+        run: python3 -I ci/patch_test.py -v
+      - name: Shell scripts
+        run: shellcheck -x ci/*.sh
+
+  build:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      target: ${{ steps.configure.outputs.target }}
+      apk: ${{ steps.build.outputs.apk }}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 3G
+      CCACHE_NOHASHDIR: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/julia* || true
+          df -h /
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh
+      - name: Patch
+        id: configure
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          GOOGLE_SERVICES_JSON: ${{ vars.PLUMA_GOOGLE_SERVICES_JSON }}
+          ABIS: ${{ inputs.abis }}
+          CCACHE: "1"
+        run: ci/configure.sh
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Android SDK packages and ccache
+        run: ci/setup.sh
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ hashFiles('upstream.env') }}-
+            ccache-
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - name: Build
+        id: build
+        env:
+          TARGET: ${{ steps.configure.outputs.target }}
+        run: |
+          ccache --zero-stats
+          ci/build.sh "$TARGET"
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats || true
+      - name: Save ccache
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+      - name: Upload APK
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-build
+          path: out/
+          retention-days: 3
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.outputs.target == 'server'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-build
+          path: build
+      - name: Sign
+        id: sign
+        env:
+          KEYSTORE_B64: ${{ secrets.PLUMA_KEYSTORE_B64 }}
+          PLUMA_KEYSTORE_PASSWORD: ${{ secrets.PLUMA_KEYSTORE_PASSWORD }}
+          PLUMA_KEY_ALIAS: ${{ secrets.PLUMA_KEY_ALIAS }}
+          PLUMA_KEY_PASSWORD: ${{ secrets.PLUMA_KEY_PASSWORD }}
+          PLUMA_SIGNING_CERT_SHA256: ${{ vars.PLUMA_SIGNING_CERT_SHA256 }}
+          APK: ${{ needs.build.outputs.apk }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::The release environment has no PLUMA_KEYSTORE_B64; nothing is signed (README, Signing)."
+            exit 0
+          fi
+          export PLUMA_KEYSTORE="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$KEYSTORE_B64" | base64 -d >"$PLUMA_KEYSTORE"
+          mkdir -p signed
+          ci/sign.sh "build/$APK" "signed/$APK"
+          rm -f "$PLUMA_KEYSTORE"
+          echo "signed=true" >>"$GITHUB_OUTPUT"
+      - name: Upload signed APK
+        if: steps.sign.outputs.signed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pluma-android
+          path: signed/
+          retention-days: 30
+          if-no-files-found: error
