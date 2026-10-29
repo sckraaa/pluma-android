@@ -194,6 +194,110 @@ class BrandTest(unittest.TestCase):
         self.assertEqual(set(patch.STRING_LOCAL_NAMES) - set(patch.STRING_RENAMES), set())
 
 
+def theme_java(light_accent="0xFF5B7A5E", extra=""):
+    """A Theme.java with the two default themes, as the patch leaves them."""
+    def theme(name, accents, ids, base_line=""):
+        n = len(ids)
+        zeros = ", ".join(["0x00000000"] * n)
+        slugs = ", ".join(['""'] * n)
+        rows = ([f"new int[]    {{ {', '.join(accents)} }},"] + [f"new int[]    {{ {zeros} }},"] * 6
+                + [f"new int[]    {{ {', '.join(ids)} }},", f"new String[] {{ {slugs} }},"]
+                + [f"new int[]    {{ {', '.join(['0'] * n)} }},"] * 2)
+        rows[-1] = rows[-1].rstrip(",")
+        return (f'        themeInfo.name = "{name}";\n'
+                "        themeInfo.setAccentColorOptions(\n"
+                + "".join(f"                {r}\n" for r in rows) +
+                "                );\n" + base_line +
+                "        sortAccents(themeInfo);\n"
+                "        themes.add(themeInfo);\n")
+    return ("        fallbackKeys.put(key_e, Theme.key_f);\n"
+            "        themeAccentExclusionKeys.add(key_d);\n"
+            "        for (int i = 0; i < keys_avatar.length; i++) {\n"
+            "            themeAccentExclusionKeys.add(keys_avatar[i]);\n"
+            "        }\n"
+            "    public static int[] keys_avatar = {key_h};\n"
+            + theme("Blue", [light_accent, "0xFF328ACF"], ["99", "0"])
+            + theme("Dark Blue", ["0xff9DBB9F"], ["0"], "        themeInfo.accentBaseColor = 0xff3685fa;\n")
+            + extra)
+
+
+COLORS_JAVA = """
+    public static final int TELEGRAM_COLOR = 0xFF229AF0;        // -14509328
+        defaultColors[key_a] = TELEGRAM_COLOR;
+        defaultColors[key_b] = 0xffff0000;
+        defaultColors[key_c] = 0xFF3030D0;
+        defaultColors[key_d] = TELEGRAM_COLOR;
+        defaultColors[key_e] = TELEGRAM_COLOR;
+        defaultColors[key_f] = TELEGRAM_COLOR;
+        defaultColors[key_g] = ColorUtils.setAlphaComponent(Color.WHITE, 90);
+        defaultColors[key_h] = 0xFF5CAFFA;
+        defaultColors[key_i] = 0xFF30C8D0;
+""" + "".join(f'        colorKeysMap.put(key_{k}, "{k}");\n' for k in "abcdefghi")
+
+
+class ThemeTest(unittest.TestCase):
+    FILES = {"bluebubbles.attheme": f"f={patch.argb('#5B7A5E')}\n", "darkblue.attheme": f"f={patch.argb('#9DBB9F')}\n"}
+
+    def test_accent_shift(self):
+        # The base becomes the accent; what lies 30 degrees away stays.
+        self.assertEqual(patch.accent_shift(0xFF328ACF, 0xFF5B7A5E, 0xFF328ACF, False), 0xFF5B7A5E)
+        self.assertEqual(patch.accent_shift(0xFF328ACF, 0xFF5B7A5E, 0xFFFF0000, False), 0xFFFF0000)
+        self.assertEqual(patch.accent_shift(0xFF328ACF, 0xFF5B7A5E, 0xFF3030D0, False), 0xFF3030D0)
+        for dark in (False, True):
+            shifted = patch.accent_shift(0xff3685fa, 0xff9DBB9F, 0x80229AF0, dark)
+            self.assertEqual(shifted >> 24, 0x80)
+            self.assertFalse(patch.telegram_blue(shifted))
+        self.assertTrue(patch.telegram_blue(0xFF229AF0))
+        self.assertFalse(patch.telegram_blue(0xFF5B7A5E))
+
+    def test_theme_defaults(self):
+        names, defaults = patch.theme_defaults(COLORS_JAVA)
+        self.assertEqual(names["key_a"], "a")
+        self.assertEqual(defaults["key_a"], 0xFF229AF0)
+        self.assertEqual(defaults["key_g"], 0x5AFFFFFF)
+        with self.assertRaises(patch.PatchError):
+            patch.theme_defaults(COLORS_JAVA + "        defaultColors[key_x] = OTHER_COLOR;\n")
+
+    def test_blue_left(self):
+        # A Telegram blue the engine moves (a), one that falls back to a key of
+        # the file (e), excluded keys (d, h), and blues the engine does not
+        # reach, beyond 30 degrees from the base (c in the day theme, i in the
+        # night one), which the check names.
+        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, self.FILES),
+                         {"bluebubbles.attheme": ["c"], "darkblue.attheme": ["i"]})
+        files = {k: v + f"c=#5B7A5E\ni={patch.argb('#5B7A5E')}\n" for k, v in self.FILES.items()}
+        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, files),
+                         {"bluebubbles.attheme": [], "darkblue.attheme": []})
+        # A blue the theme file sets.
+        blue = dict(files, **{"bluebubbles.attheme": files["bluebubbles.attheme"] + "b=#3030D0\n"})
+        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, blue)["bluebubbles.attheme"], ["b"])
+        # A home accent that does not tint leaves Telegram's blue.
+        self.assertEqual(patch.default_theme_blues(theme_java("0xFF328ACF"), COLORS_JAVA, files)["bluebubbles.attheme"],
+                         ["a"])
+
+    def test_default_accent_shortcuts(self):
+        # Upstream's Theme.getColor answers Telegram's colours for the home
+        # accent of the day theme, whatever the theme file says.
+        upstream = ("            } else {\n"
+                    "                useDefault = currentTheme.isDefaultMainAccent();\n"
+                    "            }\n")
+        for extra in (upstream, *patch.DEFAULT_ACCENT_SHORTCUTS):
+            with self.subTest(extra=extra), self.assertRaises(patch.PatchError):
+                patch.default_theme_blues(theme_java(extra=extra), COLORS_JAVA, self.FILES)
+
+    def test_colour_literals_left(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "TMessagesProj").mkdir()
+            for rel, old, new, _ in patch.BRAND_COLOURS:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(new)
+            rel, old, _, _ = patch.BRAND_COLOURS[-1]
+            (root / rel).write_text(old)
+            with self.assertRaisesRegex(patch.PatchError, "is still there"):
+                patch.verify_theme(patch.Tree(root))
+
+
 class GoogleServicesTest(unittest.TestCase):
     def test_placeholder_is_well_formed(self):
         cfg = patch.placeholder_google_services(["chat.pluma.app", "chat.pluma.app.beta"])

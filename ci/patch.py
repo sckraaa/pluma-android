@@ -8,7 +8,7 @@ talks to Telegram or does not sign in. The brand assets of brand/android
 replace upstream files only when those are byte for byte the ones expected.
 After the edits the result is checked again (no Telegram datacenter address
 or server key is left, no Telegram name in the built-in strings, no tg://
-link scheme).
+link scheme, no Telegram blue in the colours of the default themes).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -16,6 +16,7 @@ Standard library only, so the CI and a developer machine run it as is.
 import argparse
 import base64
 import collections
+import colorsys
 import hashlib
 import ipaddress
 import json
@@ -810,6 +811,171 @@ def argb(colour):
     return v - (1 << 32) if v & 0x80000000 else v
 
 
+# --- the colours of the default themes ----------------------------------------
+# A model of what Theme.getColor answers for the home accent of a default
+# theme, read from the patched sources: the theme file, the accent engine over
+# it and over the defaults of ThemeColors (ThemeAccent.fillAccentColors,
+# Theme.changeColorAccent), fallbackKeys. verify_theme fails when a colour
+# outside themeAccentExclusionKeys (user colours, calls, statistics, Premium,
+# stories) is still Telegram's blue.
+
+# The places where upstream gives the home accent of a default theme
+# Telegram's own colours instead of the theme file and the accent engine:
+# Theme.getColor, changeColorAccent, saveCurrentTheme, and the blue to purple
+# bubbles forced on the home accent of "Dark Blue".
+DEFAULT_ACCENT_SHORTCUTS = (
+    "currentTheme.isDefaultMainAccent()",
+    "currentTheme.isDefaultMyMessages()",
+    "currentTheme.isDefaultMyMessagesBubbles()",
+    "themeInfo.firstAccentIsDefault && themeInfo.currentAccentId == DEFALT_THEME_ACCENT_ID",
+    "currentTheme.firstAccentIsDefault && accent.id == DEFALT_THEME_ACCENT_ID",
+    'isHome(themeAccent) && name.equals("Dark Blue")',
+)
+# The default themes: theme file, the id of the home accent, dark.
+DEFAULT_THEMES = {"Blue": ("bluebubbles.attheme", 99, False), "Dark Blue": ("darkblue.attheme", 0, True)}
+
+
+def theme_defaults(source):
+    """ThemeColors.java: (the string name of each key, the default colour of
+    each key), both by the key's Java name."""
+    names = dict(re.findall(r'colorKeysMap\.put\((key_\w+), "(\w+)"\);', source))
+    consts = {n: int(v, 16) for n, v in re.findall(r"public static final int (\w+) = 0x([0-9A-Fa-f]{8});", source)}
+    consts.update({"Color.WHITE": 0xFFFFFFFF, "Color.BLACK": 0xFF000000, "Color.TRANSPARENT": 0})
+
+    def value(v):
+        if v in consts:
+            return consts[v]
+        if re.fullmatch(r"0x[0-9A-Fa-f]{1,8}", v):
+            return int(v, 16)
+        if re.fullmatch(r"-?\d+", v):
+            return int(v) & 0xFFFFFFFF
+        m = re.fullmatch(r"ColorUtils\.setAlphaComponent\(([\w.]+), (\d+)\)", v)
+        if m and m.group(1) in consts:
+            return consts[m.group(1)] & 0xFFFFFF | int(m.group(2)) << 24
+        raise PatchError(f"ThemeColors.java: cannot read the default colour {v!r}")
+
+    defaults = {k: value(v.strip()) for k, v in re.findall(r"defaultColors\[(key_\w+)\] = ([^;]+);", source)}
+    return names, defaults
+
+
+def theme_engine(source):
+    """Theme.java: (fallbackKeys, themeAccentExclusionKeys)."""
+    fallback = dict(re.findall(r"fallbackKeys\.put\((?:Theme\.)?(key_\w+), (?:Theme\.)?(key_\w+)\);", source))
+    arrays = {n: re.findall(r"key_\w+", body) for n, body in re.findall(r"int\[\] (keys_\w+) = \{([^}]*)\};", source)}
+    keys = re.findall(r"themeAccentExclusionKeys\.add\((key_\w+)\);", source)
+    loops = re.findall(r"themeAccentExclusionKeys\.add\((keys_\w+)\[i\]\);", source)
+    if len(keys) + len(loops) != source.count("themeAccentExclusionKeys.add("):
+        raise PatchError("Theme.java: an exclusion from the accent engine the check cannot read")
+    excluded = set(keys)
+    for n in loops:
+        if n not in arrays:
+            raise PatchError(f"Theme.java: no array {n}")
+        excluded.update(arrays[n])
+    return fallback, excluded
+
+
+def home_accent(source, theme, home):
+    """(the base colour of the accent engine, the home accent) of a theme. The
+    base is the accent of id 0, unless the theme sets accentBaseColor."""
+    table = accent_table(source, theme)
+    ids, accents = table[7], table[0]
+    if str(home) not in ids or "0" not in ids:
+        raise PatchError(f"Theme.java: {theme}: no accent {home} or 0")
+    column = ids.index(str(home))
+    if int(table[1][column], 16) or int(table[2][column], 16):
+        raise PatchError(f"Theme.java: {theme}: the home accent has colours for my messages; the check does not model them")
+    head = source.index(f'        themeInfo.name = "{theme}";\n')
+    block = source[head:source.index("        themes.add(", head)]
+    base = re.findall(r"themeInfo\.accentBaseColor = (0x[0-9A-Fa-f]{8});", block)
+    return int(base[-1] if base else accents[ids.index("0")], 16), int(accents[column], 16)
+
+
+def _hsv(c):
+    h, s, v = colorsys.rgb_to_hsv((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255)
+    return h * 360, s, v
+
+
+def _brightness(c):
+    return ((c >> 16 & 255) * 0.2126 + (c >> 8 & 255) * 0.7152 + (c & 255) * 0.0722) / 255
+
+
+def accent_shift(base, accent, colour, dark):
+    """Theme.changeColorAccent: a colour within 30 degrees of the base's hue
+    moves to the accent; a light theme never gets it lighter, a dark one never
+    darker."""
+    bh, bs, bv = _hsv(base)
+    ah, as_, av = _hsv(accent)
+    h, s, v = _hsv(colour)
+    if min(abs(h - bh), abs(h - bh - 360)) > 30:
+        return colour
+    dist = min(1.5 * s / bs, 1)
+    h = min(max(h + ah - bh, 0), 360) % 360
+    s = min(max(s * as_ / bs, 0), 1)
+    v = min(max(v * (1 - dist + dist * av / bv), 0), 1)
+    r, g, b = colorsys.hsv_to_rgb(h / 360, s, v)
+    new = colour & 0xFF000000 | round(r * 255) << 16 | round(g * 255) << 8 | round(b * 255)
+    was, now = _brightness(colour), _brightness(new)
+    if now and (was > now if dark else was < now):
+        k = 0.4 * was / now + 0.6
+        new = colour & 0xFF000000 | sum(min(int((new >> n & 255) * k), 255) << n for n in (16, 8, 0))
+    return new
+
+
+def theme_colours(theme_file, names, defaults, fallback, excluded, base, accent, dark):
+    """What Theme.getColor answers for each key: the theme file, the accent
+    engine over the file and the defaults, the fallback keys, the defaults."""
+    by_name = {n: k for k, n in names.items()}
+    file = {}
+    for line in theme_file.splitlines():
+        name, sep, v = line.partition("=")
+        if sep and name in by_name:
+            file[by_name[name]] = (argb(v) if v.startswith("#") else int(v)) & 0xFFFFFFFF
+    current = dict(file)
+    for key in set(defaults) | set(file):
+        if key in excluded:
+            continue
+        if key in file:
+            c = file[key]
+        elif fallback.get(key) in file:
+            continue
+        else:
+            c = defaults[key]
+        new = accent_shift(base, accent, c, dark)
+        if new != c:
+            current[key] = new
+    out = {}
+    for key in set(defaults) | set(file):
+        if key in current:
+            out[key] = current[key]
+        elif fallback.get(key) in current:
+            out[key] = current[fallback[key]]
+        else:
+            out[key] = defaults[key]
+    return out
+
+
+def telegram_blue(c):
+    h, s, v = _hsv(c)
+    return c >> 24 >= 0x20 and s >= 0.3 and v >= 0.3 and 180 <= h <= 240
+
+
+def default_theme_blues(theme_java, colors_java, theme_files):
+    """{theme file: the keys still Telegram's blue} for the default themes,
+    from the sources of Theme.java and ThemeColors.java and the theme files
+    by name."""
+    for s in DEFAULT_ACCENT_SHORTCUTS:
+        if s in theme_java:
+            raise PatchError(f"Theme.java: {s!r}: a default theme's home accent still gets Telegram's colours")
+    names, defaults = theme_defaults(colors_java)
+    fallback, excluded = theme_engine(theme_java)
+    out = {}
+    for theme, (asset, home, dark) in DEFAULT_THEMES.items():
+        base, accent = home_accent(theme_java, theme, home)
+        colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
+        out[asset] = sorted(names.get(k, k) for k, c in colours.items() if k not in excluded and telegram_blue(c))
+    return out
+
+
 def rename_strings(xml, local_names=()):
     """Renames Telegram in the text of the elements only; returns the new XML
     and the counts of each replacement."""
@@ -831,8 +997,9 @@ def rename_strings(xml, local_names=()):
     return ELEMENT_TEXT.sub(element, xml), counts
 
 
-def edit_accents(text, theme, edits):
-    """Edits cells of the accent arrays of a theme in Theme.java."""
+def _accent_arrays(text, theme):
+    """The accent arrays of a theme in Theme.java: (start, end, the lines from
+    start to end, the indices of the 11 array lines among them)."""
     head = f'        themeInfo.name = "{theme}";\n'
     if text.count(head) != 1:
         raise PatchError(f"Theme.java: {text.count(head)} themes {theme!r}, expected 1")
@@ -842,10 +1009,26 @@ def edit_accents(text, theme, edits):
     rows = [i for i, l in enumerate(lines) if l.lstrip().startswith(("new int[]", "new String[]"))]
     if len(rows) != 11:
         raise PatchError(f"Theme.java: {theme}: {len(rows)} accent arrays, expected 11")
+    return start, end, lines, rows
+
+
+def _accent_cells(line):
+    first = line.index("{") + 1
+    return first, list(re.finditer(r"[^\s,{}]+", line[first:line.index("}")]))
+
+
+def accent_table(text, theme):
+    """The cells of the 11 accent arrays of a theme, as written."""
+    _, _, lines, rows = _accent_arrays(text, theme)
+    return [[m.group(0) for m in _accent_cells(lines[r])[1]] for r in rows]
+
+
+def edit_accents(text, theme, edits):
+    """Edits cells of the accent arrays of a theme in Theme.java."""
+    start, end, lines, rows = _accent_arrays(text, theme)
     for row, column, old, new in edits:
         line = lines[rows[row]]
-        first = line.index("{") + 1
-        cells = list(re.finditer(r"[^\s,{}]+", line[first:line.index("}")]))
+        first, cells = _accent_cells(line)
         if column >= len(cells) or cells[column].group(0) != old:
             found = cells[column].group(0) if column < len(cells) else None
             raise PatchError(f"Theme.java: {theme}: accent array {row}, column {column} is {found}, expected {old}")
@@ -1080,6 +1263,26 @@ def verify_brand(tree):
         rel = f"{RES}/{name}"
         if brand_layer(json.loads(tree.read(rel)), rel, layer, index)["shapes"] != json.loads((BRAND / src).read_text()):
             raise PatchError(f"{rel}: the layer {layer!r} is not the brand's")
+    verify_theme(tree)
+
+
+def verify_theme(tree):
+    """No Telegram blue in the default themes, the colour literals of
+    BRAND_COLOURS included."""
+    for rel, old, _, _ in BRAND_COLOURS:
+        if old in tree.read(rel):
+            raise PatchError(f"{rel}: Telegram's colour {old!r} is still there")
+    themes = {asset: tree.read(f"{MAIN}/assets/{asset}") for asset, _, _ in DEFAULT_THEMES.values()}
+    theme_java = tree.read(f"{JAVA}/ui/ActionBar/Theme.java")
+    colors_java = tree.read(f"{JAVA}/ui/ActionBar/ThemeColors.java")
+    # A model that reads nothing would pass anything: the defaults it reads
+    # must be Telegram's blue in many places.
+    names, defaults = theme_defaults(colors_java)
+    if sum(map(telegram_blue, defaults.values())) < 100 or len(names) < 500:
+        raise PatchError("ThemeColors.java: the check reads too few colours; upstream changed it")
+    for asset, left in default_theme_blues(theme_java, colors_java, themes).items():
+        if left:
+            raise PatchError(f"{asset}: Telegram's blue is left in {', '.join(left)}")
 
 
 def verify(tree, c):
