@@ -37,6 +37,18 @@ None of these values is a secret: every APK carries them.
 - **No server variables set.** The build targets the development server of [`config/dev`](config/dev): an Android emulator on the machine that runs the server's `docker compose` stack, at `10.0.2.2:10443`. Such builds are never signed.
 - **Some but not all set.** The build fails.
 
+### Development builds for a phone
+
+A manual run with `dev_address` set makes a development build (the development key, never signed) for the stand at that IPv4, port 10443, whatever the server variables say:
+- the Wi-Fi address of the machine that runs the stand, for a phone on the same network: `test/e2e/run.sh lan` of the server repository forwards that address to the stand;
+- `127.0.0.1`, for a phone connected with `adb` (USB or wireless debugging): `adb reverse tcp:10443 tcp:10443` brings the phone's port to the machine.
+
+```sh
+gh workflow run android.yml -f abis=arm64-v8a -f dev_address=192.168.0.10
+```
+
+The procedure, with the stand, is in `docs/ops/clients.md` of the server repository.
+
 ## Signing
 
 The build job never sees the release key. The `sign` job runs in the protected `release` environment and signs only builds for a real server.
@@ -96,7 +108,7 @@ You need Linux or macOS with JDK 17, the Android SDK (`ANDROID_HOME`), the NDK a
 
 ```sh
 ci/fetch-upstream.sh
-ci/configure.sh          # the development server; set SERVER_IPV4, SERVER_PORT, RSA_PUBLIC_KEY for another
+ci/configure.sh          # the development server; DEV_SERVER_IPV4 for one at another address; SERVER_IPV4, SERVER_PORT, RSA_PUBLIC_KEY for a real one
 ci/build.sh dev          # out/pluma-android-<version>-dev.apk
 ```
 
