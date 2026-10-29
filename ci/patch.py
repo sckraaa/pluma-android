@@ -12,6 +12,7 @@ Standard library only, so the CI and a developer machine run it as is.
 
 import argparse
 import base64
+import collections
 import hashlib
 import ipaddress
 import json
@@ -379,9 +380,80 @@ MAIN = "TMessagesProj/src/main"
 JAVA = f"{MAIN}/java/org/telegram"
 RES = f"{MAIN}/res"
 
+# Built-in strings. Whole-word "Telegram" and "TELEGRAM" in the text of the
+# strings (never in keys or tags) become "Pluma" and "PLUMA"; URLs
+# (t.me/TelegramTips, telegram.org) and other words ("Telegramm") stay. The
+# counts are per file, after the AppName edit; a new language file or a
+# changed count stops the build.
+TELEGRAM_WORD = re.compile(r"(?<![A-Za-z0-9@/.])(Telegram|TELEGRAM)(?![A-Za-z0-9]|\.\w)")
+ELEMENT_TEXT = re.compile(r">[^<]*<")
+STRING_RENAMES = {
+    "values": (508, 1),
+    "values-ar": (0, 0),
+    "values-de": (80, 0),
+    "values-es": (95, 0),
+    "values-it": (96, 0),
+    "values-ko": (1, 0),
+    "values-nl": (79, 0),
+    "values-pt-rBR": (97, 1),
+    "values-ru": (18, 0),
+    "values-uk": (21, 0),
+}
+# The name in other scripts and in compounds, in this order, with counts.
+# Korean particles follow the last sound of the word: "Pluma" ends in a vowel.
+STRING_LOCAL_NAMES = {
+    "values-ar": (("لتيليجرام", "لـPluma", 8), ("تيليجرام", "Pluma", 80), ("تليجرام", "Pluma", 1)),
+    "values-ko": (("텔레그램이라는", "Pluma라는", 1), ("텔레그램이", "Pluma가", 12), ("텔레그램으로", "Pluma로", 2),
+                  ("텔레그램은", "Pluma는", 4), ("텔레그램을", "Pluma를", 5), ("텔레그램", "Pluma", 71)),
+    "values-nl": (("Telegramberichten", "Pluma-berichten", 1),),
+}
+LOCAL_NAMES = ("텔레그램", "تيليجرام", "تليجرام", "Telegramberichten")
+# A sentence that would turn false with the name changed.
+STRING_REWRITES = (
+    ("values/strings.xml",
+     r"Some videos can\'t be streamed – e.g., all videos that were sent from Android using Telegram 4.7 and earlier versions.",
+     r"Some videos can\'t be streamed – e.g., videos that were sent from very old versions of the app."),
+)
+# The name in Java string literals the user sees.
+JAVA_NAMES = (
+    ("messenger/ContactsController.java", '"Telegram Profile"', '"Pluma Profile"', 1),
+    ("messenger/ContactsController.java", '"Telegram Voice Call"', '"Pluma Voice Call"', 1),
+    ("messenger/ContactsController.java", '"Telegram Video Call"', '"Pluma Video Call"', 1),
+    ("messenger/MessagesController.java", 'user.first_name = "Telegram";', 'user.first_name = "Pluma";', 2),
+    ("ui/Components/ChatAttachAlertDocumentLayout.java", 'fs.title = "Telegram";', 'fs.title = "Pluma";', 1),
+    ("ui/Components/MessagePreviewView.java", '"Subscribe to **Telegram Premium** to', '"Subscribe to **Pluma Premium** to', 1),
+    ("ui/Components/PasscodeView.java", '"Unlock to use Telegram"', '"Unlock to use Pluma"', 1),
+    ("ui/LoginActivity.java", "But Telegram says it's", "But Pluma says it's", 2),
+    ("ui/NewContactBottomSheet.java", '"This phone number is not on Telegram.', '"This phone number is not on Pluma.', 1),
+    ("ui/NewContactBottomSheet.java", '"This phone number is on Telegram."', '"This phone number is on Pluma."', 1),
+    ("ui/ThemePreviewActivity.java", '"Telegram Beta Chat"', '"Pluma Beta Chat"', 1),
+)
+
+
+def rename_strings(xml, local_names=()):
+    """Renames Telegram in the text of the elements only; returns the new XML
+    and the counts of each replacement."""
+    counts = collections.Counter()
+
+    def element(m):
+        s = m.group(0)
+
+        def word(w):
+            counts[w.group(1)] += 1
+            return "Pluma" if w.group(1) == "Telegram" else "PLUMA"
+
+        s = TELEGRAM_WORD.sub(word, s)
+        for old, new, _ in local_names:
+            counts[old] += s.count(old)
+            s = s.replace(old, new)
+        return s
+
+    return ELEMENT_TEXT.sub(element, xml), counts
+
 
 def brand(tree):
     brand_entry_points(tree)
+    brand_strings(tree)
 
 
 def brand_entry_points(tree):
@@ -416,6 +488,33 @@ def brand_entry_points(tree):
                  "            // pluma: no app icon picker; the alternative icons are Telegram's.\n")
 
 
+def brand_strings(tree):
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    if set(files) != set(STRING_RENAMES):
+        raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, expected {', '.join(sorted(STRING_RENAMES))}")
+    for rel, old, new in STRING_REWRITES:
+        tree.replace(f"{RES}/{rel}", old, new)
+    for lang, rel in files.items():
+        local = STRING_LOCAL_NAMES.get(lang, ())
+        text, counts = rename_strings(tree.read(rel), local)
+        expected = {"Telegram": STRING_RENAMES[lang][0], "TELEGRAM": STRING_RENAMES[lang][1]}
+        expected.update((old, n) for old, _, n in local)
+        for key, n in expected.items():
+            if counts[key] != n:
+                raise PatchError(f"{rel}: {counts[key]} names {key!r} to rename, expected {n}; upstream changed it")
+        tree.write(rel, text)
+    for rel, old, new, count in JAVA_NAMES:
+        tree.replace(f"{JAVA}/{rel}", old, new, count)
+
+
+def verify_brand(tree):
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        for m in ELEMENT_TEXT.finditer(p.read_text(encoding="utf-8")):
+            left = TELEGRAM_WORD.search(m.group(0)) or re.search("|".join(LOCAL_NAMES), m.group(0))
+            if left:
+                raise PatchError(f"{p.relative_to(tree.root)}: {left.group(0)!r} is still in {m.group(0)[:80]!r}")
+
+
 def verify(tree, c):
     """Checks the result independently of how the edits were made."""
     tgnet = tree.root / "TMessagesProj/jni/tgnet"
@@ -436,6 +535,7 @@ def verify(tree, c):
     for rel in ("TMessagesProj/src/main/res/xml/auth.xml", "TMessagesProj/src/main/res/xml/sync_contacts.xml"):
         if "org.telegram.messenger" in tree.read(rel):
             raise PatchError(f"{rel}: Telegram's account type is still there")
+    verify_brand(tree)
 
 
 def main(argv=None):

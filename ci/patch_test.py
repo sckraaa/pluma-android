@@ -125,6 +125,24 @@ class TreeTest(unittest.TestCase):
             patch.Tree(d)
 
 
+class BrandTest(unittest.TestCase):
+    def test_rename_strings(self):
+        xml = ('<string name="TelegramFAQ">Telegram FAQ</string>\n'
+               '<string name="Tips">https://t.me/TelegramTips</string>\n'
+               '<string name="Faq">https://telegram.org/faq and Telegram.org</string>\n'
+               '<string name="A">__Telegram Premium.__ Use Telegram. INVITE TO TELEGRAM</string>\n'
+               '<string name="B">Telegramm, @Telegram, Telegram\'s</string>\n'
+               '<string name="C">텔레그램이 텔레그램</string>\n')
+        out, counts = patch.rename_strings(xml, (("텔레그램이", "Pluma가", 1), ("텔레그램", "Pluma", 1)))
+        self.assertEqual(out, '<string name="TelegramFAQ">Pluma FAQ</string>\n'
+                              '<string name="Tips">https://t.me/TelegramTips</string>\n'
+                              '<string name="Faq">https://telegram.org/faq and Telegram.org</string>\n'
+                              '<string name="A">__Pluma Premium.__ Use Pluma. INVITE TO PLUMA</string>\n'
+                              '<string name="B">Telegramm, @Telegram, Pluma\'s</string>\n'
+                              '<string name="C">Pluma가 Pluma</string>\n')
+        self.assertEqual((counts["Telegram"], counts["TELEGRAM"], counts["텔레그램이"], counts["텔레그램"]), (4, 1, 1, 1))
+
+
 class GoogleServicesTest(unittest.TestCase):
     def test_placeholder_is_well_formed(self):
         cfg = patch.placeholder_google_services(["chat.pluma.app", "chat.pluma.app.beta"])
