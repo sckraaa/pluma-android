@@ -15,8 +15,28 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - Only the modules Pluma builds are included; the Huawei repository and plugin are removed.
   - The ABIs come from `config/app.env`: `arm64-v8a`, plus `x86_64` for an emulator.
 - **Firebase.** The patch uses the given Firebase config, or a placeholder when none is given. With the placeholder there are no push notifications.
+- **Brand.** Name, logo, link scheme and colours are Pluma's; see [Branding](#branding).
 
-After the edits, the result is checked again: no Telegram datacenter address or server key may remain.
+After the edits, the result is checked again: no Telegram datacenter address or server key may remain, no "Telegram" in the text of the built-in strings, and no `tg:` link scheme.
+
+## Branding
+
+The user sees Pluma, not Telegram (task 017 of the server repository).
+
+- **Name.** Every "Telegram" in the built-in strings of all languages becomes "Pluma", feature names too ("Pluma Premium", "Pluma Stars"); Korean and Arabic, which write the name in their own script, get "Pluma" in Latin letters. The same goes for the names in Java string literals the user sees (contact rows in the system Contacts app, the passcode screen, the placeholders of the service accounts). String keys, code, package and folder names (`Pictures/Telegram`), the mini app API (`window.Telegram`) and URLs (telegram.org, t.me) stay.
+- **Links.** The app takes and makes `plm://` links instead of `tg://`, the QR login (`plm://login?token=…`) included. Telegram keeps `tg://` when it is installed next to Pluma. Only the internal `tg://` URIs ExoPlayer streams files through stay.
+- **Logo.** The launcher icon (adaptive, with the monochrome layer for themed icons, and the legacy icons), the splash screen, the notification icon, the intro, the chat list title, the icons of the contacts account and calls, the QR code centres and the round video watermark.
+- **Colours.** The palette "graphite and sage" in the default day and night themes: the home accent is sage, text, accent, links and bubbles have the palette's exact colours (`bluebubbles.attheme`, `darkblue.attheme`), and the accent engine shifts the remaining blue of the themes to sage. Also the notification and call accents, the platform styles, the splash background and the intro. The alternative themes (Day, Night, Arctic Blue) and the other accent colours stay as Telegram has them.
+- **Hidden.** The Help section of the settings (support chat, FAQ, feature tips and privacy policy: Telegram's services only) and the app icon picker (the alternative icons are Telegram's).
+
+The assets come from the brand kit in [`brand/svg`](brand/svg). [`brand/render.py`](brand/render.py) renders them into `brand/android` with `rsvg-convert` and `cwebp`, at the sizes and in the formats of the upstream files they replace. The patch copies each one over its upstream file only when that file is byte for byte the one it expects (`BRAND_ASSETS` in `ci/patch.py`, SHA-256). After a change of the SVGs:
+
+```sh
+python3 brand/render.py   # rewrites brand/android
+python3 ci/patch_test.py
+```
+
+When an update changes an upstream icon, the patch names the file; check it, render again if its size changed, and update its SHA-256.
 
 ## Configuration
 
