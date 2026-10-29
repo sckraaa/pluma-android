@@ -544,6 +544,9 @@ SCHEME_LITERAL = re.compile(r'"tg(?::|")')
 # colour near the theme's blue base to the sage accent; these keys get the
 # palette's exact values, which lie outside the shifted hues. Each entry is
 # (key, the upstream value or None when the key is not set, the new colour).
+# Upstream answers Telegram's built-in colours (ThemeColors) for the home
+# accent of "Blue" and skips both the theme file and the accent engine;
+# brand_theme makes that accent go through them like any other.
 PALETTE_LIGHT = (
     # text
     ("windowBackgroundWhiteBlackText", None, "#111111"),
@@ -582,6 +585,7 @@ PALETTE_LIGHT = (
     ("actionBarTabLine", None, "#5B7A5E"),
     ("actionBarTabActiveText", None, "#5B7A5E"),
     ("windowBackgroundWhiteInputFieldActivated", None, "#5B7A5E"),
+    ("dialogTopBackground", -13473128, "#5B7A5E"),
     ("chats_actionPressedBackground", -11166764, "#4F6E52"),
     ("featuredStickers_addButtonPressed", -12412453, "#4F6E52"),
     # text on the accent
@@ -984,6 +988,41 @@ def brand_theme(tree):
     tree.replace(rel, '                if (isHome(themeAccent) && name.equals("Dark Blue") || name.equals("Night")) {\n',
                  "                // pluma: the default dark theme takes its bubbles from darkblue.attheme.\n"
                  '                if (name.equals("Night")) {\n')
+    # The home accent of the day theme goes through bluebubbles.attheme and the
+    # accent engine like any other accent. Upstream answers Telegram's built-in
+    # colours (ThemeColors) for it in getColor, which leaves the palette of the
+    # theme file unused, keeps it out of changeColorAccent, and saves those
+    # built-in colours into a theme made from it.
+    tree.replace(rel, "        if (currentTheme == defaultTheme) {\n"
+                      "            boolean useDefault;\n"
+                      "            if (isMyMessagesBubbles(key)) {\n"
+                      "                useDefault = currentTheme.isDefaultMyMessagesBubbles();\n"
+                      "            } else if (isMyMessages(key)) {\n"
+                      "                useDefault = currentTheme.isDefaultMyMessages();\n"
+                      "            } else if (key_chat_wallpaper == key || key_chat_wallpaper_gradient_to1 == key"
+                      " || key_chat_wallpaper_gradient_to2 == key || key_chat_wallpaper_gradient_to3 == key) {\n"
+                      "                useDefault = false;\n"
+                      "            } else {\n"
+                      "                useDefault = currentTheme.isDefaultMainAccent();\n"
+                      "            }\n"
+                      "            if (useDefault) {\n"
+                      "                if (key == key_chat_serviceBackground) {\n"
+                      "                    return serviceMessageColor;\n"
+                      "                } else if (key == key_chat_serviceBackgroundSelected) {\n"
+                      "                    return serviceSelectedMessageColor;\n"
+                      "                }\n"
+                      "                return getDefaultColor(key);\n"
+                      "            }\n"
+                      "        }\n",
+                 "        // pluma: the home accent of the default theme takes its colours from the theme file and\n"
+                 "        // the accent engine, as every other accent does, not Telegram's built-in ones.\n")
+    tree.replace(rel, "        if (accent == 0 || themeInfo.accentBaseColor == 0 || accent == themeInfo.accentBaseColor"
+                      " || themeInfo.firstAccentIsDefault && themeInfo.currentAccentId == DEFALT_THEME_ACCENT_ID) {\n",
+                 "        // pluma: the home accent of the default theme tints too.\n"
+                 "        if (accent == 0 || themeInfo.accentBaseColor == 0 || accent == themeInfo.accentBaseColor) {\n")
+    tree.replace(rel, "        boolean useDefaultColors = currentTheme.firstAccentIsDefault && accent.id == DEFALT_THEME_ACCENT_ID;\n",
+                 "        // pluma: a theme made from the home accent keeps the colours it shows.\n"
+                 "        boolean useDefaultColors = false;\n")
     # Previews of the default themes in the theme list.
     tree.replace(rel, "        themeInfo.previewBackgroundColor = 0xff5f6e82;\n"
                       "        themeInfo.previewInColor = 0xff76869c;\n"
