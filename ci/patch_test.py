@@ -152,8 +152,9 @@ class BrandTest(unittest.TestCase):
                 data = (res / rel).read_bytes()
                 self.assertEqual(data[:4] == b"RIFF", rel.endswith(".webp"), rel)
                 self.assertGreater(min(patch.image_size(data)), 0, rel)
-        groups = json.loads((patch.BRAND / "qr_login_logo.json").read_text())
-        self.assertEqual([g["ty"] for g in groups], ["gr"] * 4)
+        for _, _, _, _, src in patch.BRAND_LAYERS:
+            groups = json.loads((patch.BRAND / src).read_text())
+            self.assertEqual([g["ty"] for g in groups], ["gr"] * 4, src)
 
     def test_image_size(self):
         png = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + (82).to_bytes(4, "big") + (74).to_bytes(4, "big")

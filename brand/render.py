@@ -5,8 +5,9 @@
 
 writes brand/android/res, the files ci/patch.py copies over the upstream
 resources of the same name (sizes and formats as upstream has them), and
-brand/android/qr_login_logo.json, the shapes ci/patch.py puts into the
-logo layer of the upstream raw/qr_login.json animation.
+brand/android/qr_login_logo.json and calls_log_logo.json, the shapes
+ci/patch.py puts into the logo layers of the upstream raw/qr_login.json and
+raw/calls_log.json animations.
 
 Bitmaps go through rsvg-convert (PNG) and cwebp (lossless WebP); vector
 drawables, Lottie animations and the SVG for the QR code centre are written
@@ -470,6 +471,13 @@ def main():
     text("qr_login_logo.json", json.dumps(
         lottie_groups(mono, s, 539.18 - 537.4 - CENTRE[0] * s, 282.5 - 284 - CENTRE[1] * s, WHITE),
         separators=(",", ":")) + "\n")
+
+    # The call-log permission explanation of the login: the caller, a white
+    # disc 48 units across (Telegram's logo, centred on its layer), becomes the
+    # white mark reaching as far.
+    s = 24 / reach
+    text("calls_log_logo.json", json.dumps(
+        lottie_groups(mono, s, -CENTRE[0] * s, -CENTRE[1] * s, WHITE), separators=(",", ":")) + "\n")
 
     files = sorted(p.relative_to(OUT) for p in OUT.rglob("*") if p.is_file())
     print(f"render: {len(files)} files in {OUT.relative_to(BRAND.parent)}")

@@ -446,9 +446,17 @@ BRAND_ASSETS = {
     "raw/qr_logo.svg": "b40b79aba680695563c4e788cf51dc087cdd496faa667a2679b1b4fde49de470",
     "raw/round_blur_overlay_text.png": "8484201589fbb2eaa7efb62f438992814f4e2804f3a5a1660744d9fbbc7365da",
 }
-# "Link desktop device": brand/android/qr_login_logo.json replaces the shapes
-# of its "Logo full" layer.
-QR_LOGIN_SHA256 = "40cccd31a7f01608dd1e8a3bd4597b05832585f10cdc7a5914204b22c507ab79"
+# Logo layers of upstream animations the shapes of a brand/android file
+# replace: (animation, its SHA-256, the layer's name and index, the file).
+# "Link desktop device": the logo over the oval. The call-log permission
+# explanation of the login: the caller, Telegram's logo (a white disc with the
+# plane cut out), becomes the white mark.
+BRAND_LAYERS = (
+    ("raw/qr_login.json", "40cccd31a7f01608dd1e8a3bd4597b05832585f10cdc7a5914204b22c507ab79", "Logo full", None,
+     "qr_login_logo.json"),
+    ("raw/calls_log.json", "2cbcb5bf3fa757f613e35420704bb4a4fe518e2fff4e23d15a99d6dec87fd6cd", "Shape", 2,
+     "calls_log_logo.json"),
+)
 
 # Built-in strings. Whole-word "Telegram" and "TELEGRAM" in the text of the
 # strings (never in keys or tags) become "Pluma" and "PLUMA"; URLs
@@ -788,6 +796,14 @@ def image_size(data):
     raise PatchError("not a PNG or WebP image")
 
 
+def brand_layer(anim, rel, name, index):
+    """The one layer of a Lottie animation with this name (and index)."""
+    found = [l for l in anim["layers"] if l.get("nm") == name and (index is None or l.get("ind") == index)]
+    if len(found) != 1:
+        raise PatchError(f"{rel}: {len(found)} layers {name!r} (index {index}), expected 1")
+    return found[0]
+
+
 def argb(colour):
     """#RRGGBB or #AARRGGBB as the signed int of a .attheme file."""
     v = int(colour[1:], 16) | (0xFF000000 if len(colour) == 7 else 0)
@@ -947,16 +963,14 @@ def brand_assets(tree):
         if dst.suffix in (".png", ".webp") and image_size(new) != image_size(dst.read_bytes()):
             raise PatchError(f"brand/android/res/{rel}: {image_size(new)} pixels, upstream has {image_size(dst.read_bytes())}")
         dst.write_bytes(new)
-    rel = f"{RES}/raw/qr_login.json"
-    data = (tree.root / rel).read_bytes()
-    if hashlib.sha256(data).hexdigest() != QR_LOGIN_SHA256:
-        raise PatchError(f"{rel}: not the animation the patch expects; upstream changed it")
-    anim = json.loads(data)
-    logo = [layer for layer in anim["layers"] if layer.get("nm") == "Logo full"]
-    if len(logo) != 1:
-        raise PatchError(f"{rel}: {len(logo)} layers \"Logo full\", expected 1")
-    logo[0]["shapes"] = json.loads((BRAND / "qr_login_logo.json").read_text())
-    tree.write(rel, json.dumps(anim, separators=(",", ":")))
+    for name, sha, layer, index, src in BRAND_LAYERS:
+        rel = f"{RES}/{name}"
+        data = (tree.root / rel).read_bytes()
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise PatchError(f"{rel}: not the animation the patch expects; upstream changed it")
+        anim = json.loads(data)
+        brand_layer(anim, rel, layer, index)["shapes"] = json.loads((BRAND / src).read_text())
+        tree.write(rel, json.dumps(anim, separators=(",", ":")))
     # The background of the adaptive icon: white, as in the brand kit.
     tree.replace(f"{RES}/drawable/icon_background_sa.xml", 'android:startColor="#289AD1"', 'android:startColor="#FFFFFF"')
     tree.replace(f"{RES}/drawable/icon_background_sa.xml", 'android:endColor="#38AEEB"', 'android:endColor="#FFFFFF"')
@@ -1062,6 +1076,10 @@ def verify_brand(tree):
         raise PatchError(f"tg: literals left in {found}, expected only the internal ones {SCHEME_KEEP}")
     if 'android:scheme="tg"' in tree.read(f"{MAIN}/AndroidManifest.xml"):
         raise PatchError("AndroidManifest.xml: the app still takes tg:// links")
+    for name, _, layer, index, src in BRAND_LAYERS:
+        rel = f"{RES}/{name}"
+        if brand_layer(json.loads(tree.read(rel)), rel, layer, index)["shapes"] != json.loads((BRAND / src).read_text()):
+            raise PatchError(f"{rel}: the layer {layer!r} is not the brand's")
 
 
 def verify(tree, c):
