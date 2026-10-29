@@ -429,6 +429,45 @@ JAVA_NAMES = (
     ("ui/ThemePreviewActivity.java", '"Telegram Beta Chat"', '"Pluma Beta Chat"', 1),
 )
 
+# Deep links: plm:// instead of tg://. Every "tg: and "tg" literal of these
+# files is the link scheme; the counts are those of the upstream (after the
+# Help rows of the settings search are gone). Telegram keeps tg:// when it is
+# installed next to Pluma, and the QR login (plm://login?token=...) works
+# between Pluma clients only.
+SCHEME_JAVA = {
+    "messenger/AndroidUtilities.java": (13, 1),
+    "messenger/MusicPlayerService.java": (2, 0),
+    "messenger/browser/Browser.java": (3, 1),
+    "ui/Business/BusinessLinksController.java": (1, 0),
+    "ui/CameraScanActivity.java": (1, 0),
+    "ui/Cells/ChatMessageCell.java": (2, 1),
+    "ui/ChatActivity.java": (13, 0),
+    "ui/Components/Premium/boosts/GiftInfoBottomSheet.java": (2, 1),
+    "ui/Components/Premium/boosts/UserSelectorBottomSheet.java": (2, 1),
+    "ui/Components/UndoView.java": (3, 0),
+    "ui/LaunchActivity.java": (156, 2),
+    "ui/LinkManager.java": (2, 2),
+    "ui/LoginActivity.java": (1, 0),
+    "ui/PaymentFormActivity.java": (0, 1),
+    "ui/ProfileActivity.java": (76, 0),
+    "ui/ProxySettingsActivity.java": (2, 0),
+    "ui/SessionsActivity.java": (1, 0),
+    "ui/WebviewActivity.java": (2, 1),
+}
+# What stays: the tg:// URIs ExoPlayer streams files through (internal, never
+# a link) and the language code of Tajik.
+SCHEME_KEEP = {
+    "messenger/FileStreamLoadOperation.java": 1,
+    "messenger/MediaController.java": 2,
+    "messenger/TranslateController.java": 1,
+    "messenger/secretmedia/ExtendedDefaultDataSource.java": 1,
+    "ui/Components/Premium/VideoScreenPreview.java": 1,
+    "ui/Components/VideoPlayer.java": 1,
+    "ui/Components/VideoSeekPreviewImage.java": 1,
+    "ui/Stories/PeerStoriesView.java": 2,
+}
+SCHEME_LITERAL = re.compile(r'"tg(?::|")')
+
 
 def rename_strings(xml, local_names=()):
     """Renames Telegram in the text of the elements only; returns the new XML
@@ -454,6 +493,7 @@ def rename_strings(xml, local_names=()):
 def brand(tree):
     brand_entry_points(tree)
     brand_strings(tree)
+    brand_scheme(tree)
 
 
 def brand_entry_points(tree):
@@ -507,12 +547,33 @@ def brand_strings(tree):
         tree.replace(f"{JAVA}/{rel}", old, new, count)
 
 
+def brand_scheme(tree):
+    for rel, (colon, bare) in SCHEME_JAVA.items():
+        tree.replace(f"{JAVA}/{rel}", '"tg:', '"plm:', colon)
+        tree.replace(f"{JAVA}/{rel}", '"tg"', '"plm"', bare)
+    # Links in message text.
+    tree.replace(f"{JAVA}/messenger/AndroidUtilities.java", "|ton|tg|tonsite):", "|ton|plm|tonsite):")
+    tree.replace(f"{JAVA}/messenger/LinkifyPort.java", "|ton|tg|tonsite)://", "|ton|plm|tonsite)://")
+    # The system hands plm:// links to the app, and no longer tg:// ones.
+    tree.replace(f"{MAIN}/AndroidManifest.xml", '<data android:scheme="tg" />', '<data android:scheme="plm" />')
+    tree.replace(f"{RES}/xml/shortcuts.xml", 'android:value="tg://', 'android:value="plm://', count=6)
+
+
 def verify_brand(tree):
     for p in sorted((tree.root / RES).glob("values*/strings.xml")):
         for m in ELEMENT_TEXT.finditer(p.read_text(encoding="utf-8")):
             left = TELEGRAM_WORD.search(m.group(0)) or re.search("|".join(LOCAL_NAMES), m.group(0))
             if left:
                 raise PatchError(f"{p.relative_to(tree.root)}: {left.group(0)!r} is still in {m.group(0)[:80]!r}")
+    found = {}
+    for p in sorted((tree.root / JAVA).rglob("*.java")):
+        n = len(SCHEME_LITERAL.findall(p.read_text(encoding="utf-8")))
+        if n:
+            found[p.relative_to(tree.root / JAVA).as_posix()] = n
+    if found != SCHEME_KEEP:
+        raise PatchError(f"tg: literals left in {found}, expected only the internal ones {SCHEME_KEEP}")
+    if 'android:scheme="tg"' in tree.read(f"{MAIN}/AndroidManifest.xml"):
+        raise PatchError("AndroidManifest.xml: the app still takes tg:// links")
 
 
 def verify(tree, c):
