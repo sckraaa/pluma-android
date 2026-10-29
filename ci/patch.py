@@ -367,6 +367,54 @@ def patch(tree, c):
     tree.write("TMessagesProj/google-services.json",
                json.dumps(placeholder_google_services(["org.telegram.messenger"]), indent=2) + "\n")
 
+    brand(tree)
+
+
+# --- branding ----------------------------------------------------------------
+# Task 017 of the server repository: the user sees Pluma, not Telegram (names,
+# logo, the plm:// link scheme, the "graphite and sage" palette). Identifiers,
+# packages, file names, copyright notices and URLs stay as they are.
+
+MAIN = "TMessagesProj/src/main"
+JAVA = f"{MAIN}/java/org/telegram"
+RES = f"{MAIN}/res"
+
+
+def brand(tree):
+    brand_entry_points(tree)
+
+
+def brand_entry_points(tree):
+    # Settings: no Help section. Its rows lead only to Telegram's services:
+    # the volunteer support chat, the FAQ, the feature tips channel and the
+    # privacy policy.
+    settings = f"{JAVA}/ui/SettingsActivity.java"
+    tree.replace_body(settings,
+                      "getString(R.string.SendAGift)));\n        }\n",
+                      "            items.add(UItem.asHeader(getString(R.string.SettingsDebug)));\n",
+                      "\n        // pluma: no Help section; it leads to Telegram's support, FAQ, feature tips and\n"
+                      "        // privacy policy only.\n"
+                      "        if (BuildVars.LOGS_ENABLED || BuildVars.DEBUG_PRIVATE_VERSION) {\n"
+                      "            if (items.get(items.size() - 1).viewType != UniversalAdapter.VIEW_TYPE_SHADOW)\n"
+                      "                items.add(UItem.asShadow(null));\n",
+                      must_contain=("R.string.AskAQuestion", "R.string.TelegramFAQ", "R.string.TelegramFeatures",
+                                    "R.string.PrivacyPolicy", "items.add(UItem.asShadow(null));"))
+    tree.replace(settings, "        items.add(UItem.asCustomShadow(versionView));\n",
+                 "        if (items.get(items.size() - 1).viewType == UniversalAdapter.VIEW_TYPE_SHADOW) {\n"
+                 "            items.remove(items.size() - 1);\n"
+                 "        }\n"
+                 "        items.add(UItem.asCustomShadow(versionView));\n")
+    # The same rows in the settings search, and the app icon (below).
+    tree.sub(f"{JAVA}/ui/ProfileActivity.java",
+             r"\n {20}new SearchResult\((?:324, getString\(R\.string\.AppIcon\)|402, getString\(R\.string\.AskAQuestion\)"
+             r"|403, getString\(R\.string\.TelegramFAQ\)|404, getString\(R\.string\.PrivacyPolicy\))[^\n]*", "", count=4)
+    # Chat settings: no app icon picker; the alternative icons are Telegram's.
+    tree.replace(f"{JAVA}/ui/ThemeActivity.java",
+                 "            appIconHeaderRow = rowCount++;\n"
+                 "            appIconSelectorRow = rowCount++;\n"
+                 "            appIconShadowRow = rowCount++;\n",
+                 "            // pluma: no app icon picker; the alternative icons are Telegram's.\n")
+
 
 def verify(tree, c):
     """Checks the result independently of how the edits were made."""
