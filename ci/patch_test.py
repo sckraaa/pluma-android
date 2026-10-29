@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import pathlib
 import re
 import sys
@@ -141,6 +142,24 @@ class BrandTest(unittest.TestCase):
                               '<string name="B">Telegramm, @Telegram, Pluma\'s</string>\n'
                               '<string name="C">Pluma가 Pluma</string>\n')
         self.assertEqual((counts["Telegram"], counts["TELEGRAM"], counts["텔레그램이"], counts["텔레그램"]), (4, 1, 1, 1))
+
+    def test_assets_are_rendered(self):
+        res = patch.BRAND / "res"
+        files = {p.relative_to(res).as_posix() for p in res.rglob("*") if p.is_file()}
+        self.assertEqual(files, set(patch.BRAND_ASSETS), "run brand/render.py and update BRAND_ASSETS")
+        for rel in files:
+            if rel.endswith((".png", ".webp")):
+                data = (res / rel).read_bytes()
+                self.assertEqual(data[:4] == b"RIFF", rel.endswith(".webp"), rel)
+                self.assertGreater(min(patch.image_size(data)), 0, rel)
+        groups = json.loads((patch.BRAND / "qr_login_logo.json").read_text())
+        self.assertEqual([g["ty"] for g in groups], ["gr"] * 4)
+
+    def test_image_size(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + (82).to_bytes(4, "big") + (74).to_bytes(4, "big")
+        self.assertEqual(patch.image_size(png), (82, 74))
+        vp8l = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f" + ((81 | (73 << 14)).to_bytes(4, "little"))
+        self.assertEqual(patch.image_size(vp8l), (82, 74))
 
 
 class GoogleServicesTest(unittest.TestCase):

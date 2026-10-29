@@ -4,8 +4,11 @@
 Every change is an exact edit: the text it replaces must occur the expected
 number of times, or the whole run fails. An upstream update that moves any
 of these places stops the build here instead of producing a client that
-talks to Telegram or does not sign in. After the edits the result is checked
-again (no Telegram datacenter address or server key is left).
+talks to Telegram or does not sign in. The brand assets of brand/android
+replace upstream files only when those are byte for byte the ones expected.
+After the edits the result is checked again (no Telegram datacenter address
+or server key is left, no Telegram name in the built-in strings, no tg://
+link scheme).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -21,6 +24,9 @@ import re
 import sys
 
 ABIS = ("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+
+# The rendered brand assets (brand/render.py).
+BRAND = pathlib.Path(__file__).resolve().parent.parent / "brand" / "android"
 
 # Telegram's own server keys; none of them may survive the patch.
 TELEGRAM_FINGERPRINTS = ("0xd09d1d85de64fd85", "0xb25898df208d2603")
@@ -380,6 +386,70 @@ MAIN = "TMessagesProj/src/main"
 JAVA = f"{MAIN}/java/org/telegram"
 RES = f"{MAIN}/res"
 
+# Upstream files the rendered assets of brand/android/res replace, by their
+# SHA-256: an upstream update that changes one stops the build here.
+BRAND_ASSETS = {
+    "drawable-hdpi/book_logo.webp": "8d328b0dc5dac3a154cf241f7c06a897cdeb7275193d2dbf979c311a00c1f364",
+    "drawable-hdpi/ic_launcher_dr.webp": "4c6f7ea82ec6c913ac78913c5e93cbcc3cedef2ec7db188a04476edbaf353f3f",
+    "drawable-hdpi/intro_tg_plane.webp": "f3708145353cfd4ded45bd430bca03e40a4a47a34800939def46ddd91d65538d",
+    "drawable-hdpi/logo_middle.webp": "5c978ff1649e913da5dc0c7273c43a059162582ff99f91dcee8dded18125ae29",
+    "drawable-hdpi/notification.webp": "873db3d9f0c4e81bda605b2601b4f0bd4bc376fe8b8648ab84d1bed55fd2d65a",
+    "drawable-mdpi/book_logo.webp": "b8a0c34f77256b5a7d7ca8b3aeff690e04f9239b19c124662366cb0ef8282433",
+    "drawable-mdpi/ic_launcher_dr.webp": "2db2c54fb7a44941d90f75f9224ab8205a41333d2cc6d29b3c089c1294601238",
+    "drawable-mdpi/intro_tg_plane.webp": "44ca1d3e2e1cd1ee4f8278bd809908415bf1130435824f3a1bb73ff45fa3c0f8",
+    "drawable-mdpi/logo_middle.webp": "6ff591b644d032f5f9c8e750766ca3a3a77cb06267e1ff876cbd0c02ddbe808f",
+    "drawable-mdpi/notification.webp": "127b37ede36a3cf43884044440bb07d55afdb92b03c7b4c1d3e5a094c4676f21",
+    "drawable-xhdpi/book_logo.webp": "1aae222c620b760301ec50c96e134cc1f29e9033bedfa315da438d5b101ffa9a",
+    "drawable-xhdpi/ic_launcher_dr.webp": "b33718f18bfa8c8cfd3a318d247e578279ba351b08466af92b0e4533e748d246",
+    "drawable-xhdpi/intro_tg_plane.webp": "637cf777fc9eea8cf41efdf73cc1d35f0617cc5129a452a3e4b5d0c420de078a",
+    "drawable-xhdpi/logo_middle.png": "7ef367a9e12679e91ed3da8046c09bc3e101d086d9ec4f38f8254cbc3b696b4f",
+    "drawable-xhdpi/notification.webp": "c29bd2eb35a23a93a4352f0f432535c73934755e785cd4bbe0118a2cfe2f2fa0",
+    "drawable-xxhdpi/book_logo.webp": "5feb9c04521c9cbdb4515c3ffbcfd3d448006f01543b6e237b0cf67657e35ef2",
+    "drawable-xxhdpi/ic_launcher_dr.webp": "74f2f223fd5a9d679d145bd3b46d6a5d8f63155d144b9ed1b5b027c1d91daa35",
+    "drawable-xxhdpi/intro_tg_plane.webp": "5ec557af601fdd61bef74cd7c04fb3d749082dcb58f586541fe8a85763ec6d63",
+    "drawable-xxhdpi/logo_middle.png": "96a4313f9ee79430aae7f48f6551a2a83996092da9b6efa056726c364f1cd9a2",
+    "drawable-xxhdpi/notification.webp": "6df1bef4b36b42656179dc5772845df208204439c57f06792eb480313bb11e4d",
+    "drawable-xxxhdpi/book_logo.webp": "04a96305f5e0165a4ea0143363351793fc9c6c6e7de6af7903376e2c70e0ec04",
+    "drawable-xxxhdpi/ic_launcher_dr.webp": "86044e329a82c927b9e5b518c0ded5fd99723c2b93bea92180dbd374e6dd7df8",
+    "drawable/icon_plane.xml": "5e22f04d4b4f509b48c92b852f3e1375870bd33aeb920af5805538e8a68d4705",
+    "drawable/telegram_logo.xml": "7813838eeb6332fd3f412bcce0ff941edb5e2483320efe73c668c4fe054e8c72",
+    "drawable/telegram_logo_2.xml": "6d5fc4c19e03cd7c64668733d55cf7d09a4baf26f7dc34dbdca7eb4685d49bbc",
+    "drawable/tg_splash_320.xml": "bbbd6a828e11fff0b90d2a08a8321d1e17b9a8474430e0773bb4c1244d86963a",
+    "mipmap-hdpi/ic_launcher.png": "a85e4853116e84a7ab0036cb9d660ed333f0774e6f7f06332a592ff21a90fa45",
+    "mipmap-hdpi/ic_launcher_round.png": "a85e4853116e84a7ab0036cb9d660ed333f0774e6f7f06332a592ff21a90fa45",
+    "mipmap-hdpi/icon_foreground.png": "fc3404ec8b5199a5471bd970df2493d0a477f5131d5927a50b1fd49bc5352a38",
+    "mipmap-hdpi/icon_foreground_round.png": "c9b304fada82e85859623537c54a9c8a8b3618b380331b9bb2d5f591bad7f16c",
+    "mipmap-hdpi/icon_foreground_sa.png": "ab59b11c9cd7487fe33191e1bc7a694de1ae4fe2833d10544d79a22f6efc12f0",
+    "mipmap-mdpi/ic_launcher.png": "ff75b6cdd50dd079e07632426d1d9bd8c1e2b8fcb00bdb7478908056a8242efb",
+    "mipmap-mdpi/ic_launcher_round.png": "ff75b6cdd50dd079e07632426d1d9bd8c1e2b8fcb00bdb7478908056a8242efb",
+    "mipmap-mdpi/icon_foreground.png": "154c04ed048fdd9c1de5c7a3535a1de210a9a2f663a470c248dd103187a992f5",
+    "mipmap-mdpi/icon_foreground_round.png": "b8e7b20804a80e540bf7a3cc75fa3a6d7d5b44e8d64f7b757de0141e56eb461c",
+    "mipmap-mdpi/icon_foreground_sa.png": "e60c634b0e62c4fe085d2c32491e13e4367eb226c49a16763f924ae75c7c9b1c",
+    "mipmap-xhdpi/ic_launcher.png": "71835417e22e53e21b34b14bb10ed8051066b03ebfccc8801c81957391cf4347",
+    "mipmap-xhdpi/ic_launcher_round.png": "71835417e22e53e21b34b14bb10ed8051066b03ebfccc8801c81957391cf4347",
+    "mipmap-xhdpi/icon_foreground.png": "e522a488c25bdd5a0c6e98c2f43e408dabe6f0e231e48ec2fd8e9f8102b79fc8",
+    "mipmap-xhdpi/icon_foreground_round.png": "e7548727c7672809a766efbd21319aada6a183267db8130bcd61825ff87b0fc7",
+    "mipmap-xhdpi/icon_foreground_sa.png": "6aced0a436baabf1e70e5bc9b3be55c92db542f5a9d91724e8ebe13d70735f14",
+    "mipmap-xxhdpi/ic_launcher.png": "42ef1e7e29b81d38e02e6952e3db97fc95e0ccf3f9df130c4ca66a4a57be72b9",
+    "mipmap-xxhdpi/ic_launcher_round.png": "42ef1e7e29b81d38e02e6952e3db97fc95e0ccf3f9df130c4ca66a4a57be72b9",
+    "mipmap-xxhdpi/icon_foreground.png": "818deb7f7de9ab363f347c4c5b691cc5ce4b3bfc2f1648c4befd00b3f415fd6b",
+    "mipmap-xxhdpi/icon_foreground_round.png": "c9876818ba9c910e07608aba794711654e07278f8e228926d0b199b5134badae",
+    "mipmap-xxhdpi/icon_foreground_sa.png": "1b9dc5cd69b203a6ddfdbded85db98d5f339e58d16cce8d567b4a3fff6a61c7c",
+    "mipmap-xxxhdpi/ic_launcher.png": "838696ab91ba1708781c20833a3c04884411ba021c3ec49f287088a51dfeddf4",
+    "mipmap-xxxhdpi/ic_launcher_round.png": "838696ab91ba1708781c20833a3c04884411ba021c3ec49f287088a51dfeddf4",
+    "mipmap-xxxhdpi/icon_foreground.png": "89f1990484339efa2bcba4cc803622da6a6e9f37c0b14d0ce50b06d836a9599d",
+    "mipmap-xxxhdpi/icon_foreground_round.png": "cfb6bb1dbce81462bcfb2ec9d15de480ae234dfb63b1d5b7447be880e17e8717",
+    "mipmap-xxxhdpi/icon_foreground_sa.png": "bf938f915c029b85d75ad9ad2b22868fea31df3348b0529099bedc07a2f0a1c3",
+    "raw/plane_logo_plain.json": "35cfefbe333b74e11462fbced88f69c9be6f7727819f1d90bdcbf71e291be73d",
+    "raw/qr_code_logo.json": "2a072f8111209cd543929806110c7523082331b6f01ae5ec31c99db41df57b79",
+    "raw/qr_code_logo_2.json": "289a89cd75fe9056fe2f9953291e14252b1d9b5645c316f28eeb0c480dcab64b",
+    "raw/qr_logo.svg": "b40b79aba680695563c4e788cf51dc087cdd496faa667a2679b1b4fde49de470",
+    "raw/round_blur_overlay_text.png": "8484201589fbb2eaa7efb62f438992814f4e2804f3a5a1660744d9fbbc7365da",
+}
+# "Link desktop device": brand/android/qr_login_logo.json replaces the shapes
+# of its "Logo full" layer.
+QR_LOGIN_SHA256 = "40cccd31a7f01608dd1e8a3bd4597b05832585f10cdc7a5914204b22c507ab79"
+
 # Built-in strings. Whole-word "Telegram" and "TELEGRAM" in the text of the
 # strings (never in keys or tags) become "Pluma" and "PLUMA"; URLs
 # (t.me/TelegramTips, telegram.org) and other words ("Telegramm") stay. The
@@ -469,6 +539,22 @@ SCHEME_KEEP = {
 SCHEME_LITERAL = re.compile(r'"tg(?::|")')
 
 
+def image_size(data):
+    """(width, height) of a PNG or WebP image."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        chunk = data[12:16]
+        if chunk == b"VP8 ":
+            return int.from_bytes(data[26:28], "little") & 0x3FFF, int.from_bytes(data[28:30], "little") & 0x3FFF
+        if chunk == b"VP8L":
+            bits = int.from_bytes(data[21:25], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        if chunk == b"VP8X":
+            return int.from_bytes(data[24:27], "little") + 1, int.from_bytes(data[27:30], "little") + 1
+    raise PatchError("not a PNG or WebP image")
+
+
 def rename_strings(xml, local_names=()):
     """Renames Telegram in the text of the elements only; returns the new XML
     and the counts of each replacement."""
@@ -494,6 +580,7 @@ def brand(tree):
     brand_entry_points(tree)
     brand_strings(tree)
     brand_scheme(tree)
+    brand_assets(tree)
 
 
 def brand_entry_points(tree):
@@ -559,7 +646,44 @@ def brand_scheme(tree):
     tree.replace(f"{RES}/xml/shortcuts.xml", 'android:value="tg://', 'android:value="plm://', count=6)
 
 
+def brand_assets(tree):
+    have = {p.relative_to(BRAND / "res").as_posix() for p in (BRAND / "res").rglob("*") if p.is_file()}
+    if have != set(BRAND_ASSETS):
+        raise PatchError(f"brand/android/res and BRAND_ASSETS differ: {sorted(have ^ set(BRAND_ASSETS))}")
+    for rel, sha in sorted(BRAND_ASSETS.items()):
+        dst = tree.root / RES / rel
+        if not dst.is_file() or hashlib.sha256(dst.read_bytes()).hexdigest() != sha:
+            raise PatchError(f"{RES}/{rel}: not the upstream file the brand asset replaces; upstream changed it")
+        new = (BRAND / "res" / rel).read_bytes()
+        if dst.suffix in (".png", ".webp") and image_size(new) != image_size(dst.read_bytes()):
+            raise PatchError(f"brand/android/res/{rel}: {image_size(new)} pixels, upstream has {image_size(dst.read_bytes())}")
+        dst.write_bytes(new)
+    rel = f"{RES}/raw/qr_login.json"
+    data = (tree.root / rel).read_bytes()
+    if hashlib.sha256(data).hexdigest() != QR_LOGIN_SHA256:
+        raise PatchError(f"{rel}: not the animation the patch expects; upstream changed it")
+    anim = json.loads(data)
+    logo = [layer for layer in anim["layers"] if layer.get("nm") == "Logo full"]
+    if len(logo) != 1:
+        raise PatchError(f"{rel}: {len(logo)} layers \"Logo full\", expected 1")
+    logo[0]["shapes"] = json.loads((BRAND / "qr_login_logo.json").read_text())
+    tree.write(rel, json.dumps(anim, separators=(",", ":")))
+    # The background of the adaptive icon: white, as in the brand kit.
+    tree.replace(f"{RES}/drawable/icon_background_sa.xml", 'android:startColor="#289AD1"', 'android:startColor="#FFFFFF"')
+    tree.replace(f"{RES}/drawable/icon_background_sa.xml", 'android:endColor="#38AEEB"', 'android:endColor="#FFFFFF"')
+    # The intro texture of the mark is centred; the plane was not.
+    tree.replace("TMessagesProj/jni/intro/IntroRenderer.c", "telegram_plane.params.anchor = xyzMake(6, -5, 0);",
+                 "telegram_plane.params.anchor = xyzMake(0, 0, 0); // pluma: the mark is centred in its texture")
+    # The sphere under it: the white disc of the app icon.
+    tree.replace(f"{JAVA}/ui/IntroActivity.java",
+                 "paint.setColor(ThemeColors.TELEGRAM_COLOR); // It's logo color, it should not be colored by the theme",
+                 "paint.setColor(0xFFFFFFFF); // pluma: the white disc of the app icon, under the mark")
+
+
 def verify_brand(tree):
+    for rel, sha in BRAND_ASSETS.items():
+        if (tree.root / RES / rel).read_bytes() != (BRAND / "res" / rel).read_bytes():
+            raise PatchError(f"{RES}/{rel}: not the brand asset")
     for p in sorted((tree.root / RES).glob("values*/strings.xml")):
         for m in ELEMENT_TEXT.finditer(p.read_text(encoding="utf-8")):
             left = TELEGRAM_WORD.search(m.group(0)) or re.search("|".join(LOCAL_NAMES), m.group(0))
