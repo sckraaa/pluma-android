@@ -161,6 +161,37 @@ class BrandTest(unittest.TestCase):
         vp8l = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f" + ((81 | (73 << 14)).to_bytes(4, "little"))
         self.assertEqual(patch.image_size(vp8l), (82, 74))
 
+    def test_edit_accents(self):
+        rows = "".join(f"                new int[]    {{ {r}0,  0x{r}1 }},\n" for r in range(10))
+        text = ('        themeInfo.name = "Blue";\n'
+                "        themeInfo.setAccentColorOptions(\n" + rows +
+                '                new String[] {         "",  "slug" }\n'
+                "                );\n")
+        out = patch.edit_accents(text, "Blue", ((1, 1, "0x11", "0xFF5B7A5E"),))
+        self.assertIn("new int[]    { 10,  0xFF5B7A5E },\n", out)
+        self.assertEqual(out.replace("0xFF5B7A5E", "0x11"), text)
+        with self.assertRaises(patch.PatchError):
+            patch.edit_accents(text, "Blue", ((1, 1, "0x12", "0x0"),))
+        with self.assertRaises(patch.PatchError):
+            patch.edit_accents(text, "Dark Blue", ())
+
+    def test_edit_attheme(self):
+        text = "a=-1\nb=5\n"
+        self.assertEqual(patch.edit_attheme(text, "t", (("a", -1, "#5B7A5E"), ("c", None, "#80000000")), {"a", "c"}),
+                         "a=-10782114\nb=5\nc=-2147483648\n")
+        for table in ((("a", -2, "#000000"),), (("a", None, "#000000"),), (("x", None, "#000000"),)):
+            with self.subTest(table=table), self.assertRaises(patch.PatchError):
+                patch.edit_attheme(text, "t", table, {"a", "c"})
+
+    def test_tables(self):
+        for table in (patch.PALETTE_LIGHT, patch.PALETTE_DARK):
+            keys = [k for k, _, _ in table]
+            self.assertEqual(len(keys), len(set(keys)))
+            for _, _, colour in table:
+                self.assertRegex(colour, r"\A#(?:[0-9A-F]{6}|[0-9A-F]{8})\Z")
+        self.assertFalse(set(patch.SCHEME_JAVA) & set(patch.SCHEME_KEEP))
+        self.assertEqual(set(patch.STRING_LOCAL_NAMES) - set(patch.STRING_RENAMES), set())
+
 
 class GoogleServicesTest(unittest.TestCase):
     def test_placeholder_is_well_formed(self):
