@@ -682,14 +682,16 @@ SCHEME_KEEP = {
 SCHEME_LITERAL = re.compile(r'"tg(?::|")')
 
 # Palette "graphite and sage" (docs/tasks/017-rebranding.md of the server
-# repository) in the default themes: the day theme "Blue" with its home accent
-# and the night theme "Dark Blue". The accent engine shifts every remaining
-# colour near the theme's blue base to the sage accent; these keys get the
-# palette's exact values, which lie outside the shifted hues. Each entry is
-# (key, the upstream value or None when the key is not set, the new colour).
+# repository) in the five themes the app bundles: the default day theme "Blue"
+# with its home accent, the default night theme "Dark Blue", and "Day",
+# "Arctic Blue" and "Night". The accent engine shifts every remaining colour
+# near the theme's blue base to the sage accent; these keys get the palette's
+# exact values, which lie outside the shifted hues. Each entry is (key, the
+# upstream value or None when the key is not set, the new colour).
 # Upstream answers Telegram's built-in colours (ThemeColors) for the home
 # accent of "Blue" and skips both the theme file and the accent engine;
 # brand_theme makes that accent go through them like any other.
+# bluebubbles.attheme ("Blue").
 PALETTE_LIGHT = (
     # text
     ("windowBackgroundWhiteBlackText", None, "#111111"),
@@ -765,6 +767,7 @@ PALETTE_LIGHT = (
     ("chat_outViews", -259216707, "#5B7A5E"),
     ("chat_outViewsSelected", -260332598, "#5B7A5E"),
 )
+# darkblue.attheme ("Dark Blue").
 PALETTE_DARK = (
     # backgrounds
     ("windowBackgroundWhite", -14866637, "#131513"),
@@ -870,17 +873,287 @@ PALETTE_DARK = (
     ("chat_outViews", -7357217, "#B2CEB4"),
     ("chat_outViewsSelected", -4268038, "#B2CEB4"),
 )
+# day.attheme ("Day"): the keys of PALETTE_LIGHT, except in the outgoing
+# bubble. Day and Arctic Blue colour that bubble and write on it in white, as
+# Telegram does, so it takes the accent rather than the palette's light bubble.
+# White reads 4.8:1 on it and 3.6:1 at the light end of Day's gradient
+# (Telegram's Day: 4.2:1 and 2.3:1). Day's time, views and file details on it
+# are the palette's pale sage, 3.9:1 and 2.9:1 (Telegram's: 3.2:1 and 1.8:1);
+# shifted by the accent engine, they would read 2.6:1 and 2.0:1.
+PALETTE_DAY = (
+    # text
+    ("windowBackgroundWhiteBlackText", -13421773, "#111111"),
+    ("chats_name", None, "#111111"),
+    ("chat_messageTextIn", None, "#111111"),
+    ("actionBarDefaultTitle", -13421773, "#111111"),
+    ("dialogTextBlack", None, "#111111"),
+    ("telegram_color_dialogsLogo", None, "#111111"),
+    # secondary text
+    ("windowBackgroundWhiteGrayText", -8354940, "#6B6F6B"),
+    ("windowBackgroundWhiteGrayText2", None, "#6B6F6B"),
+    ("windowBackgroundWhiteGrayText3", None, "#6B6F6B"),
+    ("chats_message", None, "#6B6F6B"),
+    ("chats_date", None, "#6B6F6B"),
+    ("actionBarDefaultSubtitle", -8814210, "#6B6F6B"),
+    # accent: buttons, switches, counters, checks
+    ("telegram_color", None, "#5B7A5E"),
+    ("chats_unreadCounter", -14373129, "#5B7A5E"),
+    ("switchTrackChecked", -14509328, "#5B7A5E"),
+    ("chats_actionBackground", -11427096, "#5B7A5E"),
+    ("chat_messagePanelSend", -14509328, "#5B7A5E"),
+    ("windowBackgroundWhiteBlueHeader", -14054705, "#5B7A5E"),
+    ("windowBackgroundWhiteBlueText", -14447901, "#5B7A5E"),
+    ("windowBackgroundWhiteBlueText4", -12675352, "#5B7A5E"),
+    ("windowBackgroundWhiteValueText", -14054705, "#5B7A5E"),
+    ("featuredStickers_addButton", -11689749, "#5B7A5E"),
+    ("dialogTextBlue", -14709290, "#5B7A5E"),
+    ("dialogTextBlue2", -14772773, "#5B7A5E"),
+    ("dialogButton", -13987604, "#5B7A5E"),
+    ("checkboxSquareBackground", None, "#5B7A5E"),
+    ("checkbox", None, "#5B7A5E"),
+    ("radioBackgroundChecked", -14509328, "#5B7A5E"),
+    ("progressCircle", -12605954, "#5B7A5E"),
+    ("chats_sentCheck", -15032337, "#5B7A5E"),
+    ("chats_sentReadCheck", -15033105, "#5B7A5E"),
+    ("actionBarTabLine", -14054705, "#5B7A5E"),
+    ("actionBarTabActiveText", -14054705, "#5B7A5E"),
+    ("windowBackgroundWhiteInputFieldActivated", None, "#5B7A5E"),
+    ("dialogTopBackground", None, "#5B7A5E"),
+    ("chats_actionPressedBackground", -13201944, "#4F6E52"),
+    ("featuredStickers_addButtonPressed", None, "#4F6E52"),
+    # text on the accent
+    ("chats_unreadCounterText", None, "#FFFFFF"),
+    ("chats_actionIcon", None, "#FFFFFF"),
+    ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # soft accent: avatars, selection
+    ("avatar_backgroundSaved", -12208385, "#6F8F72"),
+    ("avatar_backgroundArchivedHidden", -14509328, "#6F8F72"),
+    ("chat_selectedBackground", 134217728, "#325B7A5E"),
+    ("windowBackgroundWhiteLinkSelection", 560114147, "#335B7A5E"),
+    # links
+    ("windowBackgroundWhiteLinkText", -14054705, "#4F6E52"),
+    ("chat_messageLinkIn", -15566134, "#4F6E52"),
+    ("dialogTextLink", -14317077, "#4F6E52"),
+    ("telegram_color_text", None, "#4F6E52"),
+    # bubbles: the outgoing one from the accent to the soft accent
+    ("chat_inBubble", -986896, "#F1F2F0"),
+    ("chat_inBubbleSelected", -1381654, "#E3EAE2"),
+    ("chat_outBubble", -13795627, "#5B7A5E"),
+    ("chat_outBubbleGradient", -10701088, "#6F8F72"),
+    ("chat_outBubbleSelected", -12418863, "#4F6E52"),
+    # time, views and file details in outgoing
+    ("chat_outTimeText", -3676417, "#E3EAE2"),
+    ("chat_outTimeSelectedText", -3348225, "#E3EAE2"),
+    ("chat_outViews", -3676417, "#E3EAE2"),
+    ("chat_outViewsSelected", -3676417, "#E3EAE2"),
+    ("chat_outFileInfoText", -3676417, "#E3EAE2"),
+    ("chat_outFileInfoSelectedText", -3676417, "#E3EAE2"),
+    ("chat_outAudioDurationText", -3676417, "#E3EAE2"),
+    ("chat_outAudioDurationSelectedText", -3676417, "#E3EAE2"),
+    ("chat_outVenueInfoText", -3676417, "#E3EAE2"),
+    ("chat_outVenueInfoSelectedText", -3676417, "#E3EAE2"),
+    ("chat_outContactPhoneText", -3676417, "#E3EAE2"),
+)
+# arctic.attheme ("Arctic Blue"): as PALETTE_DAY; its outgoing bubble has no
+# gradient.
+PALETTE_ARCTIC = (
+    # text
+    ("windowBackgroundWhiteBlackText", -13421773, "#111111"),
+    ("chats_name", None, "#111111"),
+    ("chat_messageTextIn", None, "#111111"),
+    ("actionBarDefaultTitle", -13421773, "#111111"),
+    ("dialogTextBlack", None, "#111111"),
+    ("telegram_color_dialogsLogo", None, "#111111"),
+    # secondary text
+    ("windowBackgroundWhiteGrayText", -7629665, "#6B6F6B"),
+    ("windowBackgroundWhiteGrayText2", None, "#6B6F6B"),
+    ("windowBackgroundWhiteGrayText3", None, "#6B6F6B"),
+    ("chats_message", None, "#6B6F6B"),
+    ("chats_date", None, "#6B6F6B"),
+    ("actionBarDefaultSubtitle", -7630182, "#6B6F6B"),
+    # accent: buttons, switches, counters, checks
+    ("telegram_color", None, "#5B7A5E"),
+    ("chats_unreadCounter", -16012289, "#5B7A5E"),
+    ("switchTrackChecked", -14509328, "#5B7A5E"),
+    ("chats_actionBackground", -11492107, "#5B7A5E"),
+    ("chat_messagePanelSend", -14509328, "#5B7A5E"),
+    ("windowBackgroundWhiteBlueHeader", -13789715, "#5B7A5E"),
+    ("windowBackgroundWhiteBlueText", -14579729, "#5B7A5E"),
+    ("windowBackgroundWhiteBlueText4", -12675352, "#5B7A5E"),
+    ("windowBackgroundWhiteValueText", -13134357, "#5B7A5E"),
+    ("featuredStickers_addButton", None, "#5B7A5E"),
+    ("dialogTextBlue", -14709290, "#5B7A5E"),
+    ("dialogTextBlue2", -14772773, "#5B7A5E"),
+    ("dialogButton", -13987604, "#5B7A5E"),
+    ("checkboxSquareBackground", None, "#5B7A5E"),
+    ("checkbox", None, "#5B7A5E"),
+    ("radioBackgroundChecked", -14638337, "#5B7A5E"),
+    ("progressCircle", -12605954, "#5B7A5E"),
+    ("chats_sentCheck", -13982474, "#5B7A5E"),
+    ("chats_sentReadCheck", None, "#5B7A5E"),
+    ("actionBarTabLine", -13655305, "#5B7A5E"),
+    ("actionBarTabActiveText", -13590803, "#5B7A5E"),
+    ("windowBackgroundWhiteInputFieldActivated", None, "#5B7A5E"),
+    ("dialogTopBackground", None, "#5B7A5E"),
+    ("chats_actionPressedBackground", -13466664, "#4F6E52"),
+    ("featuredStickers_addButtonPressed", -12478762, "#4F6E52"),
+    # text on the accent
+    ("chats_unreadCounterText", None, "#FFFFFF"),
+    ("chats_actionIcon", None, "#FFFFFF"),
+    ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # soft accent: avatars, selection
+    ("avatar_backgroundSaved", -12208385, "#6F8F72"),
+    ("avatar_backgroundArchivedHidden", None, "#6F8F72"),
+    ("chat_selectedBackground", 756261375, "#325B7A5E"),
+    ("windowBackgroundWhiteLinkSelection", 560114147, "#335B7A5E"),
+    # links
+    ("windowBackgroundWhiteLinkText", -14054705, "#4F6E52"),
+    ("chat_messageLinkIn", -16677912, "#4F6E52"),
+    ("dialogTextLink", -14317077, "#4F6E52"),
+    ("telegram_color_text", None, "#4F6E52"),
+    # bubbles
+    ("chat_inBubble", -1, "#F1F2F0"),
+    ("chat_inBubbleSelected", -1706753, "#E3EAE2"),
+    ("chat_outBubble", -13332245, "#5B7A5E"),
+    ("chat_outBubbleSelected", -13332255, "#4F6E52"),
+)
+# night.attheme ("Night"): the keys of PALETTE_DARK, except the neutral greys
+# of its bars, menus, sections and dialogs, which are Night's own and not
+# blue.
+PALETTE_NIGHT = (
+    # background
+    ("windowBackgroundWhite", -15198183, "#131513"),
+    # text
+    ("windowBackgroundWhiteBlackText", -1, "#E8ECE8"),
+    ("chats_name", -921103, "#E8ECE8"),
+    ("chats_nameMessage", -1315861, "#E8ECE8"),
+    ("chats_nameMessage_threeLines", -1315861, "#E8ECE8"),
+    ("chat_messageTextIn", -328966, "#E8ECE8"),
+    ("chat_messageTextOut", -328966, "#E8ECE8"),
+    ("actionBarDefaultTitle", -1, "#E8ECE8"),
+    ("actionBarDefaultIcon", -1, "#E8ECE8"),
+    ("dialogTextBlack", -592138, "#E8ECE8"),
+    # secondary text
+    ("windowBackgroundWhiteGrayText", 1862270975, "#9AA29A"),
+    ("windowBackgroundWhiteGrayText3", -7960954, "#9AA29A"),
+    ("windowBackgroundWhiteGrayText5", -8549479, "#9AA29A"),
+    ("windowBackgroundWhiteGrayText6", -8553091, "#9AA29A"),
+    ("windowBackgroundWhiteGrayText8", -8553091, "#9AA29A"),
+    ("windowBackgroundWhiteHintText", -8553091, "#9AA29A"),
+    ("windowBackgroundWhiteGrayIcon", -8553091, "#9AA29A"),
+    ("chats_message", -8224126, "#9AA29A"),
+    ("chats_message_threeLines", -8224126, "#9AA29A"),
+    ("chats_date", -8882056, "#9AA29A"),
+    ("chats_nameMessageArchived", -8553091, "#9AA29A"),
+    ("actionBarDefaultSubtitle", 1945301746, "#9AA29A"),
+    ("chat_inTimeText", -8552575, "#9AA29A"),
+    ("chats_menuItemIcon", -8224126, "#9AA29A"),
+    ("actionBarTabUnactiveText", -7434609, "#9AA29A"),
+    # accent: buttons, switches, counters, checks
+    ("telegram_color", None, "#9DBB9F"),
+    ("chats_unreadCounter", -13000973, "#9DBB9F"),
+    ("switchTrackChecked", -12215069, "#9DBB9F"),
+    ("chats_actionBackground", -10575653, "#9DBB9F"),
+    ("chat_messagePanelSend", -14509328, "#9DBB9F"),
+    ("windowBackgroundWhiteBlueHeader", -9652488, "#9DBB9F"),
+    ("windowBackgroundWhiteBlueText", -10177041, "#9DBB9F"),
+    ("windowBackgroundWhiteBlueText3", -11689489, "#9DBB9F"),
+    ("windowBackgroundWhiteBlueText4", -10177041, "#9DBB9F"),
+    ("windowBackgroundWhiteBlueText5", -10177041, "#9DBB9F"),
+    ("windowBackgroundWhiteValueText", -529942787, "#9DBB9F"),
+    ("featuredStickers_addButton", None, "#9DBB9F"),
+    ("dialogTextBlue", -10177041, "#9DBB9F"),
+    ("dialogTextBlue2", -10177041, "#9DBB9F"),
+    ("dialogTextBlue4", -10177041, "#9DBB9F"),
+    ("dialogButton", -10177041, "#9DBB9F"),
+    ("checkboxSquareBackground", -10177051, "#9DBB9F"),
+    ("checkbox", None, "#9DBB9F"),
+    ("radioBackgroundChecked", -12015889, "#9DBB9F"),
+    ("progressCircle", -10177027, "#9DBB9F"),
+    ("actionBarTabLine", -12339201, "#9DBB9F"),
+    ("actionBarTabActiveText", -10698241, "#9DBB9F"),
+    ("chats_sentCheck", -12145165, "#9DBB9F"),
+    ("chats_sentReadCheck", -12145165, "#9DBB9F"),
+    ("windowBackgroundWhiteInputFieldActivated", -9522449, "#9DBB9F"),
+    ("chats_actionMessage", -10178583, "#9DBB9F"),
+    ("chats_actionPressedBackground", -9388826, "#B2CEB4"),
+    ("featuredStickers_addButtonPressed", None, "#B2CEB4"),
+    # text on the accent
+    ("chats_unreadCounterText", None, "#131513"),
+    ("chats_actionIcon", None, "#131513"),
+    ("featuredStickers_buttonText", None, "#131513"),
+    # soft accent: avatars, selection
+    ("avatar_backgroundSaved", -11558424, "#7FA082"),
+    ("avatar_background2Saved", -15038233, "#7FA082"),
+    ("avatar_backgroundArchivedHidden", -12279320, "#7FA082"),
+    ("windowBackgroundChecked", -13666645, "#2C3A2D"),
+    ("chat_selectedBackground", 710909411, "#2A9DBB9F"),
+    ("windowBackgroundWhiteLinkSelection", 1030010365, "#339DBB9F"),
+    # links
+    ("windowBackgroundWhiteLinkText", -11032608, "#B2CEB4"),
+    ("chat_messageLinkIn", -8796932, "#B2CEB4"),
+    ("chat_messageLinkOut", -5316609, "#B2CEB4"),
+    ("dialogTextLink", -10177041, "#B2CEB4"),
+    ("telegram_color_text", None, "#B2CEB4"),
+    # bubbles
+    ("chat_inBubble", -14737117, "#232623"),
+    ("chat_inBubbleSelected", -13546911, "#2C3A2D"),
+    ("chat_outBubble", -13210449, "#2C3A2D"),
+    ("chat_outBubbleGradient", -12874567, "#36473A"),
+    ("chat_outBubbleSelected", -11829841, "#36473A"),
+    # time and checks in outgoing
+    ("chat_outTimeText", -7023626, "#B2CEB4"),
+    ("chat_outTimeSelectedText", -7023626, "#B2CEB4"),
+    ("chat_outSentCheck", -506859265, "#B2CEB4"),
+    ("chat_outSentCheckSelected", -5841921, "#B2CEB4"),
+    ("chat_outSentCheckRead", -506859265, "#B2CEB4"),
+    ("chat_outSentCheckReadSelected", None, "#B2CEB4"),
+    ("chat_outSentClock", -6698513, "#B2CEB4"),
+    ("chat_outSentClockSelected", -4268038, "#B2CEB4"),
+    ("chat_outViews", -7357217, "#B2CEB4"),
+    ("chat_outViewsSelected", -4268038, "#B2CEB4"),
+)
+# The theme files and their tables.
+THEME_FILES = {
+    "bluebubbles.attheme": PALETTE_LIGHT,
+    "day.attheme": PALETTE_DAY,
+    "arctic.attheme": PALETTE_ARCTIC,
+    "night.attheme": PALETTE_NIGHT,
+    "darkblue.attheme": PALETTE_DARK,
+}
 # The accent arrays of Theme.java: (row, column, upstream, new). Rows: 0
-# accent, 1 my messages, 2 their gradient, 3-6 wallpaper colours, 7 ids.
+# accent, 1 my messages, 2 their gradient, 3-6 wallpaper colours, 7 ids. The
+# accents a theme shows before the user picks a colour (DEFAULT_THEMES) turn
+# sage; the others stay as Telegram has them.
 ACCENTS = {
     # The home accent (id 99, first column): sage; the bubbles come from the
     # theme file instead of the green of my-messages.
     "Blue": ((7, 0, "99", "99"), (0, 0, "0xFF5890C5", "0xFF5B7A5E"), (1, 0, "0xFFB8E18D", "0x00000000")),
+    # The home accent (id 9, first column) and the accent the theme starts with
+    # (id 0, sixth column): sage, the bubbles of both from the theme file
+    # instead of the blue to cyan of my-messages.
+    "Day": ((7, 0, "9", "9"), (0, 0, "0xFF56A2C9", "0xFF5B7A5E"), (1, 0, "0xFF6580DC", "0x00000000"),
+            (2, 0, "0xFF3EC1D6", "0x00000000"), (7, 5, "0", "0"), (0, 5, "0xFF4C91DF", "0xFF5B7A5E")),
+    # The accent the theme starts with (id 0, seventh column): sage, on the
+    # light blue wallpaper colours shifted to sage as the accent engine shifts
+    # the theme.
+    "Arctic Blue": ((7, 6, "0", "0"), (0, 6, "0xFF3490EB", "0xFF5B7A5E"), (3, 6, "0xffe0e7ed", "0xffDDE1DD"),
+                    (4, 6, "0xffbed7f3", "0xffB4C2B6"), (5, 6, "0xffe0e8f3", "0xffDCE1DD"),
+                    (6, 6, "0xffc8dbf3", "0xffBFCBC1")),
+    # The home accent (id 0, sixth column): sage, on its near black wallpaper
+    # colours shifted to sage the same way.
+    "Night": ((7, 5, "0", "0"), (0, 5, "0xff3e88f7", "0xff9DBB9F"), (3, 5, "0xff0d0e17", "0xff101211"),
+              (4, 5, "0xff090a0c", "0xff0A0B0A"), (5, 5, "0xff181c28", "0xff1D201E"),
+              (6, 5, "0xff0e0f12", "0xff0F100F")),
     # The home accent (id 0, ninth column): sage, on a dark green wallpaper.
     "Dark Blue": ((7, 8, "0", "0"), (0, 8, "0xff3685fa", "0xff9DBB9F"), (3, 8, "0xff0e141a", "0xff0F120F"),
                   (4, 8, "0xff172431", "0xff1A211B"), (5, 8, "0xff0f171e", "0xff121612"),
                   (6, 8, "0xff141c2b", "0xff171D18")),
 }
+# The base colour of the accent engine. Upstream takes it from the accent of id
+# 0; where that accent turns sage, the Telegram blue it had stays the base the
+# sage accents shift from.
+ACCENT_BASES = {"Day": "0xFF4C91DF", "Arctic Blue": "0xFF3490EB", "Night": "0xff3e88f7", "Dark Blue": "0xff3685fa"}
 # Colour literals outside the themes: (file, upstream, new, count).
 BRAND_COLOURS = (
     (f"{JAVA}/messenger/NotificationsController.java", "0xff11acfa", "0xff5b7a5e", 2),
@@ -946,17 +1219,19 @@ def argb(colour):
 
 
 # --- the colours of the default themes ----------------------------------------
-# A model of what Theme.getColor answers for the home accent of a default
-# theme, read from the patched sources: the theme file, the accent engine over
-# it and over the defaults of ThemeColors (ThemeAccent.fillAccentColors,
-# Theme.changeColorAccent), fallbackKeys. verify_theme fails when a colour
-# outside themeAccentExclusionKeys (user colours, calls, statistics, Premium,
-# stories) is still Telegram's blue.
+# A model of what Theme.getColor answers for the accents a default theme shows
+# before the user picks a colour, read from the patched sources: the theme
+# file, the accent engine over it and over the defaults of ThemeColors
+# (ThemeAccent.fillAccentColors, Theme.changeColorAccent), fallbackKeys.
+# verify_theme fails when a colour outside themeAccentExclusionKeys (user
+# colours, calls, statistics, Premium, stories) is still Telegram's blue.
 
-# The places where upstream gives the home accent of a default theme
-# Telegram's own colours instead of the theme file and the accent engine:
-# Theme.getColor, changeColorAccent, saveCurrentTheme, and the blue to purple
-# bubbles forced on the home accent of "Dark Blue".
+# The places where upstream gives such an accent Telegram's own colours instead
+# of the theme file and the accent engine: Theme.getColor, changeColorAccent,
+# saveCurrentTheme, and the blue to purple bubbles that
+# ThemeInfo.setAccentColorOptions forces on the home accent of "Dark Blue" and
+# on every accent of "Night", its home accent included (a condition that ends
+# in name.equals("Night") right before the forced colours).
 DEFAULT_ACCENT_SHORTCUTS = (
     "currentTheme.isDefaultMainAccent()",
     "currentTheme.isDefaultMyMessages()",
@@ -964,9 +1239,24 @@ DEFAULT_ACCENT_SHORTCUTS = (
     "themeInfo.firstAccentIsDefault && themeInfo.currentAccentId == DEFALT_THEME_ACCENT_ID",
     "currentTheme.firstAccentIsDefault && accent.id == DEFALT_THEME_ACCENT_ID",
     'isHome(themeAccent) && name.equals("Dark Blue")',
+    'name.equals("Night")) {\n                    themeAccent.myMessagesAccentColor',
 )
-# The default themes: theme file, the id of the home accent, dark.
-DEFAULT_THEMES = {"Blue": ("bluebubbles.attheme", 99, False), "Dark Blue": ("darkblue.attheme", 0, True)}
+# The default themes, all five the app bundles: theme file, the accents shown
+# before the user picks a colour, dark. Those are the home accent (Theme.isHome:
+# 99 of "Blue", 9 of "Day", 0 of "Night" and "Dark Blue"; "Arctic Blue" has
+# none), which Settings > Chat Settings applies from its row of default themes
+# (EmojiThemes.createHomePreviewTheme), and the accent a theme starts with,
+# 99 of "Blue" and 0 of the others (the static initializer of Theme:
+# currentAccentId, firstAccentIsDefault ? DEFALT_THEME_ACCENT_ID : 0). The
+# intro's moon switch, for one, turns on "Night" with its accent 0
+# (IntroActivity).
+DEFAULT_THEMES = {
+    "Blue": ("bluebubbles.attheme", (99,), False),
+    "Day": ("day.attheme", (9, 0), False),
+    "Arctic Blue": ("arctic.attheme", (0,), False),
+    "Night": ("night.attheme", (0,), True),
+    "Dark Blue": ("darkblue.attheme", (0,), True),
+}
 
 
 def theme_defaults(source):
@@ -1008,16 +1298,18 @@ def theme_engine(source):
     return fallback, excluded
 
 
-def home_accent(source, theme, home):
-    """(the base colour of the accent engine, the home accent) of a theme. The
-    base is the accent of id 0, unless the theme sets accentBaseColor."""
+def theme_accent(source, theme, accent_id):
+    """(the base colour of the accent engine, the accent of this id) of a
+    theme. The base is the accent of id 0, unless the theme sets
+    accentBaseColor."""
     table = accent_table(source, theme)
     ids, accents = table[7], table[0]
-    if str(home) not in ids or "0" not in ids:
-        raise PatchError(f"Theme.java: {theme}: no accent {home} or 0")
-    column = ids.index(str(home))
+    if str(accent_id) not in ids or "0" not in ids:
+        raise PatchError(f"Theme.java: {theme}: no accent {accent_id} or 0")
+    column = ids.index(str(accent_id))
     if int(table[1][column], 16) or int(table[2][column], 16):
-        raise PatchError(f"Theme.java: {theme}: the home accent has colours for my messages; the check does not model them")
+        raise PatchError(f"Theme.java: {theme}: the accent {accent_id} has colours for my messages; "
+                         "the check does not model them")
     head = source.index(f'        themeInfo.name = "{theme}";\n')
     block = source[head:source.index("        themes.add(", head)]
     base = re.findall(r"themeInfo\.accentBaseColor = (0x[0-9A-Fa-f]{8});", block)
@@ -1055,15 +1347,26 @@ def accent_shift(base, accent, colour, dark):
     return new
 
 
+def theme_file_values(text):
+    """{key name: colour} of a .attheme file as Theme.getThemeFileValues reads
+    it: only the lines a newline ends, up to the WPS line of an embedded
+    wallpaper, without the WLS line of a wallpaper link. An unterminated last
+    line (day.attheme and arctic.attheme have one) is never read."""
+    out = {}
+    for line in text.split("\n")[:-1]:
+        if line.startswith("WPS"):
+            break
+        name, sep, v = line.partition("=")
+        if sep and name != "WLS":
+            out[name] = (argb(v) if v.startswith("#") else int(v)) & 0xFFFFFFFF
+    return out
+
+
 def theme_colours(theme_file, names, defaults, fallback, excluded, base, accent, dark):
     """What Theme.getColor answers for each key: the theme file, the accent
     engine over the file and the defaults, the fallback keys, the defaults."""
     by_name = {n: k for k, n in names.items()}
-    file = {}
-    for line in theme_file.splitlines():
-        name, sep, v = line.partition("=")
-        if sep and name in by_name:
-            file[by_name[name]] = (argb(v) if v.startswith("#") else int(v)) & 0xFFFFFFFF
+    file = {by_name[n]: v for n, v in theme_file_values(theme_file).items() if n in by_name}
     current = dict(file)
     for key in set(defaults) | set(file):
         if key in excluded:
@@ -1099,14 +1402,17 @@ def default_theme_blues(theme_java, colors_java, theme_files):
     by name."""
     for s in DEFAULT_ACCENT_SHORTCUTS:
         if s in theme_java:
-            raise PatchError(f"Theme.java: {s!r}: a default theme's home accent still gets Telegram's colours")
+            raise PatchError(f"Theme.java: {s!r}: an accent of a default theme still gets Telegram's colours")
     names, defaults = theme_defaults(colors_java)
     fallback, excluded = theme_engine(theme_java)
     out = {}
-    for theme, (asset, home, dark) in DEFAULT_THEMES.items():
-        base, accent = home_accent(theme_java, theme, home)
-        colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
-        out[asset] = sorted(names.get(k, k) for k, c in colours.items() if k not in excluded and telegram_blue(c))
+    for theme, (asset, accent_ids, dark) in DEFAULT_THEMES.items():
+        blue = set()
+        for accent_id in accent_ids:
+            base, accent = theme_accent(theme_java, theme, accent_id)
+            colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
+            blue.update(names.get(k, k) for k, c in colours.items() if k not in excluded and telegram_blue(c))
+        out[asset] = sorted(blue)
     return out
 
 
@@ -1155,13 +1461,16 @@ def _accent_arrays(text, theme):
     start = text.index("        themeInfo.setAccentColorOptions(\n", text.index(head))
     end = text.index("\n                );\n", start)
     lines = text[start:end].split("\n")
-    rows = [i for i, l in enumerate(lines) if l.lstrip().startswith(("new int[]", "new String[]"))]
+    # "Day" passes null for the last two wallpaper colours.
+    rows = [i for i, l in enumerate(lines) if re.match(r"\s*(?:new (?:int|String)\[\]|null\b)", l)]
     if len(rows) != 11:
         raise PatchError(f"Theme.java: {theme}: {len(rows)} accent arrays, expected 11")
     return start, end, lines, rows
 
 
 def _accent_cells(line):
+    if "{" not in line:  # a null array
+        return 0, []
     first = line.index("{") + 1
     return first, list(re.finditer(r"[^\s,{}]+", line[first:line.index("}")]))
 
@@ -1188,10 +1497,11 @@ def edit_accents(text, theme, edits):
 
 def edit_attheme(text, name, table, known_keys):
     """Sets keys of a .attheme file; each must have its upstream value, or be
-    absent when that is None."""
+    absent when that is None. The app never reads an unterminated last line
+    (theme_file_values): it stays last and as it is, and does not count as
+    setting its key."""
     lines = text.split("\n")
-    if lines[-1] != "":
-        raise PatchError(f"{name}: no newline at the end")
+    tail = lines.pop()
     where = collections.defaultdict(list)
     for i, line in enumerate(lines):
         key, sep, _ = line.partition("=")
@@ -1209,7 +1519,7 @@ def edit_attheme(text, name, table, known_keys):
             if len(where[key]) != 1 or lines[where[key][0]] != f"{key}={old}":
                 raise PatchError(f"{name}: {key} is not {old}; upstream changed it")
             lines[where[key][0]] = f"{key}={argb(new)}"
-    return "\n".join(lines[:-1] + added) + "\n"
+    return "\n".join(lines + added) + "\n" + tail
 
 
 def brand(tree):
@@ -1362,22 +1672,31 @@ def brand_devices(tree):
 def brand_theme(tree):
     rel = f"{JAVA}/ui/ActionBar/Theme.java"
     text = tree.read(rel)
+    for theme, base in ACCENT_BASES.items():
+        table = accent_table(text, theme)
+        ids, accents = table[7], table[0]
+        if "0" not in ids or accents[ids.index("0")] != base:
+            raise PatchError(f"Theme.java: {theme}: the accent of id 0 is not {base}; upstream changed it")
     for theme, edits in ACCENTS.items():
         text = edit_accents(text, theme, edits)
+    # These themes keep Telegram's blue as the base of the hue shift, so that
+    # their sage accents recolour the theme (the base is the accent of id 0,
+    # which setAccentColorOptions sets).
+    for theme, base in ACCENT_BASES.items():
+        _, end, _, _ = _accent_arrays(text, theme)
+        end += len("\n                );\n")
+        text = (text[:end] + "        // pluma: Telegram's blue stays the base the sage accents shift from.\n"
+                f"        themeInfo.accentBaseColor = {base};\n" + text[end:])
     tree.write(rel, text)
-    # Dark Blue keeps Telegram's blue as the base of the hue shift, so that its
-    # sage home accent recolours the theme (the base is the accent of id 0).
-    tree.replace(rel, '        sortAccents(themeInfo);\n        themes.add(themeInfo);\n'
-                      '        themesDict.put("Dark Blue", currentNightTheme = themeInfo);\n',
-                 "        // pluma: Telegram's blue stays the base the sage home accent shifts from.\n"
-                 "        themeInfo.accentBaseColor = 0xff3685fa;\n"
-                 '        sortAccents(themeInfo);\n        themes.add(themeInfo);\n'
-                 '        themesDict.put("Dark Blue", currentNightTheme = themeInfo);\n')
-    # Its bubbles come from darkblue.attheme, not from Telegram's blue to purple
-    # gradient (which the alternative "Night" theme keeps).
+    # The home accents of the two dark themes take their bubbles from the theme
+    # files, not Telegram's blue to purple gradient that upstream forces on the
+    # home accent of "Dark Blue" and on every accent of "Night", and the home
+    # accent of "Night" its wallpaper from the accent arrays, not the one
+    # upstream forces with the gradient on "Night" alone. The other accents of
+    # "Night", colours the user picks, keep both.
     tree.replace(rel, '                if (isHome(themeAccent) && name.equals("Dark Blue") || name.equals("Night")) {\n',
-                 "                // pluma: the default dark theme takes its bubbles from darkblue.attheme.\n"
-                 '                if (name.equals("Night")) {\n')
+                 "                // pluma: the home accents of the dark themes take their bubbles from the theme files.\n"
+                 '                if (name.equals("Night") && !isHome(themeAccent)) {\n')
     # The home accent of the day theme goes through bluebubbles.attheme and the
     # accent engine like any other accent. Upstream answers Telegram's built-in
     # colours (ThemeColors) for it in getColor, which leaves the palette of the
@@ -1426,7 +1745,7 @@ def brand_theme(tree):
     tree.replace(rel, "                return 0xffcfd9e3;\n", "                return 0xffdde3dc;\n")
 
     known = set(re.findall(r'colorKeysMap\.put\(key_\w+, "(\w+)"\);', tree.read(f"{JAVA}/ui/ActionBar/ThemeColors.java")))
-    for name, table in (("bluebubbles.attheme", PALETTE_LIGHT), ("darkblue.attheme", PALETTE_DARK)):
+    for name, table in THEME_FILES.items():
         rel = f"{MAIN}/assets/{name}"
         tree.write(rel, edit_attheme(tree.read(rel), name, table, known))
 

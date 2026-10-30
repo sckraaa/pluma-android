@@ -231,6 +231,12 @@ class BrandTest(unittest.TestCase):
             patch.edit_accents(text, "Blue", ((1, 1, "0x12", "0x0"),))
         with self.assertRaises(patch.PatchError):
             patch.edit_accents(text, "Dark Blue", ())
+        # "Day" passes null for two of its arrays.
+        nulls = text.replace("new int[]    { 50,  0x51 },", "null,")
+        self.assertEqual(patch.accent_table(nulls, "Blue")[5], [])
+        self.assertIn("0xFF5B7A5E", patch.edit_accents(nulls, "Blue", ((1, 1, "0x11", "0xFF5B7A5E"),)))
+        with self.assertRaises(patch.PatchError):
+            patch.edit_accents(nulls, "Blue", ((5, 0, "50", "0"),))
 
     def test_edit_attheme(self):
         text = "a=-1\nb=5\n"
@@ -239,31 +245,106 @@ class BrandTest(unittest.TestCase):
         for table in ((("a", -2, "#000000"),), (("a", None, "#000000"),), (("x", None, "#000000"),)):
             with self.subTest(table=table), self.assertRaises(patch.PatchError):
                 patch.edit_attheme(text, "t", table, {"a", "c"})
+        # An unterminated last line, which the app never reads, stays last and
+        # does not set its key.
+        self.assertEqual(patch.edit_attheme("a=-1\nb=5", "t", (("a", -1, "#5B7A5E"), ("b", None, "#80000000")),
+                                            {"a", "b"}),
+                         "a=-10782114\nb=-2147483648\nb=5")
+        with self.assertRaises(patch.PatchError):
+            patch.edit_attheme("a=-1\nb=5", "t", (("b", 5, "#000000"),), {"a", "b"})
 
     def test_tables(self):
-        for table in (patch.PALETTE_LIGHT, patch.PALETTE_DARK):
+        for name, table in patch.THEME_FILES.items():
             keys = [k for k, _, _ in table]
-            self.assertEqual(len(keys), len(set(keys)))
+            self.assertEqual(len(keys), len(set(keys)), name)
             for _, _, colour in table:
                 self.assertRegex(colour, r"\A#(?:[0-9A-F]{6}|[0-9A-F]{8})\Z")
+        # Every bundled theme has its table and is checked.
+        self.assertEqual(set(patch.THEME_FILES), {asset for asset, _, _ in patch.DEFAULT_THEMES.values()})
+        self.assertLessEqual(set(patch.ACCENTS), set(patch.DEFAULT_THEMES))
+        for theme, base in patch.ACCENT_BASES.items():
+            # The base is the colour the accent of id 0 had.
+            self.assertTrue(any(row == 0 and old == base for row, _, old, _ in patch.ACCENTS[theme]), theme)
         self.assertFalse(set(patch.SCHEME_JAVA) & set(patch.SCHEME_KEEP))
         self.assertEqual(set(patch.STRING_LOCAL_NAMES) - set(patch.STRING_RENAMES), set())
 
+    def test_outgoing_contrast(self):
+        # What a table writes on the outgoing bubble reads at least as well on
+        # Pluma's bubble as Telegram's colour on Telegram's, at each end of the
+        # bubble's gradient (WCAG 2 contrast ratio).
+        def colour(value):
+            return (value if isinstance(value, int) else patch.argb(value)) & 0xFFFFFFFF
 
-def theme_java(light_accent="0xFF5B7A5E", extra=""):
-    """A Theme.java with the two default themes, as the patch leaves them."""
-    def theme(name, accents, ids, base_line=""):
+        def luminance(c):
+            def channel(x):
+                x /= 255
+                return x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4
+            r, g, b = (channel((c >> s) & 0xFF) for s in (16, 8, 0))
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        def contrast(fg, bg):
+            a = (fg >> 24) / 255
+            fg = sum(round(a * ((fg >> s) & 0xFF) + (1 - a) * ((bg >> s) & 0xFF)) << s for s in (16, 8, 0))
+            hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+            return (hi + 0.05) / (lo + 0.05)
+
+        on_bubble = ("chat_messageTextOut", "chat_messageLinkOut")
+        for name, table in patch.THEME_FILES.items():
+            rows = {key: (old, new) for key, old, new in table}
+            old_bubble, new_bubble = rows["chat_outBubble"]
+            old_end, new_end = rows.get("chat_outBubbleGradient", (None, None))
+            ends = [(colour(old_bubble), colour(new_bubble)),
+                    (colour(old_end if old_end is not None else old_bubble),
+                     colour(new_end if new_end is not None else new_bubble))]
+            for key, (old, new) in rows.items():
+                if old is None or key.startswith("chat_outBubble"):
+                    continue
+                if not (key.startswith("chat_out") or key in on_bubble):
+                    continue
+                for telegram, pluma in ends:
+                    self.assertGreaterEqual(contrast(colour(new), pluma), contrast(colour(old), telegram),
+                                            f"{name} {key}")
+
+
+# The accents of the default themes as the patch leaves them: (id, accent, my
+# messages) by theme. The day themes shift from 0xFF328ACF, the night ones from
+# 0xff3685fa.
+FIXTURE_ACCENTS = {
+    "Blue": (("99", "0xFF5B7A5E", "0x00000000"), ("0", "0xFF328ACF", "0x00000000")),
+    "Day": (("9", "0xFF5B7A5E", "0x00000000"), ("0", "0xFF5B7A5E", "0x00000000")),
+    "Arctic Blue": (("0", "0xFF5B7A5E", "0x00000000"),),
+    "Night": (("0", "0xff9DBB9F", "0x00000000"),),
+    "Dark Blue": (("0", "0xff9DBB9F", "0x00000000"),),
+}
+FIXTURE_BASES = {"Day": "0xFF328ACF", "Arctic Blue": "0xFF328ACF", "Night": "0xff3685fa", "Dark Blue": "0xff3685fa"}
+
+
+def theme_java(changes=None, extra=""):
+    """A Theme.java with the five default themes, as the patch leaves them.
+    changes: {(theme, id): (accent, my messages)}. "Day" passes null for two
+    of its arrays, as upstream does."""
+    changes = changes or {}
+
+    def theme(name):
+        ids = [i for i, _, _ in FIXTURE_ACCENTS[name]]
+        accents = [changes.get((name, i), (a, m)) for i, a, m in FIXTURE_ACCENTS[name]]
         n = len(ids)
         zeros = ", ".join(["0x00000000"] * n)
         slugs = ", ".join(['""'] * n)
-        rows = ([f"new int[]    {{ {', '.join(accents)} }},"] + [f"new int[]    {{ {zeros} }},"] * 6
+        wallpaper = [f"new int[]    {{ {zeros} }},"] * 4
+        if name == "Day":
+            wallpaper[2:] = ["null,"] * 2
+        rows = ([f"new int[]    {{ {', '.join(a for a, _ in accents)} }},",
+                 f"new int[]    {{ {', '.join(m for _, m in accents)} }},", f"new int[]    {{ {zeros} }},"]
+                + wallpaper
                 + [f"new int[]    {{ {', '.join(ids)} }},", f"new String[] {{ {slugs} }},"]
                 + [f"new int[]    {{ {', '.join(['0'] * n)} }},"] * 2)
         rows[-1] = rows[-1].rstrip(",")
+        base = FIXTURE_BASES.get(name)
         return (f'        themeInfo.name = "{name}";\n'
                 "        themeInfo.setAccentColorOptions(\n"
                 + "".join(f"                {r}\n" for r in rows) +
-                "                );\n" + base_line +
+                "                );\n" + (f"        themeInfo.accentBaseColor = {base};\n" if base else "") +
                 "        sortAccents(themeInfo);\n"
                 "        themes.add(themeInfo);\n")
     return ("        fallbackKeys.put(key_e, Theme.key_f);\n"
@@ -272,8 +353,7 @@ def theme_java(light_accent="0xFF5B7A5E", extra=""):
             "            themeAccentExclusionKeys.add(keys_avatar[i]);\n"
             "        }\n"
             "    public static int[] keys_avatar = {key_h};\n"
-            + theme("Blue", [light_accent, "0xFF328ACF"], ["99", "0"])
-            + theme("Dark Blue", ["0xff9DBB9F"], ["0"], "        themeInfo.accentBaseColor = 0xff3685fa;\n")
+            + "".join(theme(name) for name in FIXTURE_ACCENTS)
             + extra)
 
 
@@ -292,7 +372,8 @@ COLORS_JAVA = """
 
 
 class ThemeTest(unittest.TestCase):
-    FILES = {"bluebubbles.attheme": f"f={patch.argb('#5B7A5E')}\n", "darkblue.attheme": f"f={patch.argb('#9DBB9F')}\n"}
+    FILES = {asset: f"f={patch.argb('#9DBB9F' if dark else '#5B7A5E')}\n"
+             for asset, _, dark in patch.DEFAULT_THEMES.values()}
 
     def test_accent_shift(self):
         # The base becomes the accent; what lies 30 degrees away stays.
@@ -314,22 +395,44 @@ class ThemeTest(unittest.TestCase):
         with self.assertRaises(patch.PatchError):
             patch.theme_defaults(COLORS_JAVA + "        defaultColors[key_x] = OTHER_COLOR;\n")
 
+    def test_theme_file_values(self):
+        # As Theme.getThemeFileValues reads a theme file: not the wallpaper
+        # link, nothing from the embedded wallpaper on, and not a last line a
+        # newline does not end.
+        text = "a=-1\nb=#80FF0000\nWLS=link\nc=5\nWPS\nd=1\nWPE\n"
+        self.assertEqual(patch.theme_file_values(text), {"a": 0xFFFFFFFF, "b": 0x80FF0000, "c": 5})
+        self.assertEqual(patch.theme_file_values("a=1\nb=2"), {"a": 1})
+
     def test_blue_left(self):
         # A Telegram blue the engine moves (a), one that falls back to a key of
         # the file (e), excluded keys (d, h), and blues the engine does not
-        # reach, beyond 30 degrees from the base (c in the day theme, i in the
-        # night one), which the check names.
+        # reach, beyond 30 degrees from the base (c in the day themes, i in the
+        # night ones), which the check names.
         self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, self.FILES),
-                         {"bluebubbles.attheme": ["c"], "darkblue.attheme": ["i"]})
+                         {asset: ["i"] if dark else ["c"] for asset, _, dark in patch.DEFAULT_THEMES.values()})
         files = {k: v + f"c=#5B7A5E\ni={patch.argb('#5B7A5E')}\n" for k, v in self.FILES.items()}
-        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, files),
-                         {"bluebubbles.attheme": [], "darkblue.attheme": []})
-        # A blue the theme file sets.
-        blue = dict(files, **{"bluebubbles.attheme": files["bluebubbles.attheme"] + "b=#3030D0\n"})
-        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, blue)["bluebubbles.attheme"], ["b"])
-        # A home accent that does not tint leaves Telegram's blue.
-        self.assertEqual(patch.default_theme_blues(theme_java("0xFF328ACF"), COLORS_JAVA, files)["bluebubbles.attheme"],
-                         ["a"])
+        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, files), dict.fromkeys(files, []))
+        # A blue the theme file sets beyond the reach of the engine, in any of
+        # the themes.
+        for asset, _, dark in patch.DEFAULT_THEMES.values():
+            with self.subTest(asset=asset):
+                blue = dict(files, **{asset: files[asset] + ("b=#30C8D0\n" if dark else "b=#3030D0\n")})
+                self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, blue)[asset], ["b"])
+        # Not on a last line without a newline, which the app never reads.
+        tail = dict(files, **{"day.attheme": files["day.attheme"] + "b=#3030D0"})
+        self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, tail)["day.attheme"], [])
+        # An accent shown before the user picks a colour that does not tint
+        # leaves Telegram's blue: both of "Day" count.
+        for theme, accents in FIXTURE_ACCENTS.items():
+            for accent_id in [i for i, _, _ in accents if (theme, i) != ("Blue", "0")]:
+                with self.subTest(theme=theme, accent=accent_id):
+                    base = FIXTURE_BASES.get(theme, "0xFF328ACF")
+                    out = patch.default_theme_blues(theme_java({(theme, accent_id): (base, "0x00000000")}),
+                                                    COLORS_JAVA, files)
+                    self.assertEqual(out[patch.DEFAULT_THEMES[theme][0]], ["a"])
+        # Colours for my messages, which the check does not model, stop it.
+        with self.assertRaisesRegex(patch.PatchError, "my messages"):
+            patch.default_theme_blues(theme_java({("Day", "9"): ("0xFF5B7A5E", "0xFF6580DC")}), COLORS_JAVA, files)
 
     def test_default_accent_shortcuts(self):
         # Upstream's Theme.getColor answers Telegram's colours for the home
@@ -340,6 +443,24 @@ class ThemeTest(unittest.TestCase):
         for extra in (upstream, *patch.DEFAULT_ACCENT_SHORTCUTS):
             with self.subTest(extra=extra), self.assertRaises(patch.PatchError):
                 patch.default_theme_blues(theme_java(extra=extra), COLORS_JAVA, self.FILES)
+
+    def test_forced_bubbles(self):
+        # Upstream forces blue to purple bubbles on every accent of "Night";
+        # the patch leaves them to the accents other than its home one.
+        def forced(condition):
+            return ("                //override default themes\n"
+                    f"                if ({condition}) {{\n"
+                    "                    themeAccent.myMessagesAccentColor = 0xff258DE5;\n"
+                    '                    if (name.equals("Night")) {\n'
+                    "                        themeAccent.patternIntensity = -0.57f;\n"
+                    "                    }\n"
+                    "                }\n")
+        patched = theme_java(extra=forced('name.equals("Night") && !isHome(themeAccent)'))
+        self.assertEqual(patch.default_theme_blues(patched, COLORS_JAVA, self.FILES)["night.attheme"], ["i"])
+        for condition in ('isHome(themeAccent) && name.equals("Dark Blue") || name.equals("Night")',
+                          'name.equals("Night")'):
+            with self.subTest(condition=condition), self.assertRaises(patch.PatchError):
+                patch.default_theme_blues(theme_java(extra=forced(condition)), COLORS_JAVA, self.FILES)
 
     def test_colour_literals_left(self):
         with tempfile.TemporaryDirectory() as d:
