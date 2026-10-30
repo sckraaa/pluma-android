@@ -737,6 +737,10 @@ PALETTE_LIGHT = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
+    ("avatar_backgroundBlue", None, "#7FA082"),
+    ("avatar_background2Blue", None, "#5B7A5E"),
+    ("avatar_nameInMessageBlue", -14643754, "#4F6E52"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -9847303, "#6F8F72"),
     ("avatar_backgroundArchivedHidden", -10832396, "#6F8F72"),
@@ -844,6 +848,10 @@ PALETTE_DARK = (
     ("chats_unreadCounterText", None, "#131513"),
     ("chats_actionIcon", None, "#131513"),
     ("featuredStickers_buttonText", None, "#131513"),
+    # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
+    ("avatar_backgroundBlue", None, "#7FA082"),
+    ("avatar_background2Blue", None, "#5B7A5E"),
+    ("avatar_nameInMessageBlue", -10703382, "#9DBB9F"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", None, "#7FA082"),
     ("windowBackgroundChecked", -11632213, "#2C3A2D"),
@@ -925,6 +933,10 @@ PALETTE_DAY = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
+    ("avatar_backgroundBlue", -11491866, "#7FA082"),
+    ("avatar_background2Blue", None, "#5B7A5E"),
+    ("avatar_nameInMessageBlue", -14317866, "#4F6E52"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -12208385, "#6F8F72"),
     ("avatar_backgroundArchivedHidden", -14509328, "#6F8F72"),
@@ -1001,6 +1013,10 @@ PALETTE_ARCTIC = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
+    ("avatar_backgroundBlue", -11491866, "#7FA082"),
+    ("avatar_background2Blue", None, "#5B7A5E"),
+    ("avatar_nameInMessageBlue", -13464859, "#4F6E52"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -12208385, "#6F8F72"),
     ("avatar_backgroundArchivedHidden", None, "#6F8F72"),
@@ -1082,6 +1098,10 @@ PALETTE_NIGHT = (
     ("chats_unreadCounterText", None, "#131513"),
     ("chats_actionIcon", None, "#131513"),
     ("featuredStickers_buttonText", None, "#131513"),
+    # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
+    ("avatar_backgroundBlue", None, "#7FA082"),
+    ("avatar_background2Blue", None, "#5B7A5E"),
+    ("avatar_nameInMessageBlue", -10703382, "#9DBB9F"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -11558424, "#7FA082"),
     ("avatar_background2Saved", -15038233, "#7FA082"),
@@ -1396,6 +1416,16 @@ def telegram_blue(c):
     return c >> 24 >= 0x20 and s >= 0.3 and v >= 0.3 and 180 <= h <= 240
 
 
+# The keys of the blue one of the seven identity colours of people
+# (Theme.keys_avatar_background, keys_avatar_background2 and
+# keys_avatar_nameInMessage, index 5): names, replies, link previews and
+# avatars of the users whose id % 7 is 5 (UserObject.getColorId). The tables
+# make it the palette's sage. The accent engine skips the identity colours,
+# and so does the check, except for these keys; the other six keep
+# Telegram's colours.
+IDENTITY_SAGE = ("avatar_backgroundBlue", "avatar_background2Blue", "avatar_nameInMessageBlue")
+
+
 def default_theme_blues(theme_java, colors_java, theme_files):
     """{theme file: the keys still Telegram's blue} for the default themes,
     from the sources of Theme.java and ThemeColors.java and the theme files
@@ -1411,7 +1441,8 @@ def default_theme_blues(theme_java, colors_java, theme_files):
         for accent_id in accent_ids:
             base, accent = theme_accent(theme_java, theme, accent_id)
             colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
-            blue.update(names.get(k, k) for k, c in colours.items() if k not in excluded and telegram_blue(c))
+            blue.update(names.get(k, k) for k, c in colours.items()
+                        if (k not in excluded or names.get(k, k) in IDENTITY_SAGE) and telegram_blue(c))
         out[asset] = sorted(blue)
     return out
 
