@@ -741,6 +741,16 @@ PALETTE_LIGHT = (
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
     ("avatar_nameInMessageBlue", -14643754, "#4F6E52"),
+    # the cyan identity colour (Theme.keys_avatar_*[4]): teal, without the blue of Telegram's
+    ("avatar_backgroundCyan", None, "#5BCBC4"),
+    ("avatar_background2Cyan", None, "#2C9C98"),
+    ("avatar_nameInMessageCyan", -13655095, "#1F8A80"),
+    # Telegram's blue and light blue as plain colours (the playback speed slider, a bot's
+    # emoji status permission, the fallback of statistics chart lines) and the internal
+    # storage of the file picker: sage
+    ("color_blue", -13467675, "#5B7A5E"),
+    ("color_lightblue", -10966803, "#8FAE92"),
+    ("chat_attachGalleryBackground", None, "#5B7A5E"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -9847303, "#6F8F72"),
     ("avatar_backgroundArchivedHidden", -10832396, "#6F8F72"),
@@ -852,6 +862,15 @@ PALETTE_DARK = (
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
     ("avatar_nameInMessageBlue", -10703382, "#9DBB9F"),
+    # the cyan identity colour (Theme.keys_avatar_*[4]): teal, without the blue of Telegram's
+    ("avatar_backgroundCyan", None, "#5BCBC4"),
+    ("avatar_background2Cyan", None, "#2C9C98"),
+    # Telegram's blue and light blue as plain colours (the playback speed slider, a bot's
+    # emoji status permission, the fallback of statistics chart lines) and the internal
+    # storage of the file picker: sage
+    ("color_blue", -11362305, "#9DBB9F"),
+    ("color_lightblue", -12814100, "#7FA082"),
+    ("chat_attachGalleryBackground", -11692299, "#7FA082"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", None, "#7FA082"),
     ("windowBackgroundChecked", -11632213, "#2C3A2D"),
@@ -937,6 +956,16 @@ PALETTE_DAY = (
     ("avatar_backgroundBlue", -11491866, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
     ("avatar_nameInMessageBlue", -14317866, "#4F6E52"),
+    # the cyan identity colour (Theme.keys_avatar_*[4]): teal, without the blue of Telegram's
+    ("avatar_backgroundCyan", None, "#5BCBC4"),
+    ("avatar_background2Cyan", None, "#2C9C98"),
+    ("avatar_nameInMessageCyan", None, "#1F8A80"),
+    # Telegram's blue and light blue as plain colours (the playback speed slider, a bot's
+    # emoji status permission, the fallback of statistics chart lines) and the internal
+    # storage of the file picker: sage
+    ("color_blue", -13467675, "#5B7A5E"),
+    ("color_lightblue", -10966803, "#8FAE92"),
+    ("chat_attachGalleryBackground", None, "#5B7A5E"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -12208385, "#6F8F72"),
     ("avatar_backgroundArchivedHidden", -14509328, "#6F8F72"),
@@ -1017,6 +1046,16 @@ PALETTE_ARCTIC = (
     ("avatar_backgroundBlue", -11491866, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
     ("avatar_nameInMessageBlue", -13464859, "#4F6E52"),
+    # the cyan identity colour (Theme.keys_avatar_*[4]): teal, without the blue of Telegram's
+    ("avatar_backgroundCyan", None, "#5BCBC4"),
+    ("avatar_background2Cyan", None, "#2C9C98"),
+    ("avatar_nameInMessageCyan", None, "#1F8A80"),
+    # Telegram's blue and light blue as plain colours (the playback speed slider, a bot's
+    # emoji status permission, the fallback of statistics chart lines) and the internal
+    # storage of the file picker: sage
+    ("color_blue", -13467675, "#5B7A5E"),
+    ("color_lightblue", -10966803, "#8FAE92"),
+    ("chat_attachGalleryBackground", None, "#5B7A5E"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -12208385, "#6F8F72"),
     ("avatar_backgroundArchivedHidden", None, "#6F8F72"),
@@ -1102,6 +1141,15 @@ PALETTE_NIGHT = (
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
     ("avatar_nameInMessageBlue", -10703382, "#9DBB9F"),
+    # the cyan identity colour (Theme.keys_avatar_*[4]): teal, without the blue of Telegram's
+    ("avatar_backgroundCyan", None, "#5BCBC4"),
+    ("avatar_background2Cyan", None, "#2C9C98"),
+    # Telegram's blue and light blue as plain colours (the playback speed slider, a bot's
+    # emoji status permission, the fallback of statistics chart lines) and the internal
+    # storage of the file picker: sage
+    ("color_blue", -11362305, "#9DBB9F"),
+    ("color_lightblue", -12814100, "#7FA082"),
+    ("chat_attachGalleryBackground", -11692299, "#7FA082"),
     # soft accent: avatars, selection
     ("avatar_backgroundSaved", -11558424, "#7FA082"),
     ("avatar_background2Saved", -15038233, "#7FA082"),
@@ -1152,7 +1200,7 @@ ACCENTS = {
     # The home accent (id 9, first column) and the accent the theme starts with
     # (id 0, sixth column): sage, the bubbles of both from the theme file
     # instead of the blue to cyan of my-messages.
-    "Day": ((7, 0, "9", "9"), (0, 0, "0xFF56A2C9", "0xFF5B7A5E"), (1, 0, "0xFF6580DC", "0x00000000"),
+    "Day": ((7, 0, "9", "9"), (0, 0, "0xFF56A2C9", "0xFF4F6E52"), (1, 0, "0xFF6580DC", "0x00000000"),
             (2, 0, "0xFF3EC1D6", "0x00000000"), (7, 5, "0", "0"), (0, 5, "0xFF4C91DF", "0xFF5B7A5E")),
     # The accent the theme starts with (id 0, seventh column): sage, on the
     # light blue wallpaper colours shifted to sage as the accent engine shifts
@@ -1416,14 +1464,19 @@ def telegram_blue(c):
     return c >> 24 >= 0x20 and s >= 0.3 and v >= 0.3 and 180 <= h <= 240
 
 
-# The keys of the blue one of the seven identity colours of people
-# (Theme.keys_avatar_background, keys_avatar_background2 and
-# keys_avatar_nameInMessage, index 5): names, replies, link previews and
-# avatars of the users whose id % 7 is 5 (UserObject.getColorId). The tables
-# make it the palette's sage. The accent engine skips the identity colours,
-# and so does the check, except for these keys; the other six keep
-# Telegram's colours.
-IDENTITY_SAGE = ("avatar_backgroundBlue", "avatar_background2Blue", "avatar_nameInMessageBlue")
+# Keys the accent engine skips that the check names all the same, since the
+# tables recolour them:
+# - the blue and the cyan of the seven identity colours of people
+#   (Theme.keys_avatar_background, keys_avatar_background2 and
+#   keys_avatar_nameInMessage, indices 5 and 4): names, replies, link
+#   previews and avatars of the users whose id % 7 is 5 or 4
+#   (UserObject.getColorId), now sage and teal; the other five keep
+#   Telegram's colours;
+# - Telegram's blue and light blue as plain colours and the internal storage
+#   of the file picker.
+ALSO_CHECKED = ("avatar_backgroundBlue", "avatar_background2Blue", "avatar_nameInMessageBlue",
+                "avatar_backgroundCyan", "avatar_background2Cyan", "avatar_nameInMessageCyan",
+                "color_blue", "color_lightblue", "chat_attachGalleryBackground")
 
 
 def default_theme_blues(theme_java, colors_java, theme_files):
@@ -1442,7 +1495,7 @@ def default_theme_blues(theme_java, colors_java, theme_files):
             base, accent = theme_accent(theme_java, theme, accent_id)
             colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
             blue.update(names.get(k, k) for k, c in colours.items()
-                        if (k not in excluded or names.get(k, k) in IDENTITY_SAGE) and telegram_blue(c))
+                        if (k not in excluded or names.get(k, k) in ALSO_CHECKED) and telegram_blue(c))
         out[asset] = sorted(blue)
     return out
 

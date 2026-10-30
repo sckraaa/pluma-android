@@ -434,9 +434,8 @@ class ThemeTest(unittest.TestCase):
         # Colours for my messages, which the check does not model, stop it.
         with self.assertRaisesRegex(patch.PatchError, "my messages"):
             patch.default_theme_blues(theme_java({("Day", "9"): ("0xFF5B7A5E", "0xFF6580DC")}), COLORS_JAVA, files)
-        # An identity colour (h, excluded) is checked when it is one of the
-        # keys the tables make sage.
-        with unittest.mock.patch.object(patch, "IDENTITY_SAGE", ("h",)):
+        # A key the engine skips (h) is checked when the tables recolour it.
+        with unittest.mock.patch.object(patch, "ALSO_CHECKED", ("h",)):
             self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, files), dict.fromkeys(files, ["h"]))
             sage = {k: v + f"h={patch.argb('#7FA082')}\n" for k, v in files.items()}
             self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, sage), dict.fromkeys(files, []))
