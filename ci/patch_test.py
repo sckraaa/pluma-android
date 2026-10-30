@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import pathlib
 import re
@@ -146,7 +147,11 @@ class BrandTest(unittest.TestCase):
     def test_assets_are_rendered(self):
         res = patch.BRAND / "res"
         files = {p.relative_to(res).as_posix() for p in res.rglob("*") if p.is_file()}
-        self.assertEqual(files, set(patch.BRAND_ASSETS), "run brand/render.py and update BRAND_ASSETS")
+        self.assertEqual(files, set(patch.BRAND_ASSETS) | set(patch.BRAND_ADDED),
+                         "run brand/render.py and update BRAND_ASSETS or BRAND_ADDED")
+        self.assertFalse(set(patch.BRAND_ASSETS) & set(patch.BRAND_ADDED))
+        for rel, sha in patch.BRAND_ADDED.items():
+            self.assertEqual(hashlib.sha256((res / rel).read_bytes()).hexdigest(), sha, rel)
         for rel in files:
             if rel.endswith((".png", ".webp")):
                 data = (res / rel).read_bytes()
@@ -155,6 +160,57 @@ class BrandTest(unittest.TestCase):
         for _, _, _, _, src in patch.BRAND_LAYERS:
             groups = json.loads((patch.BRAND / src).read_text())
             self.assertEqual([g["ty"] for g in groups], ["gr"] * 4, src)
+
+    def test_devices_animation(self):
+        # The copy brand/render.py makes of the source: a Lottie animation of
+        # the size of a sticker.
+        data = (patch.BRAND / "res/raw/pluma_devices.json").read_bytes()
+        self.assertEqual(data, (patch.BRAND.parent / "lottie/pluma-devices.json").read_bytes(), "run brand/render.py")
+        anim = json.loads(data)
+        self.assertEqual((anim["w"], anim["h"]), (512, 512))
+        self.assertGreater(anim["op"], anim["ip"])
+        self.assertTrue(anim["layers"])
+
+    def test_add_asset(self):
+        rel = "raw/pluma_devices.json"
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            raw = root / patch.RES / "raw"
+            raw.mkdir(parents=True)
+            tree = patch.Tree(root)
+            with self.assertRaisesRegex(patch.PatchError, "SHA-256"):
+                patch.add_asset(tree, rel, "0" * 64)
+            # A resource of the same name, whatever its extension.
+            (raw / "pluma_devices.tgs").write_bytes(b"")
+            with self.assertRaisesRegex(patch.PatchError, "pluma_devices.tgs"):
+                patch.add_asset(tree, rel, patch.BRAND_ADDED[rel])
+            (raw / "pluma_devices.tgs").unlink()
+            patch.add_asset(tree, rel, patch.BRAND_ADDED[rel])
+            self.assertEqual((raw / "pluma_devices.json").read_bytes(), (patch.BRAND / "res" / rel).read_bytes())
+
+    def test_edit_string(self):
+        xml = ('<string name="Url">https://desktop.telegram.org/</string>\n'
+               '<string name="Info">Get it from *desktop.telegram.org*.</string>\n')
+        out = patch.edit_string(xml, "x", "Url", "https://desktop.telegram.org/", "https://pluma.chat/")
+        out = patch.edit_string(out, "x", "Info", "*desktop.telegram.org*", "*pluma.chat*")
+        self.assertEqual(out, '<string name="Url">https://pluma.chat/</string>\n'
+                              '<string name="Info">Get it from *pluma.chat*.</string>\n')
+        for key, old in (("Url", "https://desktop.telegram.org"),     # a URL is the whole text
+                         ("Info", "*getdesktop.telegram.org*"),       # the link the text marks
+                         ("Other", "https://desktop.telegram.org/")):  # no such string
+            with self.subTest(key=key), self.assertRaises(patch.PatchError):
+                patch.edit_string(xml, "x", key, old, "https://pluma.chat/")
+        with self.assertRaises(patch.PatchError):
+            patch.edit_string(xml + xml, "x", "Url", "https://desktop.telegram.org/", "https://pluma.chat/")
+
+    def test_client_links(self):
+        for key, old, new, langs in patch.CLIENT_LINKS:
+            with self.subTest(key=key, old=old):
+                self.assertLessEqual(set(langs), set(patch.STRING_RENAMES))
+                self.assertRegex(old, patch.CLIENT_SITES)
+                self.assertNotIn("telegram.org", new)
+                if key.endswith("Url"):
+                    self.assertRegex(new, r"\Ahttps://(web\.)?pluma\.chat/\Z")
 
     def test_image_size(self):
         png = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + (82).to_bytes(4, "big") + (74).to_bytes(4, "big")

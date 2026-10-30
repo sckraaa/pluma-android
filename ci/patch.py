@@ -5,10 +5,12 @@ Every change is an exact edit: the text it replaces must occur the expected
 number of times, or the whole run fails. An upstream update that moves any
 of these places stops the build here instead of producing a client that
 talks to Telegram or does not sign in. The brand assets of brand/android
-replace upstream files only when those are byte for byte the ones expected.
+replace upstream files only when those are byte for byte the ones expected,
+and add files only under names upstream does not use.
 After the edits the result is checked again (no Telegram datacenter address
-or server key is left, no Telegram name in the built-in strings, no tg://
-link scheme, no Telegram blue in the colours of the default themes).
+or server key is left, no Telegram name and no link to Telegram's desktop
+and web clients in the built-in strings, no tg:// link scheme, no Telegram
+blue in the colours of the default themes).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -447,6 +449,12 @@ BRAND_ASSETS = {
     "raw/qr_logo.svg": "b40b79aba680695563c4e788cf51dc087cdd496faa667a2679b1b4fde49de470",
     "raw/round_blur_overlay_text.png": "8484201589fbb2eaa7efb62f438992814f4e2804f3a5a1660744d9fbbc7365da",
 }
+# Files of brand/android/res the patch adds, by their own SHA-256: no upstream
+# resource may have the name. The laptop animation of Settings > Devices
+# (brand/lottie, brand_devices).
+BRAND_ADDED = {
+    "raw/pluma_devices.json": "287368fa82b029ea22b0b7ee0a28654d48557c9eb8f672afd08bddfe759020a7",
+}
 # Logo layers of upstream animations the shapes of a brand/android file
 # replace: (animation, its SHA-256, the layer's name and index, the file).
 # "Link desktop device": the logo over the oval. The call-log permission
@@ -458,6 +466,111 @@ BRAND_LAYERS = (
     ("raw/calls_log.json", "2cbcb5bf3fa757f613e35420704bb4a4fe518e2fff4e23d15a99d6dec87fd6cd", "Shape", 2,
      "calls_log_logo.json"),
 )
+
+# Settings > Devices: the laptop animation over "Link Desktop Device". Upstream
+# shows the seventh sticker of the set tg_placeholders_android, which it asks
+# the server for; the Pluma server has no such set, so the place stays empty.
+# ScanQRCodeView plays the bundled animation of BRAND_ADDED instead, the way
+# the sticker played: rendered at 130 dp (the sticker's "130_130") into the
+# 120 dp view, once (auto-repeat 2), again on a tap. The sticker loading, its
+# notification and the imports only it used go.
+SESSIONS = f"{JAVA}/ui/SessionsActivity.java"
+SESSIONS_EDITS = (
+    ("import android.widget.FrameLayout;\n",
+     "import android.widget.FrameLayout;\nimport android.widget.ImageView;\n", 1),
+    ("import org.telegram.messenger.DocumentObject;\n", "", 1),
+    ("import org.telegram.messenger.ImageLocation;\n", "", 1),
+    ("import org.telegram.messenger.MediaDataController;\n", "", 1),
+    ("import org.telegram.messenger.SvgHelper;\n", "", 1),
+    ("import org.telegram.ui.Components.BackupImageView;\n", "", 1),
+    ("import org.telegram.ui.Components.RecyclerListView;\n",
+     "import org.telegram.ui.Components.RLottieImageView;\nimport org.telegram.ui.Components.RecyclerListView;\n", 1),
+    ("    private class ScanQRCodeView extends FrameLayout implements NotificationCenter.NotificationCenterDelegate {\n"
+     "\n"
+     "        BackupImageView imageView;\n",
+     "    private class ScanQRCodeView extends FrameLayout {\n"
+     "\n"
+     "        RLottieImageView imageView;\n", 1),
+    ("            imageView = new BackupImageView(context);\n"
+     "            addView(imageView, LayoutHelper.createFrame(120, 120, Gravity.CENTER_HORIZONTAL, 0, 16, 0, 0));\n",
+     "            // pluma: the bundled animation, not a sticker of Telegram's server.\n"
+     "            imageView = new RLottieImageView(context);\n"
+     "            imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);\n"
+     "            imageView.setAnimation(R.raw.pluma_devices, 130, 130);\n"
+     "            imageView.getAnimatedDrawable().setAutoRepeat(2);\n"
+     "            imageView.playAnimation();\n"
+     "            addView(imageView, LayoutHelper.createFrame(120, 120, Gravity.CENTER_HORIZONTAL, 0, 16, 0, 0));\n", 1),
+    ("imageView.getImageReceiver().getLottieAnimation()", "imageView.getAnimatedDrawable()", 4),
+    ("            addView(buttonTextView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 48, Gravity.BOTTOM, 16, 15, 16, 16));\n"
+     "\n"
+     "            setSticker();\n"
+     "        }\n",
+     "            addView(buttonTextView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 48, Gravity.BOTTOM, 16, 15, 16, 16));\n"
+     "        }\n", 1),
+    ("\n"
+     "        @Override\n"
+     "        protected void onAttachedToWindow() {\n"
+     "            super.onAttachedToWindow();\n"
+     "            setSticker();\n"
+     "            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.diceStickersDidLoad);\n"
+     "        }\n"
+     "\n"
+     "        @Override\n"
+     "        protected void onDetachedFromWindow() {\n"
+     "            super.onDetachedFromWindow();\n"
+     "            NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.diceStickersDidLoad);\n"
+     "        }\n"
+     "\n"
+     "        @Override\n"
+     "        public void didReceivedNotification(int id, int account, Object... args) {\n"
+     "            if (id == NotificationCenter.diceStickersDidLoad) {\n"
+     "                String name = (String) args[0];\n"
+     "                if (AndroidUtilities.STICKERS_PLACEHOLDER_PACK_NAME.equals(name)) {\n"
+     "                    setSticker();\n"
+     "                }\n"
+     "            }\n"
+     "        }\n"
+     "\n"
+     "        private void setSticker() {\n"
+     "            String imageFilter = null;\n"
+     "            TLRPC.Document document = null;\n"
+     "            TLRPC.TL_messages_stickerSet set = null;\n"
+     "\n"
+     "            set = MediaDataController.getInstance(currentAccount).getStickerSetByName(AndroidUtilities.STICKERS_PLACEHOLDER_PACK_NAME);\n"
+     "            if (set == null) {\n"
+     "                set = MediaDataController.getInstance(currentAccount).getStickerSetByEmojiOrName(AndroidUtilities.STICKERS_PLACEHOLDER_PACK_NAME);\n"
+     "            }\n"
+     "            if (set != null && set.documents.size() > 6) {\n"
+     "                document = set.documents.get(6);\n"
+     "            }\n"
+     '            imageFilter = "130_130";\n'
+     "\n"
+     "            SvgHelper.SvgDrawable svgThumb = null;\n"
+     "            if (document != null) {\n"
+     "                svgThumb = DocumentObject.getSvgThumb(document.thumbs, Theme.key_emptyListPlaceholder, 0.2f);\n"
+     "            }\n"
+     "            if (svgThumb != null) {\n"
+     "                svgThumb.overrideWidthAndHeight(512, 512);\n"
+     "            }\n"
+     "\n"
+     "            if (document != null) {\n"
+     "                ImageLocation imageLocation = ImageLocation.getForDocument(document);\n"
+     '                imageView.setImage(imageLocation, imageFilter, "tgs", svgThumb, set);\n'
+     "                imageView.getImageReceiver().setAutoRepeat(2);\n"
+     "            } else {\n"
+     "                MediaDataController.getInstance(currentAccount).loadStickersByEmojiOrName(AndroidUtilities.STICKERS_PLACEHOLDER_PACK_NAME, false, set == null);\n"
+     "            }\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "    private void openCameraScanActivity() {\n",
+     "    }\n"
+     "\n"
+     "    private void openCameraScanActivity() {\n", 1),
+)
+# What only the sticker used: none of it may be left in the file.
+SESSIONS_GONE = ("BackupImageView", "DocumentObject", "ImageLocation", "MediaDataController", "SvgHelper",
+                 "STICKERS_PLACEHOLDER_PACK_NAME", "diceStickersDidLoad", "setSticker")
 
 # Built-in strings. Whole-word "Telegram" and "TELEGRAM" in the text of the
 # strings (never in keys or tags) become "Pluma" and "PLUMA"; URLs
@@ -507,6 +620,27 @@ JAVA_NAMES = (
     ("ui/NewContactBottomSheet.java", '"This phone number is on Telegram."', '"This phone number is on Pluma."', 1),
     ("ui/ThemePreviewActivity.java", '"Telegram Beta Chat"', '"Pluma Beta Chat"', 1),
 )
+# The QR login's links to the desktop and web clients, the one exception to
+# keeping telegram.org: Pluma's site and its web client (the owner's
+# decision). The steps of "Link Desktop Device" (ActionIntroActivity), the
+# text under the laptop of Settings > Devices (SessionsActivity) and the
+# scanner's hint (CameraScanActivity) show them. Each entry: the key, the
+# upstream text, the new one, and the language folders whose strings.xml have
+# it; no other folder may have the key. A URL is the whole text; in a
+# sentence, the link is what the code turns into one, between asterisks.
+LINK_LANGUAGES = ("values", "values-ar", "values-de", "values-es", "values-it", "values-ko", "values-nl", "values-pt-rBR")
+CLIENT_LINKS = (
+    ("AuthAnotherClientDownloadClientUrl", "https://getdesktop.telegram.org/", "https://pluma.chat/", ("values",)),
+    ("AuthAnotherClientDownloadClientUrl", "https://desktop.telegram.org", "https://pluma.chat/", ("values-ar",)),
+    ("AuthAnotherClientDownloadClientUrl", "https://desktop.telegram.org/", "https://pluma.chat/", LINK_LANGUAGES[2:]),
+    ("AuthAnotherWebClientUrl", "https://web.telegram.org/", "https://web.pluma.chat/", LINK_LANGUAGES),
+    ("AuthAnotherClientInfo1", "*getdesktop.telegram.org*", "*pluma.chat*", ("values",)),
+    ("AuthAnotherClientInfo1", "*desktop.telegram.org*", "*pluma.chat*", LINK_LANGUAGES[1:]),
+    ("AuthAnotherClientInfo5", "*getdesktop.telegram.org*", "*pluma.chat*", ("values",)),
+    ("AuthAnotherClientInfo5", "*web.telegram.org*", "*web.pluma.chat*", ("values",)),
+)
+# Telegram's client sites, which no built-in string may name after the edits.
+CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 
 # Deep links: plm:// instead of tg://. Every "tg: and "tg" literal of these
 # files is the link scheme; the counts are those of the upstream (after the
@@ -997,6 +1131,21 @@ def rename_strings(xml, local_names=()):
     return ELEMENT_TEXT.sub(element, xml), counts
 
 
+def edit_string(xml, rel, key, old, new):
+    """Replaces old in the text of the string key, which the file must have
+    once: old is the whole text (a URL), or a link the text marks with
+    asterisks, there once."""
+    found = re.findall(rf'<string name="{re.escape(key)}">([^<]*)</string>', xml)
+    if len(found) != 1:
+        raise PatchError(f"{rel}: {len(found)} strings {key}, expected 1")
+    text = found[0]
+    marked = old.startswith("*") and old.endswith("*")
+    if (text.count(old) != 1) if marked else (text != old):
+        raise PatchError(f"{rel}: {key} is {text!r}, expected {old!r} in it; upstream changed it")
+    element = f'<string name="{key}">{text}</string>'
+    return xml.replace(element, f'<string name="{key}">{text.replace(old, new)}</string>')
+
+
 def _accent_arrays(text, theme):
     """The accent arrays of a theme in Theme.java: (start, end, the lines from
     start to end, the indices of the 11 array lines among them)."""
@@ -1066,8 +1215,10 @@ def edit_attheme(text, name, table, known_keys):
 def brand(tree):
     brand_entry_points(tree)
     brand_strings(tree)
+    brand_client_links(tree)
     brand_scheme(tree)
     brand_assets(tree)
+    brand_devices(tree)
     brand_theme(tree)
 
 
@@ -1122,6 +1273,19 @@ def brand_strings(tree):
         tree.replace(f"{JAVA}/{rel}", old, new, count)
 
 
+def brand_client_links(tree):
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    for key in sorted({key for key, _, _, _ in CLIENT_LINKS}):
+        want = {lang for k, _, _, langs in CLIENT_LINKS if k == key for lang in langs}
+        have = {lang for lang, rel in files.items() if f'<string name="{key}">' in tree.read(rel)}
+        if have != want:
+            raise PatchError(f"{RES}: {key} in {', '.join(sorted(have))}, expected {', '.join(sorted(want))}; "
+                             "upstream changed it")
+    for key, old, new, langs in CLIENT_LINKS:
+        for lang in langs:
+            tree.write(files[lang], edit_string(tree.read(files[lang]), files[lang], key, old, new))
+
+
 def brand_scheme(tree):
     for rel, (colon, bare) in SCHEME_JAVA.items():
         tree.replace(f"{JAVA}/{rel}", '"tg:', '"plm:', colon)
@@ -1134,10 +1298,30 @@ def brand_scheme(tree):
     tree.replace(f"{RES}/xml/shortcuts.xml", 'android:value="tg://', 'android:value="plm://', count=6)
 
 
+def add_asset(tree, rel, sha):
+    """Adds brand/android/res/<rel>, the file BRAND_ADDED names, as a resource
+    upstream does not have. R.raw.qr_login is raw/qr_login.json: no upstream
+    file of the folder may have the name, whatever its extension."""
+    data = (BRAND / "res" / rel).read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise PatchError(f"brand/android/res/{rel}: not the file BRAND_ADDED names (SHA-256)")
+    dst = tree.root / RES / rel
+    if not dst.parent.is_dir():
+        raise PatchError(f"{RES}/{pathlib.PurePosixPath(rel).parent}: missing; upstream changed it")
+    name = dst.name.split(".")[0]
+    taken = sorted(p.name for p in dst.parent.iterdir() if p.name.split(".")[0] == name)
+    if taken:
+        raise PatchError(f"{RES}/{rel}: upstream has {', '.join(taken)} now; the name of the brand file must change")
+    dst.write_bytes(data)
+
+
 def brand_assets(tree):
     have = {p.relative_to(BRAND / "res").as_posix() for p in (BRAND / "res").rglob("*") if p.is_file()}
-    if have != set(BRAND_ASSETS):
-        raise PatchError(f"brand/android/res and BRAND_ASSETS differ: {sorted(have ^ set(BRAND_ASSETS))}")
+    want = set(BRAND_ASSETS) | set(BRAND_ADDED)
+    if have != want:
+        raise PatchError(f"brand/android/res and BRAND_ASSETS, BRAND_ADDED differ: {sorted(have ^ want)}")
+    for rel, sha in sorted(BRAND_ADDED.items()):
+        add_asset(tree, rel, sha)
     for rel, sha in sorted(BRAND_ASSETS.items()):
         dst = tree.root / RES / rel
         if not dst.is_file() or hashlib.sha256(dst.read_bytes()).hexdigest() != sha:
@@ -1164,6 +1348,15 @@ def brand_assets(tree):
     tree.replace(f"{JAVA}/ui/IntroActivity.java",
                  "paint.setColor(ThemeColors.TELEGRAM_COLOR); // It's logo color, it should not be colored by the theme",
                  "paint.setColor(0xFFFFFFFF); // pluma: the white disc of the app icon, under the mark")
+
+
+def brand_devices(tree):
+    for old, new, count in SESSIONS_EDITS:
+        tree.replace(SESSIONS, old, new, count)
+    text = tree.read(SESSIONS)
+    for name in SESSIONS_GONE:
+        if re.search(rf"\b{name}\b", text):
+            raise PatchError(f"{SESSIONS}: {name} is still used; upstream changed it")
 
 
 def brand_theme(tree):
@@ -1242,14 +1435,18 @@ def brand_theme(tree):
 
 
 def verify_brand(tree):
-    for rel, sha in BRAND_ASSETS.items():
+    for rel in sorted(set(BRAND_ASSETS) | set(BRAND_ADDED)):
         if (tree.root / RES / rel).read_bytes() != (BRAND / "res" / rel).read_bytes():
             raise PatchError(f"{RES}/{rel}: not the brand asset")
     for p in sorted((tree.root / RES).glob("values*/strings.xml")):
         for m in ELEMENT_TEXT.finditer(p.read_text(encoding="utf-8")):
-            left = TELEGRAM_WORD.search(m.group(0)) or re.search("|".join(LOCAL_NAMES), m.group(0))
+            left = (TELEGRAM_WORD.search(m.group(0)) or re.search("|".join(LOCAL_NAMES), m.group(0))
+                    or CLIENT_SITES.search(m.group(0)))
             if left:
                 raise PatchError(f"{p.relative_to(tree.root)}: {left.group(0)!r} is still in {m.group(0)[:80]!r}")
+    sessions = tree.read(SESSIONS)
+    if sessions.count("R.raw.pluma_devices") != 1 or "STICKERS_PLACEHOLDER_PACK_NAME" in sessions:
+        raise PatchError(f"{SESSIONS}: Settings > Devices does not play the bundled animation")
     found = {}
     for p in sorted((tree.root / JAVA).rglob("*.java")):
         n = len(SCHEME_LITERAL.findall(p.read_text(encoding="utf-8")))

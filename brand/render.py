@@ -7,7 +7,9 @@ writes brand/android/res, the files ci/patch.py copies over the upstream
 resources of the same name (sizes and formats as upstream has them), and
 brand/android/qr_login_logo.json and calls_log_logo.json, the shapes
 ci/patch.py puts into the logo layers of the upstream raw/qr_login.json and
-raw/calls_log.json animations.
+raw/calls_log.json animations. One file is copied, not drawn: the laptop
+animation of Settings > Devices, brand/lottie/pluma-devices.json, becomes
+res/raw/pluma_devices.json, a resource upstream does not have.
 
 Bitmaps go through rsvg-convert (PNG) and cwebp (lossless WebP); vector
 drawables, Lottie animations and the SVG for the QR code centre are written
@@ -478,6 +480,9 @@ def main():
     s = 24 / reach
     text("calls_log_logo.json", json.dumps(
         lottie_groups(mono, s, -CENTRE[0] * s, -CENTRE[1] * s, WHITE), separators=(",", ":")) + "\n")
+
+    # The laptop animation of Settings > Devices, as it is (README, Branding).
+    shutil.copyfile(BRAND / "lottie" / "pluma-devices.json", RES / "raw" / "pluma_devices.json")
 
     files = sorted(p.relative_to(OUT) for p in OUT.rglob("*") if p.is_file())
     print(f"render: {len(files)} files in {OUT.relative_to(BRAND.parent)}")
