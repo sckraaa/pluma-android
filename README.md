@@ -16,8 +16,15 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - The ABIs come from `config/app.env`: `arm64-v8a`, plus `x86_64` for an emulator.
 - **Firebase.** The patch uses the given Firebase config, or a placeholder when none is given. With the placeholder there are no push notifications.
 - **Brand.** Name, logo, link scheme and colours are Pluma's; see [Branding](#branding).
+- **Birthdays.** The notice over the chat list of the contacts whose birthday is today shows although Pluma sells no Premium; upstream shows it only while Premium can be bought. It keeps Telegram's title, avatars and close button, and leads to the chat instead of the Premium gift sheet (task 020 of the server repository):
+  - one contact: a tap opens the chat with them;
+  - several: a tap lists them with their avatars, and a tap on one opens the chat with them;
+  - its second line reads "Send Message" (the string `SendMessage`) instead of "Send them a Gift.";
+  - closing it hides it as upstream does, without the toast that Premium can be gifted later in Settings, which has no such row in Pluma;
+  - it no longer preloads the star gifts.
+  - the chat it opens and the contact's profile offer no gift either: upstream checks there that Premium can be bought (`ChatActivityEnterView`, `ProfileActivity`).
 
-After the edits, the result is checked again: no Telegram datacenter address or server key may remain, no "Telegram" and no link to Telegram's desktop or web client in the text of the built-in strings, no `tg:` link scheme, and no Telegram blue in the built-in themes. For that last check the patch works out the colour the theme engine gives each key of the five themes, with every accent a theme shows before the user picks a colour, and fails on any blue outside the keys the engine leaves alone (user colours, calls, statistics, Premium, stories).
+After the edits, the result is checked again: no Telegram datacenter address or server key may remain, no "Telegram" and no link to Telegram's desktop or web client in the text of the built-in strings, no `tg:` link scheme, nothing in the birthday notice that leads to Premium or gifts, and no Telegram blue in the built-in themes. For that last check the patch works out the colour the theme engine gives each key of the five themes, with every accent a theme shows before the user picks a colour, and fails on any blue outside the keys the engine leaves alone (user colours, calls, statistics, Premium, stories).
 
 ## Branding
 

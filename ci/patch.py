@@ -10,7 +10,8 @@ and add files only under names upstream does not use.
 After the edits the result is checked again (no Telegram datacenter address
 or server key is left, no Telegram name and no link to Telegram's desktop
 and web clients in the built-in strings, no tg:// link scheme, no Telegram
-blue in the colours of the default themes).
+blue in the colours of the default themes, a birthday notice that leads to
+the chat rather than to gifts).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -377,7 +378,107 @@ def patch(tree, c):
     tree.write("TMessagesProj/google-services.json",
                json.dumps(placeholder_google_services(["org.telegram.messenger"]), indent=2) + "\n")
 
+    birthdays(tree)
     brand(tree)
+
+
+# --- birthdays ---------------------------------------------------------------
+# Task 020 of the server repository: the notice over the chat list of the
+# contacts whose birthday is today (DialogsActivity.updateDialogsHint, the
+# list from contacts.getBirthdays). Upstream shows it only while Premium can
+# be bought and leads to the Premium gift sheet; Pluma sells no Premium and has
+# no gifts (help.getAppConfig sets premium_purchase_blocked), so it never
+# showed. It shows now, with Telegram's title, avatars and close button, and
+# leads to the chat (the owner's decision): with one contact a tap opens the
+# chat with them, with several it lists them in the app's peer picker
+# (ItemOptions.addChat, without the scrim, as upstream's own pickers of a peer
+# in ChannelAffiliateProgramsFragment and StarsReactionsSheet), and a tap on one
+# opens the chat. Its second line is
+# "Send Message", the label upstream gives the action that opens the chat with
+# a user, instead of "Send them a Gift." Closing it hides it as upstream does,
+# without the toast that Premium can be gifted later in Settings (Settings has
+# no such row while Premium cannot be bought), and the notice no longer
+# preloads the star gifts. The import only the gift sheet used goes.
+DIALOGS = "TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java"
+BIRTHDAY_EDITS = (
+    ("import org.telegram.ui.Gifts.GiftSheet;\n", ""),
+    ("        } else if (folderId == 0 && communityId == 0 && !getMessagesController().premiumPurchaseBlocked() && "
+     "BirthdayController.getInstance(currentAccount).contains() && "
+     '!getMessagesController().dismissedSuggestions.contains("BIRTHDAY_CONTACTS_TODAY")) {\n',
+     "        } else if (folderId == 0 && communityId == 0 && "
+     "BirthdayController.getInstance(currentAccount).contains() && "
+     '!getMessagesController().dismissedSuggestions.contains("BIRTHDAY_CONTACTS_TODAY")) {\n'
+     "            // pluma: no Premium to gift; the notice leads to the chat.\n"),
+    ("                    showDialog(new GiftSheet(getContext(), currentAccount, state.today.get(0).id, null, null).setBirthday());\n",
+     "                    presentFragment(ChatActivity.of(state.today.get(0).id));\n"),
+    ("                UserSelectorBottomSheet.open(0, state);\n",
+     "                final ItemOptions options = ItemOptions.makeOptions(this, dialogsHintCell);\n"
+     "                for (TLRPC.User user : state.today) {\n"
+     "                    options.addChat(user, false, () -> presentFragment(ChatActivity.of(user.id)));\n"
+     "                }\n"
+     "                options.setDrawScrim(false).show();\n"),
+    ("                LocaleController.formatString(users.size() == 1 ? R.string.BirthdayTodaySingleMessage2 : "
+     "R.string.BirthdayTodayMultipleMessage2)\n",
+     "                LocaleController.getString(R.string.SendMessage)\n"),
+    ('                MessagesController.getInstance(currentAccount).removeSuggestion(0, "BIRTHDAY_CONTACTS_TODAY");\n'
+     "                updateDialogsHint();\n"
+     "                BulletinFactory.of(this)\n"
+     "                        .createSimpleBulletin(R.raw.gift, LocaleController.getString(R.string.BoostingPremiumChristmasToast), 4)\n"
+     "                        .setDuration(Bulletin.DURATION_PROLONG)\n"
+     "                        .show();\n"
+     "            });\n"
+     "            StarsController.getInstance(currentAccount).loadStarGifts();\n",
+     '                MessagesController.getInstance(currentAccount).removeSuggestion(0, "BIRTHDAY_CONTACTS_TODAY");\n'
+     "                updateDialogsHint();\n"
+     "            });\n"),
+)
+# The English texts the notice shows, none of which offers a gift; other
+# languages come with the language pack. A changed text stops the build here.
+BIRTHDAY_STRINGS = (
+    '<string name="BirthdayTodaySingleTitle">It’s %s’s **birthday** today! 🎂</string>',
+    '<string name="BirthdayTodayMultipleTitle_other">%d contacts have **birthdays** today! 🎂</string>',
+    '<string name="SendMessage">Send Message</string>',
+)
+# What leads to Premium or gifts: none of it may be left in the notice.
+BIRTHDAY_GONE = ("premiumPurchaseBlocked", "GiftSheet", "UserSelectorBottomSheet", "BirthdayTodaySingleMessage2",
+                 "BirthdayTodayMultipleMessage2", "BoostingPremiumChristmasToast", "loadStarGifts")
+
+
+def birthdays(tree):
+    for old, new in BIRTHDAY_EDITS:
+        tree.replace(DIALOGS, old, new)
+    if re.search(r"\bGiftSheet\b", tree.read(DIALOGS)):
+        raise PatchError(f"{DIALOGS}: GiftSheet is still used; upstream changed it")
+    for s in BIRTHDAY_STRINGS:
+        tree.expect("TMessagesProj/src/main/res/values/strings.xml", s)
+
+
+def birthday_notice(text):
+    """The branch of DialogsActivity.updateDialogsHint that shows the birthday
+    notice, from its condition to the next branch."""
+    head = 'dismissedSuggestions.contains("BIRTHDAY_CONTACTS_TODAY")) {\n'
+    if text.count(head) != 1:
+        raise PatchError(f"{DIALOGS}: {text.count(head)} birthday notices, expected 1")
+    start = text.rindex("\n", 0, text.index(head)) + 1
+    end = text.find("\n        } else if (", start)
+    if end < 0:
+        raise PatchError(f"{DIALOGS}: the birthday notice has no next branch")
+    return text[start:end]
+
+
+def verify_birthdays(tree):
+    notice = birthday_notice(tree.read(DIALOGS))
+    for name in BIRTHDAY_GONE:
+        if name in notice:
+            raise PatchError(f"{DIALOGS}: the birthday notice still has {name}")
+    # Any other way to Premium, gifts or Stars an upstream update may add to
+    # the notice, such as PremiumPreviewFragment or StarsIntroActivity.
+    code = re.sub(r"//[^\n]*", "", notice)
+    found = re.search(r"Gift|Premium|Stars", code)
+    if found:
+        raise PatchError(f"{DIALOGS}: the birthday notice leads to {found.group()}")
+    if notice.count("presentFragment(ChatActivity.of(") != 2:
+        raise PatchError(f"{DIALOGS}: the birthday notice does not lead to the chat")
 
 
 # --- branding ----------------------------------------------------------------
@@ -1905,6 +2006,7 @@ def verify(tree, c):
     for rel in ("TMessagesProj/src/main/res/xml/auth.xml", "TMessagesProj/src/main/res/xml/sync_contacts.xml"):
         if "org.telegram.messenger" in tree.read(rel):
             raise PatchError(f"{rel}: Telegram's account type is still there")
+    verify_birthdays(tree)
     verify_brand(tree)
 
 

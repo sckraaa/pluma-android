@@ -128,6 +128,83 @@ class TreeTest(unittest.TestCase):
             patch.Tree(d)
 
 
+class BirthdaysTest(unittest.TestCase):
+    # DialogsActivity as upstream writes it, from the texts the edits expect:
+    # the imports (StarGiftSheet is another class and stays), then the
+    # birthday notice between the branches before and after it.
+    UPSTREAM = (patch.BIRTHDAY_EDITS[0][0] + "import org.telegram.ui.Stars.StarGiftSheet;\n" + "            });\n"
+                + "".join(old for old, _ in patch.BIRTHDAY_EDITS[1:]) + "        } else if (\n")
+    STRINGS = "".join(f"    {s}\n" for s in patch.BIRTHDAY_STRINGS)
+
+    def tree(self, root, dialogs, strings=None):
+        for rel, text in ((patch.DIALOGS, dialogs), ("TMessagesProj/src/main/res/values/strings.xml", strings or self.STRINGS)):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_notice_leads_to_the_chat(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), self.UPSTREAM)
+            # Upstream's notice: only while Premium can be bought, to the gift sheet.
+            with self.assertRaisesRegex(patch.PatchError, "still has premiumPurchaseBlocked"):
+                patch.verify_birthdays(tree)
+            patch.birthdays(tree)
+            patch.verify_birthdays(tree)
+            notice = patch.birthday_notice(tree.read(patch.DIALOGS))
+            self.assertIn("ItemOptions.makeOptions(this, dialogsHintCell)", notice)
+            self.assertIn("options.setDrawScrim(false).show();", notice)
+            self.assertIn("LocaleController.getString(R.string.SendMessage)", notice)
+            # The gift sheet's import goes with its only use.
+            text = tree.read(patch.DIALOGS)
+            self.assertNotRegex(text, r"\bGiftSheet\b")
+            self.assertIn("import org.telegram.ui.Stars.StarGiftSheet;\n", text)
+            # A second run finds none of the upstream texts.
+            with self.assertRaises(patch.PatchError):
+                patch.birthdays(tree)
+        for s in patch.BIRTHDAY_STRINGS:
+            self.assertNotRegex(s, r"(?i)gift")
+
+    def test_upstream_changed(self):
+        for i, (old, _) in enumerate(patch.BIRTHDAY_EDITS):
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), self.UPSTREAM.replace(old, old.replace(".", ". ", 1)))
+                with self.assertRaises(patch.PatchError):
+                    patch.birthdays(tree)
+        # The gift sheet, used elsewhere in the file too: its import must stay.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), self.UPSTREAM + "        new GiftSheet(getContext(), currentAccount, 0, null, null);\n")
+            with self.assertRaisesRegex(patch.PatchError, "GiftSheet is still used"):
+                patch.birthdays(tree)
+        # The text of the notice, changed to offer a gift.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), self.UPSTREAM, self.STRINGS.replace(">Send Message<", ">Send a Gift<"))
+            with self.assertRaisesRegex(patch.PatchError, "SendMessage"):
+                patch.birthdays(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), self.UPSTREAM)
+            patch.birthdays(tree)
+            patched = tree.read(patch.DIALOGS)
+            for text, error in (
+                (patched.replace("options.setDrawScrim(false).show();\n",
+                                 "options.setDrawScrim(false).show();\n                UserSelectorBottomSheet.open(0, state);\n"),
+                 "still has UserSelectorBottomSheet"),
+                (patched.replace("options.setDrawScrim(false).show();\n",
+                                 "options.setDrawScrim(false).show();\n"
+                                 "                presentFragment(new PremiumPreviewFragment(\"birthday\"));\n"),
+                 "leads to Premium"),
+                (patched.replace("presentFragment(ChatActivity.of(state.today.get(0).id));", "return;"), "does not lead"),
+                (patched.replace("presentFragment(ChatActivity.of(user.id))", "options.dismiss()"), "does not lead"),
+                (patched + patched, "2 birthday notices"),
+            ):
+                with self.subTest(error=error):
+                    self.assertNotEqual(text, patched)
+                    tree.write(patch.DIALOGS, text)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_birthdays(tree)
+
+
 class BrandTest(unittest.TestCase):
     def test_rename_strings(self):
         xml = ('<string name="TelegramFAQ">Telegram FAQ</string>\n'
