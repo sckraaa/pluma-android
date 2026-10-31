@@ -7,9 +7,11 @@ writes brand/android/res, the files ci/patch.py copies over the upstream
 resources of the same name (sizes and formats as upstream has them), and
 brand/android/qr_login_logo.json and calls_log_logo.json, the shapes
 ci/patch.py puts into the logo layers of the upstream raw/qr_login.json and
-raw/calls_log.json animations. One file is copied, not drawn: the laptop
-animation of Settings > Devices, brand/lottie/pluma-devices.json, becomes
-res/raw/pluma_devices.json, a resource upstream does not have.
+raw/calls_log.json animations. Two resources upstream does not have are
+added: the laptop animation of Settings > Devices, copied from
+brand/lottie/pluma-devices.json to res/raw/pluma_devices.json, and the mark
+writing itself on page 1 of the intro, res/raw/pluma_mark_write.json, which
+brand/mark_write.py writes from pluma-mark.svg.
 
 Bitmaps go through rsvg-convert (PNG) and cwebp (lossless WebP); vector
 drawables, Lottie animations and the SVG for the QR code centre are written
@@ -420,13 +422,11 @@ def main():
             ext = "webp" if dens in ("mdpi", "hdpi") else "png"
             r.bitmap(f"drawable-{dens}/logo_middle.{ext}", n, n, round_icon(n))
 
-            # Intro sphere texture: 82x74 units centred on the sphere (patch.py
-            # drops the plane's off-centre anchor), the sphere white.
-            w, h = round(82 * k), round(74 * k)
-            reach_x = max(CENTRE[0] - x0, x1 - CENTRE[0])
-            reach_y = max(CENTRE[1] - y0, y1 - CENTRE[1])
-            s = 0.98 * min(41 / reach_x, 37 / reach_y) * k
-            r.bitmap(f"drawable-{dens}/intro_tg_plane.webp", w, h, mark_elements(mark, s, w / 2, h / 2))
+            # Intro plane texture (82x74 units): none. Page 1 shows the mark
+            # writing itself (pluma_mark_write.json, below) and the patched
+            # renderer draws no plane; upstream still loads the texture, and
+            # the empty one keeps Telegram's plane out of the APK.
+            r.bitmap(f"drawable-{dens}/intro_tg_plane.webp", round(82 * k), round(74 * k), [])
 
         # Round video watermark text ("TELEGRAM" along the edge): none.
         r.bitmap("raw/round_blur_overlay_text.png", 248, 248, [])
@@ -483,6 +483,11 @@ def main():
 
     # The laptop animation of Settings > Devices, as it is (README, Branding).
     shutil.copyfile(BRAND / "lottie" / "pluma-devices.json", RES / "raw" / "pluma_devices.json")
+
+    # Page 1 of the intro: the mark writing itself, the site's writeMark() as a
+    # Lottie animation on the kit's 512 grid (README, Branding).
+    subprocess.run([sys.executable, "-I", str(BRAND / "mark_write.py"), str(SVG / "pluma-mark.svg"),
+                    str(RES / "raw" / "pluma_mark_write.json")], check=True)
 
     files = sorted(p.relative_to(OUT) for p in OUT.rglob("*") if p.is_file())
     print(f"render: {len(files)} files in {OUT.relative_to(BRAND.parent)}")

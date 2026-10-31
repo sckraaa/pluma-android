@@ -3,6 +3,7 @@ import hashlib
 import json
 import pathlib
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -39,6 +40,35 @@ MIGJAoGBAMBvrxwgy0g1WuxFbnjB79af4juEIO3ZXfx30SS/tndZtRAb4XJuUkTj
 uONmIsoK45uRKr4M3ALh8hMjCUXWfEOJAcd/CQjW5Iki3JK6DDkh9vZnPdM0vYv9
 mYMNNrfzbwRjZeV714GXl0lT5km9M59gELCLwoFVOeKaLC400rX9AgMBAAE=
 -----END RSA PUBLIC KEY-----"""
+
+
+# The mark writing itself on page 1 of the intro, as brand/mark_write.py writes it.
+MARK_WRITE_SHA256 = "f5d89139ddab9cc3d1ffb2ec42c574307c37e92eb92f5d2413e8fc0855221c41"
+
+
+def intro_text():
+    """What the intro edits write into IntroActivity."""
+    return "".join(new for rel, _, new in patch.INTRO_EDITS if rel == patch.INTRO)
+
+
+def intro_method(name):
+    """The method of IntroActivity of this name, as the edits write it."""
+    found = re.findall(rf"\n    private \w+ {name}\([^)]*\) {{\n.*?\n    }}\n", intro_text(), re.S)
+    if len(found) != 1:
+        raise AssertionError(f"{name}: {len(found)} methods in the intro edits")
+    return found[0]
+
+
+def intro_constants(*names):
+    """The values of IntroActivity's constants of these names, as the edits write them."""
+    text = intro_text()
+    out = []
+    for name in names:
+        found = re.findall(rf"\b{name} = ([\d.]+)f?[,;]", text)
+        if len(found) != 1:
+            raise AssertionError(f"{name}: {len(found)} definitions in the intro edits")
+        out.append(float(found[0]))
+    return out
 
 
 def fingerprint(pem):
@@ -249,6 +279,38 @@ class BrandTest(unittest.TestCase):
         self.assertGreater(anim["op"], anim["ip"])
         self.assertTrue(anim["layers"])
 
+    def test_mark_write_animation(self):
+        # brand/mark_write.py writes the same bytes from the kit's mark again,
+        # the file BRAND_ADDED names, and prints the resting ink box the intro
+        # lays the mark out by.
+        rel = "raw/pluma_mark_write.json"
+        data = (patch.BRAND / "res" / rel).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), MARK_WRITE_SHA256)
+        self.assertEqual(patch.BRAND_ADDED[rel], MARK_WRITE_SHA256)
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "mark_write.json"
+            run = subprocess.run([sys.executable, "-I", str(patch.BRAND.parent / "mark_write.py"),
+                                  str(patch.BRAND.parent / "svg/pluma-mark.svg"), str(out)],
+                                 check=True, capture_output=True, text=True)
+            self.assertEqual(out.read_bytes(), data, "run brand/render.py")
+        box = re.search(r"resting ink box x ([\d.]+)\.\.([\d.]+) y ([\d.]+)\.\.([\d.]+)", run.stdout)
+        self.assertIsNotNone(box, run.stdout)
+        self.assertEqual(intro_constants("MARK_INK_LEFT", "MARK_INK_RIGHT", "MARK_INK_TOP", "MARK_INK_BOTTOM"),
+                         [float(v) for v in box.groups()])
+        # What IntroActivity relies on: the kit's grid and frame rate, the
+        # layer names it recolours, the kit's light ink drawn first.
+        anim = json.loads(data)
+        self.assertEqual((anim["w"], anim["h"], anim["fr"], anim["ip"], anim["op"]), (512, 512, 60, 0, 132))
+        self.assertEqual(intro_constants("MARK_GRID"), [512])
+        self.assertEqual([layer["nm"] for layer in anim["layers"]], ["Quill", "Feather1", "Feather2", "Feather3", "Ring"])
+        self.assertEqual(re.findall(r'"(\w+)\.\*\*"', intro_text()), ["Ring", "Feather1", "Feather2", "Feather3"])
+        inks = []
+        for name in ("Ring", "Feather1", "Feather2", "Feather3"):
+            layer = patch.brand_layer(anim, rel, name, None)
+            stroke = [it for it in layer["shapes"][0]["it"] if it["ty"] == "st"]
+            inks.append("#%02X%02X%02X" % tuple(int(c * 255) for c in stroke[0]["c"]["k"][:3]))
+        self.assertEqual(inks, ["#111111", "#4A4A4A", "#8A8A8A", "#BDBDBD"])
+
     def test_add_asset(self):
         rel = "raw/pluma_devices.json"
         with tempfile.TemporaryDirectory() as d:
@@ -382,6 +444,136 @@ class BrandTest(unittest.TestCase):
                 for telegram, pluma in ends:
                     self.assertGreaterEqual(contrast(colour(new), pluma), contrast(colour(old), telegram),
                                             f"{name} {key}")
+
+
+class IntroTest(unittest.TestCase):
+    # IntroActivity and IntroRenderer.c as upstream writes them, from the texts
+    # the edits expect.
+    UPSTREAM = {rel: "".join(old + "\n" for r, old, _ in patch.INTRO_EDITS if r == rel)
+                for rel in (patch.INTRO, patch.INTRO_RENDERER)}
+    UPSTREAM[patch.INTRO_RENDERER] += patch.INTRO_PACE[1]
+
+    def tree(self, root, texts=None):
+        for rel, text in (texts or self.UPSTREAM).items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_page_one_shows_the_mark(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            # Upstream's page 1: the disc and the plane, the old layout.
+            with self.assertRaisesRegex(patch.PatchError, "is still there"):
+                patch.verify_intro(tree)
+            patch.brand_intro(tree)
+            patch.verify_intro(tree)
+            renderer = tree.read(patch.INTRO_RENDERER)
+            self.assertNotIn("telegram_sphere", renderer)
+            self.assertNotIn("telegram_plane", renderer)
+            # The speedometer of page 2 fades out on page 1 and in on page 2,
+            # with no disc over it, at the pace the mark crosses with.
+            self.assertIn("fast_body.params.alpha = t(1, 0, 0, duration_const, Linear);", renderer)
+            self.assertIn("fast_body.params.alpha = t(0, 1, 0, duration_const, Linear);", renderer)
+            self.assertNotIn("fast_body.params.alpha = 1;", renderer)
+            self.assertEqual(patch.INTRO_PACE, (patch.INTRO_RENDERER, "static float duration_const = 0.3f;\n"))
+            self.assertEqual(intro_constants("MARK_FADE_MS"), [300])
+            # A second run finds none of the upstream texts.
+            with self.assertRaises(patch.PatchError):
+                patch.brand_intro(tree)
+
+    def test_layout(self):
+        # Layout B, its three numbers on one line: the mark's ink 128 dp high,
+        # 32 dp over the wordmark, the group from the mark to the dots at 44 %
+        # of the free space; the start button 24 dp over the navigation bar.
+        self.assertEqual(intro_constants("MARK_DP", "MARK_GAP_DP", "MARK_BIAS", "BUTTON_BOTTOM_DP"), [128, 32, 0.44, 24])
+        self.assertEqual(len(re.findall(r"\bfloat MARK_DP = [\d.]+, MARK_GAP_DP = [\d.]+, MARK_BIAS = [\d.]+f;\n",
+                                        intro_text())), 1)
+        # The kit's ink, light and dark.
+        text = intro_text()
+        self.assertIn("MARK_INK_LIGHT = {0xFF111111, 0xFF4A4A4A, 0xFF8A8A8A, 0xFFBDBDBD};", text)
+        self.assertIn("MARK_INK_DARK = {0xFFE8ECE8, 0xFFBDBDBD, 0xFF8A8A8A, 0xFF6B6F6B};", text)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.INTRO_EDITS):
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                texts = dict(self.UPSTREAM)
+                texts[rel] = texts[rel].replace(old, re.sub(r"(\S)", r"\1 ", old, count=1))
+                with self.assertRaises(patch.PatchError):
+                    patch.brand_intro(self.tree(pathlib.Path(d), texts))
+        # The pace of IntroRenderer's pictures, which the mark crosses with.
+        with tempfile.TemporaryDirectory() as d:
+            texts = dict(self.UPSTREAM)
+            texts[patch.INTRO_RENDERER] = texts[patch.INTRO_RENDERER].replace("0.3f", "0.25f")
+            with self.assertRaisesRegex(patch.PatchError, "duration_const"):
+                patch.brand_intro(self.tree(pathlib.Path(d), texts))
+        # The old layout or a sprite of page 1 somewhere the edits do not reach.
+        for rel, s in patch.INTRO_GONE:
+            with self.subTest(gone=s), tempfile.TemporaryDirectory() as d:
+                texts = dict(self.UPSTREAM)
+                texts[rel] += s + "\n"
+                with self.assertRaisesRegex(patch.PatchError, "is still there"):
+                    patch.brand_intro(self.tree(pathlib.Path(d), texts))
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.brand_intro(tree)
+            patched = {rel: tree.read(rel) for rel in self.UPSTREAM}
+            for rel, old, new, error in (
+                (patch.INTRO_RENDERER, "        rglNormalDraw();\n    } else if (current_page == 2) {\n",
+                 "        rglNormalDraw();\n        draw_textured_shape(&telegram_sphere, main_matrix, NORMAL);\n"
+                 "    } else if (current_page == 2) {\n", "telegram_"),
+                (patch.INTRO, "showMark(i == 0, true);", "", "incomplete"),
+                (patch.INTRO, "showMark(viewPager.getCurrentItem() == 0, false);", "", "incomplete"),
+                (patch.INTRO, "R.raw.pluma_mark_write, markSize", "R.raw.sun, markSize", "incomplete"),
+            ):
+                with self.subTest(error=error, new=new):
+                    self.assertIn(old, patched[rel])
+                    tree.write(rel, patched[rel].replace(old, new))
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_intro(tree)
+                    tree.write(rel, patched[rel])
+
+    def test_every_edit_is_checked(self):
+        # verify_intro, which verify_brand runs on the patched tree, fails when
+        # any one of the edits is missing.
+        for i in range(len(patch.INTRO_EDITS)):
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                for rel, old, new in patch.INTRO_EDITS[:i] + patch.INTRO_EDITS[i + 1:]:
+                    tree.replace(rel, old, new)
+                with self.assertRaises(patch.PatchError):
+                    patch.verify_intro(tree)
+
+    def test_mark_frames(self):
+        # With the system's animations off the written mark is chosen before
+        # the view starts decoding (setAnimation). RLottieDrawable's worker
+        # reads the frame again after a decode: a frame set meanwhile would be
+        # taken for the end, and the intro would keep the decoded first frame.
+        # showMark then leaves that frame as it is.
+        text = intro_text()
+        still = "markDrawable.setCurrentFrame(markDrawable.getFramesCount() - 1, true);\n"
+        self.assertEqual(text.count(still), 1)
+        self.assertLess(text.index('new RLottieDrawable(R.raw.pluma_mark_write, "'), text.index(still))
+        self.assertLess(text.index(still), text.index("markView.setAnimation(markDrawable);\n"))
+        show = intro_method("showMark")
+        self.assertIn("            } else if (!markDrawable.isLastFrame()) {\n", show)
+        # A replay draws nothing until its first frame is decoded rather than
+        # the written mark of the time before; only that reset blanks it.
+        self.assertIn("                markDrawable.setInvalidateOnProgressSet(true);\n"
+                      "                markDrawable.setCurrentFrame(0, true, true);\n"
+                      "                markDrawable.setInvalidateOnProgressSet(false);\n"
+                      "                markView.playAnimation();\n", show)
+        self.assertEqual(text.count("setInvalidateOnProgressSet("), 2)
+        # The ink: the four layers in one decode, and only when the theme's
+        # ink changes, not at every step of an animated theme change.
+        self.assertRegex(intro_method("updateMarkInk"),
+                         r"\n        if \(ink == markInk\) \{\n            return;\n        \}\n"
+                         r"        markInk = ink;\n"
+                         r"        markDrawable\.beginApplyLayerColors\(\);\n"
+                         r"        for \([^\n]*\n            markView\.setLayerColor\([^\n]*\n        \}\n"
+                         r"        markDrawable\.commitApplyLayerColors\(\);\n    \}\n$")
+        self.assertIn("        markInk = null;\n", intro_method("releaseMark"))
 
 
 # The accents of the default themes as the patch leaves them: (id, accent, my

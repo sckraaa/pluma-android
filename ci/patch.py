@@ -552,9 +552,11 @@ BRAND_ASSETS = {
 }
 # Files of brand/android/res the patch adds, by their own SHA-256: no upstream
 # resource may have the name. The laptop animation of Settings > Devices
-# (brand/lottie, brand_devices).
+# (brand/lottie, brand_devices) and the mark writing itself on page 1 of the
+# intro (brand/mark_write.py, brand_intro).
 BRAND_ADDED = {
     "raw/pluma_devices.json": "287368fa82b029ea22b0b7ee0a28654d48557c9eb8f672afd08bddfe759020a7",
+    "raw/pluma_mark_write.json": "f5d89139ddab9cc3d1ffb2ec42c574307c37e92eb92f5d2413e8fc0855221c41",
 }
 # Logo layers of upstream animations the shapes of a brand/android file
 # replace: (animation, its SHA-256, the layer's name and index, the file).
@@ -672,6 +674,342 @@ SESSIONS_EDITS = (
 # What only the sticker used: none of it may be left in the file.
 SESSIONS_GONE = ("BackupImageView", "DocumentObject", "ImageLocation", "MediaDataController", "SvgHelper",
                  "STICKERS_PLACEHOLDER_PACK_NAME", "diceStickersDidLoad", "setSticker")
+
+# The intro (task 020 of the server repository). Page 1 shows Pluma's mark
+# writing itself, the site's writeMark() as the animation of BRAND_ADDED
+# (brand/mark_write.py), in the brand kit's ink for the theme, with no disc.
+# IntroActivity plays it with the app's rlottie over the GL box of the
+# pictures: when page 1 appears and again each time the user comes back to it,
+# or the written mark at once when the system's animations are off. It fades
+# with the page scroll and crosses with the pictures of the other pages in one
+# fade at their pace (duration_const, 0.3 s): the speedometer of page 2 fades
+# out as the mark fades in, and the other way round. IntroRenderer draws
+# neither the disc, the plane nor the mask of page 1 any more, and fades that
+# speedometer where the disc used to hide it. The layout
+# is layout B: the mark MARK_DP high, MARK_GAP_DP over the wordmark, the group
+# from the mark down to the dots at MARK_BIAS of the free space between the
+# status bar and the start button, which sits 24 dp over the navigation bar;
+# pages 2-6 share it, the GL box placed so that its 148-unit pictures end where
+# the mark's ink ends.
+INTRO = f"{JAVA}/ui/IntroActivity.java"
+INTRO_RENDERER = "TMessagesProj/jni/intro/IntroRenderer.c"
+INTRO_EDITS = (
+    # Page 1, back from page 2: the speedometer fades out, as the disc no
+    # longer covers it.
+    (INTRO_RENDERER,
+     "            fast_body.params.alpha = 1;\n"
+     "            fast_body.params.scale = xyzMake(scale, scale, 1);\n",
+     "            // pluma: no disc covers it; it fades out as the mark comes back.\n"
+     "            fast_body.params.alpha = t(1, 0, 0, duration_const, Linear);\n"
+     "            fast_body.params.scale = xyzMake(scale, scale, 1);\n"),
+    # Page 2, from page 1: it fades in rather than showing at once under the disc.
+    (INTRO_RENDERER,
+     "            fast_body.params.scale = xyzMake(1, 1, 1);\n"
+     "            fast_body.params.alpha = 1;\n",
+     "            fast_body.params.scale = xyzMake(1, 1, 1);\n"
+     "            // pluma: no disc over it; it fades in as the mark fades out.\n"
+     "            fast_body.params.alpha = t(0, 1, 0, duration_const, Linear);\n"),
+    # Neither the disc, the plane nor the mask that clips the plane.
+    (INTRO_RENDERER,
+     "    if (current_page == 0) {\n"
+     "        rglNormalDraw();\n"
+     "        if (direct == 0) {\n"
+     "            telegram_sphere.params.alpha = t(0, 1, 0, duration_const * 0.8f, Linear);\n"
+     "            scale = 1;\n"
+     "\n"
+     "            telegram_sphere.params.scale = xyzMake(scale, scale, 1);\n"
+     "            draw_textured_shape(&telegram_sphere, main_matrix, NORMAL);\n"
+     "\n"
+     "            float tt = MINf(0, (float) (-M_PI * 125.0f / 180.0f + time * M_PI * 2 * 1.5f));\n"
+     "            float dx = t(-75, 0, 0, 0.15f, EaseIn);\n"
+     "            float dy = t(75, 0, 0, 0.15f, EaseIn);\n"
+     "            telegram_plane.params.position = xyzMake(dx, dy, 0);\n"
+     "            float scale = t(0.1f, 1, 0.03f, 0.15f, EaseOut);\n"
+     "            telegram_plane.params.scale = xyzMake(scale, scale, 1);\n"
+     "\n"
+     "            if (tt < D2R(125)) {\n"
+     "                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);\n"
+     "                draw_textured_shape(&telegram_plane, main_matrix, NORMAL_ONE);\n"
+     "                draw_textured_shape(&telegram_mask, main_matrix, NORMAL);\n"
+     "            }\n"
+     "        }\n"
+     "    } else if (current_page == 1) {\n"
+     "        rglNormalDraw();\n"
+     "        if (direct == 1) {\n"
+     "            telegram_sphere.params.alpha = t(1, 0, 0, duration_const, Linear);\n"
+     "            draw_textured_shape(&telegram_sphere, main_matrix, NORMAL);\n"
+     "\n"
+     "            double tt = time * M_PI * 2 * 1.5f;\n"
+     "\n"
+     "            float dx = t(0, 75, 0, 0.15f, EaseOut);\n"
+     "            float dy = t(0, -75, 0, 0.15f, EaseOut);\n"
+     "\n"
+     "            telegram_plane.params.position = xyzMake(dx, dy, 0);\n"
+     "\n"
+     "            float scale = t(1, 0.1f, 0.03f, 0.15f, EaseOut);\n"
+     "            telegram_plane.params.scale = xyzMake(scale, scale, 1);\n"
+     "\n"
+     "            if (tt < D2R(125)) {\n"
+     "                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);\n"
+     "                draw_textured_shape(&telegram_plane, main_matrix, NORMAL_ONE);\n"
+     "                draw_textured_shape(&telegram_mask, main_matrix, NORMAL);\n"
+     "            }\n"
+     "        }\n"
+     "    } else if (current_page == 2) {\n",
+     "    if (current_page == 0 || current_page == 1) {\n"
+     "        // pluma: no disc and no plane; page 1 shows the mark writing itself (IntroActivity).\n"
+     "        rglNormalDraw();\n"
+     "    } else if (current_page == 2) {\n"),
+    (INTRO, "import android.view.WindowManager;\n",
+     "import android.view.WindowManager;\nimport android.view.animation.LinearInterpolator;\n"),
+    (INTRO,
+     "    private final static int ICON_WIDTH_DP = 200, ICON_HEIGHT_DP = 150;\n",
+     "    private final static int ICON_WIDTH_DP = 200, ICON_HEIGHT_DP = 150;\n"
+     "    // pluma: page 1 shows Pluma's mark writing itself (layout B of the intro). MARK_DP is the height\n"
+     "    // of the mark's ink, MARK_GAP_DP the gap from it to the wordmark, MARK_BIAS where the group from\n"
+     "    // the mark down to the page dots sits in the free space between the status bar and the start\n"
+     "    // button (0 at the top, 1 at the bottom).\n"
+     "    private final static float MARK_DP = 128, MARK_GAP_DP = 32, MARK_BIAS = 0.44f;\n"
+     "    // The resting ink of pluma_mark_write.json in its 512-unit grid, round caps included\n"
+     "    // (brand/mark_write.py prints it).\n"
+     "    private final static float MARK_GRID = 512, MARK_INK_LEFT = 79.6f, MARK_INK_TOP = 99.95f,\n"
+     "            MARK_INK_RIGHT = 433.1f, MARK_INK_BOTTOM = 405.15f;\n"
+     "    // The 148-unit pictures centred in the GL box (the speedometer of page 2) end where the mark's\n"
+     "    // ink ends; the page dots keep upstream's distance under the titles; the start button sits over\n"
+     "    // the navigation bar.\n"
+     "    private final static int PICTURE_BOTTOM_DP = (ICON_HEIGHT_DP + 148) / 2,\n"
+     "            TITLE_TO_DOTS_DP = 122 + 17 - (16 + 9), BUTTON_BOTTOM_DP = 24;\n"
+     "    // The mark crosses with the pictures at their pace (duration_const of IntroRenderer.c).\n"
+     "    private final static int MARK_FADE_MS = 300;\n"
+     "    // The layers of the animation and the kit's ink for them, the ring and then the feathers from\n"
+     "    // the nib outwards, on light and on dark paper.\n"
+     '    private final static String[] MARK_LAYERS = {"Ring.**", "Feather1.**", "Feather2.**", "Feather3.**"};\n'
+     "    private final static int[] MARK_INK_LIGHT = {0xFF111111, 0xFF4A4A4A, 0xFF8A8A8A, 0xFFBDBDBD};\n"
+     "    private final static int[] MARK_INK_DARK = {0xFFE8ECE8, 0xFFBDBDBD, 0xFF8A8A8A, 0xFF6B6F6B};\n"),
+    (INTRO,
+     "    private FrameLayout frameContainerView;\n",
+     "    private FrameLayout frameContainerView;\n"
+     "    // pluma: the mark of page 1, seen while page 1 is selected (markShown) and fading as the page\n"
+     "    // scrolls away (markScroll), in the ink it was last given (markInk).\n"
+     "    private RLottieImageView markView;\n"
+     "    private RLottieDrawable markDrawable;\n"
+     "    private ValueAnimator markAnimator;\n"
+     "    private int[] markInk;\n"
+     "    private float markShown, markScroll = 1;\n"),
+    (INTRO,
+     "        logoDrawable.setBounds(0, dp(8.666f), dp(115), dp(35));\n",
+     "        // pluma: the word starts at the top of the title, MARK_GAP_DP under the mark.\n"
+     "        logoDrawable.setBounds(0, 0, dp(115), dp(26.333f));\n"),
+    (INTRO,
+     "                int oneFourth = (bottom - top) / 4;\n"
+     "\n"
+     "                int y = (oneFourth * 3 - dp(275)) / 2;\n"
+     "                frameLayout2.layout(0, y, frameLayout2.getMeasuredWidth(), y + frameLayout2.getMeasuredHeight());\n"
+     "                y += dp(ICON_HEIGHT_DP);\n"
+     "                y += dp(122 + 17);\n"
+     "                int x = (getMeasuredWidth() - bottomPages.getMeasuredWidth()) / 2;\n"
+     "                bottomPages.layout(x, y, x + bottomPages.getMeasuredWidth(), y + bottomPages.getMeasuredHeight());\n"
+     "                viewPager.layout(0, 0, viewPager.getMeasuredWidth(), viewPager.getMeasuredHeight());\n"
+     "\n"
+     "                y = oneFourth * 3 + (oneFourth - startMessagingButton.getMeasuredHeight()) / 2;\n",
+     "                // pluma: layout B. The mark's ink ends MARK_GAP_DP over the titles, and so do the\n"
+     "                // pictures of the GL box.\n"
+     "                int title = titleTop(bottom - top);\n"
+     "                float k = markView.getMeasuredWidth() / MARK_GRID;\n"
+     "                int x = Math.round(getMeasuredWidth() / 2f - (MARK_INK_LEFT + MARK_INK_RIGHT) / 2 * k);\n"
+     "                int y = Math.round(title - dpf2(MARK_GAP_DP) - MARK_INK_BOTTOM * k);\n"
+     "                markView.layout(x, y, x + markView.getMeasuredWidth(), y + markView.getMeasuredHeight());\n"
+     "                y = title - dp(MARK_GAP_DP + PICTURE_BOTTOM_DP);\n"
+     "                frameLayout2.layout(0, y, frameLayout2.getMeasuredWidth(), y + frameLayout2.getMeasuredHeight());\n"
+     "                y = title + dp(TITLE_TO_DOTS_DP);\n"
+     "                x = (getMeasuredWidth() - bottomPages.getMeasuredWidth()) / 2;\n"
+     "                bottomPages.layout(x, y, x + bottomPages.getMeasuredWidth(), y + bottomPages.getMeasuredHeight());\n"
+     "                viewPager.layout(0, 0, viewPager.getMeasuredWidth(), viewPager.getMeasuredHeight());\n"
+     "\n"
+     "                y = buttonTop(bottom - top);\n"),
+    (INTRO,
+     "        frameLayout2.addView(textureView, LayoutHelper.createFrame(ICON_WIDTH_DP, ICON_HEIGHT_DP, Gravity.CENTER));\n",
+     "        frameLayout2.addView(textureView, LayoutHelper.createFrame(ICON_WIDTH_DP, ICON_HEIGHT_DP, Gravity.CENTER));\n"
+     "\n"
+     "        // pluma: the mark of page 1, over the GL box, which draws no disc there. The animation's\n"
+     "        // 512-unit grid is drawn at the size that makes the mark's ink MARK_DP high. A view made\n"
+     "        // again (rebuildAllFragmentViews) starts with a mark of its own.\n"
+     "        releaseMark();\n"
+     "        int markSize = dp(MARK_DP * MARK_GRID / (MARK_INK_BOTTOM - MARK_INK_TOP));\n"
+     '        markDrawable = new RLottieDrawable(R.raw.pluma_mark_write, "" + R.raw.pluma_mark_write, markSize, markSize, false, null);\n'
+     "        // With the system's animations off, the written mark. Its frame is set while nothing decodes yet\n"
+     "        // (setAnimation starts the first decode): a frame set during a decode can be lost, as that decode\n"
+     "        // then takes the new frame for the end and keeps its own.\n"
+     "        if (AndroidUtilities.getAnimatorDurationScale() == 0) {\n"
+     "            markDrawable.setCurrentFrame(markDrawable.getFramesCount() - 1, true);\n"
+     "        }\n"
+     "        markView = new RLottieImageView(context);\n"
+     "        markView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);\n"
+     "        updateMarkInk();\n"
+     "        markView.setAnimation(markDrawable);\n"
+     "        markView.setAlpha(0f);\n"
+     "        frameContainerView.addView(markView, new FrameLayout.LayoutParams(markSize, markSize));\n"),
+    (INTRO,
+     "                bottomPages.setPageOffset(position, positionOffset);\n",
+     "                bottomPages.setPageOffset(position, positionOffset);\n"
+     "                // pluma: the mark fades as page 1 scrolls away, gone at half a page.\n"
+     "                markScroll = position == 0 ? Math.max(0, 1 - 2 * positionOffset) : 0;\n"
+     "                updateMarkAlpha();\n"),
+    (INTRO,
+     "            public void onPageSelected(int i) {\n"
+     "                currentViewPagerPage = i;\n"
+     "            }\n",
+     "            public void onPageSelected(int i) {\n"
+     "                currentViewPagerPage = i;\n"
+     "                showMark(i == 0, true); // pluma: the mark of page 1\n"
+     "            }\n"),
+    (INTRO,
+     "                    int oneFourth = (bottom - top) / 4;\n"
+     "                    int y = (oneFourth * 3 - dp(275)) / 2;\n"
+     "                    y += dp(ICON_HEIGHT_DP);\n"
+     "                    y += dp(16 + 9);\n",
+     "                    int y = titleTop(bottom - top); // pluma: layout B\n"),
+    (INTRO,
+     "                viewPager.setCurrentItem(0);\n"
+     "                lastPage = 0;\n"
+     "            }\n"
+     "            justCreated = false;\n",
+     "                viewPager.setCurrentItem(0);\n"
+     "                lastPage = 0;\n"
+     "            }\n"
+     "            showMark(viewPager.getCurrentItem() == 0, false); // pluma: page 1 opens with the mark writing itself\n"
+     "            justCreated = false;\n"),
+    (INTRO,
+     "        super.onFragmentDestroy();\n"
+     "        destroyed = true;\n",
+     "        super.onFragmentDestroy();\n"
+     "        destroyed = true;\n"
+     "        releaseMark(); // pluma: the mark of page 1\n"),
+    (INTRO,
+     "    @Override\n"
+     "    public ArrayList<ThemeDescription> getThemeDescriptions() {\n",
+     "    // pluma: layout B of the intro and the mark of page 1.\n"
+     "    private int buttonTop(int height) {\n"
+     "        return height - dp(BUTTON_BOTTOM_DP) - startMessagingButton.getMeasuredHeight();\n"
+     "    }\n"
+     "\n"
+     "    // The top of the titles: the group from the mark's ink down to the page dots sits at MARK_BIAS of\n"
+     "    // the free space between the status bar and the start button, 16 dp clear of the language link\n"
+     "    // (30 dp high, 30 dp over the button).\n"
+     "    private int titleTop(int height) {\n"
+     "        float top = AndroidUtilities.isTablet() ? 0 : AndroidUtilities.statusBarHeight;\n"
+     "        float button = buttonTop(height);\n"
+     "        float group = dpf2(MARK_DP + MARK_GAP_DP + TITLE_TO_DOTS_DP) + bottomPages.getMeasuredHeight();\n"
+     "        float y = top + MARK_BIAS * Math.max(0, button - top - group);\n"
+     "        y = Math.max(top, Math.min(y, button - dpf2(30 + 30 + 16) - group));\n"
+     "        return Math.round(y + dpf2(MARK_DP + MARK_GAP_DP));\n"
+     "    }\n"
+     "\n"
+     "    // The mark shows while page 1 is selected and crosses with the pictures of IntroRenderer, which\n"
+     "    // change on selection too. Each time it comes back from hidden it writes itself again, and until\n"
+     "    // its first frame is decoded nothing is drawn rather than the written mark of the time before\n"
+     "    // (the flag is set for that reset only: start(), which the view calls again each time it is\n"
+     "    // attached, would blank the written mark too). With the system's animations off it keeps the\n"
+     "    // written mark createView chose.\n"
+     "    private void showMark(boolean show, boolean animated) {\n"
+     "        if (markAnimator != null) {\n"
+     "            markAnimator.cancel();\n"
+     "            markAnimator = null;\n"
+     "        }\n"
+     "        if (show && markShown == 0) {\n"
+     "            if (AndroidUtilities.getAnimatorDurationScale() != 0) {\n"
+     "                markDrawable.setInvalidateOnProgressSet(true);\n"
+     "                markDrawable.setCurrentFrame(0, true, true);\n"
+     "                markDrawable.setInvalidateOnProgressSet(false);\n"
+     "                markView.playAnimation();\n"
+     "            } else if (!markDrawable.isLastFrame()) {\n"
+     "                markDrawable.setCurrentFrame(markDrawable.getFramesCount() - 1, true, true);\n"
+     "            }\n"
+     "        }\n"
+     "        float shown = show ? 1 : 0;\n"
+     "        if (!animated) {\n"
+     "            markShown = shown;\n"
+     "            updateMarkAlpha();\n"
+     "            return;\n"
+     "        }\n"
+     "        markAnimator = ValueAnimator.ofFloat(markShown, shown);\n"
+     "        markAnimator.addUpdateListener(a -> {\n"
+     "            markShown = (float) a.getAnimatedValue();\n"
+     "            updateMarkAlpha();\n"
+     "        });\n"
+     "        markAnimator.setInterpolator(new LinearInterpolator());\n"
+     "        markAnimator.setDuration(MARK_FADE_MS);\n"
+     "        markAnimator.start();\n"
+     "    }\n"
+     "\n"
+     "    private void releaseMark() {\n"
+     "        if (markAnimator != null) {\n"
+     "            markAnimator.cancel();\n"
+     "            markAnimator = null;\n"
+     "        }\n"
+     "        if (markDrawable != null) {\n"
+     "            markDrawable.recycle(false);\n"
+     "        }\n"
+     "        markInk = null;\n"
+     "        markShown = 0;\n"
+     "        markScroll = 1;\n"
+     "    }\n"
+     "\n"
+     "    private void updateMarkAlpha() {\n"
+     "        markView.setAlpha(markShown * markScroll);\n"
+     "    }\n"
+     "\n"
+     "    // The four layers change together, in one decode, and only when the ink does: updateColors also\n"
+     "    // runs at every step of an animated theme change.\n"
+     "    private void updateMarkInk() {\n"
+     "        int[] ink = Theme.isCurrentThemeDark() ? MARK_INK_DARK : MARK_INK_LIGHT;\n"
+     "        if (ink == markInk) {\n"
+     "            return;\n"
+     "        }\n"
+     "        markInk = ink;\n"
+     "        markDrawable.beginApplyLayerColors();\n"
+     "        for (int i = 0; i < MARK_LAYERS.length; i++) {\n"
+     "            markView.setLayerColor(MARK_LAYERS[i], ink[i]);\n"
+     "        }\n"
+     "        markDrawable.commitApplyLayerColors();\n"
+     "    }\n"
+     "\n"
+     "    @Override\n"
+     "    public ArrayList<ThemeDescription> getThemeDescriptions() {\n"),
+    (INTRO,
+     "        darkThemeDrawable.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_featuredStickers_addButton), "
+     "PorterDuff.Mode.SRC_IN));\n",
+     "        darkThemeDrawable.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_featuredStickers_addButton), "
+     "PorterDuff.Mode.SRC_IN));\n"
+     "        updateMarkInk(); // pluma: the mark in the kit's ink for the theme\n"),
+)
+# The pace of the pictures, which the mark's fade (MARK_FADE_MS) follows.
+INTRO_PACE = (INTRO_RENDERER, "static float duration_const = 0.3f;\n")
+# What only the old layout, the wordmark's old place, the disc and plane of
+# page 1 and the speedometer shown at once under the disc had: none of it may
+# be left.
+INTRO_GONE = ((INTRO, "oneFourth"), (INTRO, "dp(275)"), (INTRO, "dp(8.666f)"),
+              (INTRO_RENDERER, "draw_textured_shape(&telegram_"), (INTRO_RENDERER, "fast_body.params.alpha = 1;"))
+# IntroActivity after the edits, each text once: the fade's interpolator, the
+# layout's numbers and the mark's fields; the wordmark at the top of the title;
+# the mark created from the bundled animation, fading with the scroll, played
+# when the page is selected and when the intro opens, released with the
+# screen; the layout and the mark's methods; the ink following the theme.
+# Together with INTRO_GONE every edit of INTRO_EDITS leaves a trace here.
+INTRO_MARK = (
+    "import android.view.animation.LinearInterpolator;\n",
+    "private final static float MARK_DP = ",
+    "private RLottieImageView markView;\n",
+    "logoDrawable.setBounds(0, 0, dp(115), dp(26.333f));\n",
+    'new RLottieDrawable(R.raw.pluma_mark_write, "" + R.raw.pluma_mark_write,',
+    "markScroll = position == 0 ? Math.max(0, 1 - 2 * positionOffset) : 0;\n",
+    "showMark(i == 0, true);",
+    "showMark(viewPager.getCurrentItem() == 0, false);",
+    "releaseMark(); // pluma: the mark of page 1\n",
+    "private int titleTop(int height) {\n",
+    "private void showMark(boolean show, boolean animated) {\n",
+    "updateMarkInk(); // pluma: the mark in the kit's ink for the theme\n",
+)
 
 # Built-in strings. Whole-word "Telegram" and "TELEGRAM" in the text of the
 # strings (never in keys or tags) become "Pluma" and "PLUMA"; URLs
@@ -1714,6 +2052,7 @@ def brand(tree):
     brand_scheme(tree)
     brand_assets(tree)
     brand_devices(tree)
+    brand_intro(tree)
     brand_theme(tree)
 
 
@@ -1836,13 +2175,6 @@ def brand_assets(tree):
     # The background of the adaptive icon: white, as in the brand kit.
     tree.replace(f"{RES}/drawable/icon_background_sa.xml", 'android:startColor="#289AD1"', 'android:startColor="#FFFFFF"')
     tree.replace(f"{RES}/drawable/icon_background_sa.xml", 'android:endColor="#38AEEB"', 'android:endColor="#FFFFFF"')
-    # The intro texture of the mark is centred; the plane was not.
-    tree.replace("TMessagesProj/jni/intro/IntroRenderer.c", "telegram_plane.params.anchor = xyzMake(6, -5, 0);",
-                 "telegram_plane.params.anchor = xyzMake(0, 0, 0); // pluma: the mark is centred in its texture")
-    # The sphere under it: the white disc of the app icon.
-    tree.replace(f"{JAVA}/ui/IntroActivity.java",
-                 "paint.setColor(ThemeColors.TELEGRAM_COLOR); // It's logo color, it should not be colored by the theme",
-                 "paint.setColor(0xFFFFFFFF); // pluma: the white disc of the app icon, under the mark")
 
 
 def brand_devices(tree):
@@ -1852,6 +2184,15 @@ def brand_devices(tree):
     for name in SESSIONS_GONE:
         if re.search(rf"\b{name}\b", text):
             raise PatchError(f"{SESSIONS}: {name} is still used; upstream changed it")
+
+
+def brand_intro(tree):
+    tree.expect(*INTRO_PACE)
+    for rel, old, new in INTRO_EDITS:
+        tree.replace(rel, old, new)
+    for rel, s in INTRO_GONE:
+        if s in tree.read(rel):
+            raise PatchError(f"{rel}: {s!r} is still there; upstream changed it")
 
 
 def brand_theme(tree):
@@ -1951,6 +2292,7 @@ def verify_brand(tree):
     sessions = tree.read(SESSIONS)
     if sessions.count("R.raw.pluma_devices") != 1 or "STICKERS_PLACEHOLDER_PACK_NAME" in sessions:
         raise PatchError(f"{SESSIONS}: Settings > Devices does not play the bundled animation")
+    verify_intro(tree)
     found = {}
     for p in sorted((tree.root / JAVA).rglob("*.java")):
         n = len(SCHEME_LITERAL.findall(p.read_text(encoding="utf-8")))
@@ -1965,6 +2307,17 @@ def verify_brand(tree):
         if brand_layer(json.loads(tree.read(rel)), rel, layer, index)["shapes"] != json.loads((BRAND / src).read_text()):
             raise PatchError(f"{rel}: the layer {layer!r} is not the brand's")
     verify_theme(tree)
+
+
+def verify_intro(tree):
+    for rel, s in INTRO_GONE:
+        if s in tree.read(rel):
+            raise PatchError(f"{rel}: {s!r} is still there")
+    intro = tree.read(INTRO)
+    for s in INTRO_MARK:
+        if intro.count(s) != 1:
+            raise PatchError(f"{INTRO}: the intro of the mark is incomplete, "
+                             f"{intro.count(s)} occurrences of {s!r}, expected 1")
 
 
 def verify_theme(tree):
