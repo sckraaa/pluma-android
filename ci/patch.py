@@ -380,6 +380,7 @@ def patch(tree, c):
 
     video_quality(tree)
     birthdays(tree)
+    sticker_sets(tree)
     brand(tree)
 
 
@@ -452,6 +453,37 @@ def birthdays(tree):
         raise PatchError(f"{DIALOGS}: GiftSheet is still used; upstream changed it")
     for s in BIRTHDAY_STRINGS:
         tree.expect("TMessagesProj/src/main/res/values/strings.xml", s)
+
+
+# updateStickerSets says which kind of sets changed (masks, emojis), as
+# updateStickerSetsOrder does; upstream reloads the stickers whatever it says,
+# so an emoji set installed or removed on another device reached this one
+# only after a restart. The kind is taken as for updateStickerSetsOrder.
+MESSAGES_CONTROLLER = "TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java"
+STICKER_SETS_OLD = (
+    "                        TL_update.TL_updateStickerSets update = (TL_update.TL_updateStickerSets) baseUpdate;\n"
+    "                        getMediaDataController().loadStickers(MediaDataController.TYPE_IMAGE, false, true);\n")
+STICKER_SETS_NEW = (
+    "                        TL_update.TL_updateStickerSets update = (TL_update.TL_updateStickerSets) baseUpdate;\n"
+    "                        // pluma: the kind of sets the update is about.\n"
+    "                        int type;\n"
+    "                        if (update.masks) {\n"
+    "                            type = MediaDataController.TYPE_MASK;\n"
+    "                        } else if (update.emojis) {\n"
+    "                            type = MediaDataController.TYPE_EMOJIPACKS;\n"
+    "                        } else {\n"
+    "                            type = MediaDataController.TYPE_IMAGE;\n"
+    "                        }\n"
+    "                        getMediaDataController().loadStickers(type, false, true);\n")
+
+
+def sticker_sets(tree):
+    tree.replace(MESSAGES_CONTROLLER, STICKER_SETS_OLD, STICKER_SETS_NEW)
+
+
+def verify_sticker_sets(tree):
+    if STICKER_SETS_NEW not in tree.read(MESSAGES_CONTROLLER):
+        raise PatchError(f"{MESSAGES_CONTROLLER}: updateStickerSets still reloads only the stickers")
 
 
 def birthday_notice(text):
@@ -2533,6 +2565,7 @@ def verify(tree, c):
             raise PatchError(f"{rel}: Telegram's account type is still there")
     verify_video_quality(tree)
     verify_birthdays(tree)
+    verify_sticker_sets(tree)
     verify_brand(tree)
 
 
