@@ -11,7 +11,7 @@ After the edits the result is checked again (no Telegram datacenter address
 or server key is left, no Telegram name and no link to Telegram's desktop
 and web clients in the built-in strings, no tg:// link scheme, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
-the chat rather than to gifts).
+the chat rather than to gifts, the video bitrates of Pluma).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -378,7 +378,9 @@ def patch(tree, c):
     tree.write("TMessagesProj/google-services.json",
                json.dumps(placeholder_google_services(["org.telegram.messenger"]), indent=2) + "\n")
 
+    video_quality(tree)
     birthdays(tree)
+    sticker_sets(tree)
     brand(tree)
 
 
@@ -453,6 +455,37 @@ def birthdays(tree):
         tree.expect("TMessagesProj/src/main/res/values/strings.xml", s)
 
 
+# updateStickerSets says which kind of sets changed (masks, emojis), as
+# updateStickerSetsOrder does; upstream reloads the stickers whatever it says,
+# so an emoji set installed or removed on another device reached this one
+# only after a restart. The kind is taken as for updateStickerSetsOrder.
+MESSAGES_CONTROLLER = "TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java"
+STICKER_SETS_OLD = (
+    "                        TL_update.TL_updateStickerSets update = (TL_update.TL_updateStickerSets) baseUpdate;\n"
+    "                        getMediaDataController().loadStickers(MediaDataController.TYPE_IMAGE, false, true);\n")
+STICKER_SETS_NEW = (
+    "                        TL_update.TL_updateStickerSets update = (TL_update.TL_updateStickerSets) baseUpdate;\n"
+    "                        // pluma: the kind of sets the update is about.\n"
+    "                        int type;\n"
+    "                        if (update.masks) {\n"
+    "                            type = MediaDataController.TYPE_MASK;\n"
+    "                        } else if (update.emojis) {\n"
+    "                            type = MediaDataController.TYPE_EMOJIPACKS;\n"
+    "                        } else {\n"
+    "                            type = MediaDataController.TYPE_IMAGE;\n"
+    "                        }\n"
+    "                        getMediaDataController().loadStickers(type, false, true);\n")
+
+
+def sticker_sets(tree):
+    tree.replace(MESSAGES_CONTROLLER, STICKER_SETS_OLD, STICKER_SETS_NEW)
+
+
+def verify_sticker_sets(tree):
+    if STICKER_SETS_NEW not in tree.read(MESSAGES_CONTROLLER):
+        raise PatchError(f"{MESSAGES_CONTROLLER}: updateStickerSets still reloads only the stickers")
+
+
 def birthday_notice(text):
     """The branch of DialogsActivity.updateDialogsHint that shows the birthday
     notice, from its condition to the next branch."""
@@ -479,6 +512,177 @@ def verify_birthdays(tree):
         raise PatchError(f"{DIALOGS}: the birthday notice leads to {found.group()}")
     if notice.count("presentFragment(ChatActivity.of(") != 2:
         raise PatchError(f"{DIALOGS}: the birthday notice does not lead to the chat")
+
+
+# --- video quality -----------------------------------------------------------
+# Task 052 of the server repository: a video is re-encoded before sending, as
+# in Telegram, with the same choice of quality, but at a higher bitrate for
+# every resolution (the owner's decision). By default a video goes in 720p on
+# mobile data and in 1080p on Wi-Fi: the server's video_upload_maxbitrate is 85
+# in the medium preset and 100 in the high one. Lines are those of upstream
+# 12.9.1.
+# - MediaController.makeVideoBitrate (6766-6797) caps the bitrate by the
+#   shorter output side: 6.8 Mbit/s from 1080, 2.6 from 720, 1.0 from 480 and
+#   0.75 below, and below 720 it also cuts the source bitrate (to 0.75 and 0.6
+#   of it, with floors of 0.9 and 0.7 of the reference). The caps become 12, 5,
+#   2.5 and 1.5 Mbit/s and no tier cuts the source bitrate. A small source is
+#   never inflated: the convertor takes Math.min(originalBitrate, bitrate)
+#   (MediaCodecVideoConvertor.java:427-429).
+# - PhotoViewer.selectCompression (21689-21705) caps both the saved choice
+#   (compress_video_%d, didChangedCompressionLevel 21233-21243) and the default
+#   at step 2, 720p: a 1080p choice came back as 720p. The cap becomes the top
+#   step of the source. The default divides video_upload_maxbitrate by the
+#   local compressionsCount, which the loop over the saved choices has left at
+#   5 (21697-21704), so 85 would give the top step; it divides by the steps of
+#   the source instead, as SendMessagesHelper does (11727): for a 1080p source
+#   (4 steps) 85 gives step 2, 720p, and 100 gives step 3, 1080p.
+# - DownloadController (261-275): the mobile preset of a new install is the
+#   built-in medium one, and loadAutoDownloadConfig (363-383) gives it the
+#   server's medium values only when it equals the medium preset already
+#   updated from the server, so a video_upload_maxbitrate different from the
+#   built-in 100 never reaches it. The built-in medium preset takes the
+#   server's 85 (app/bff/autodownload, videoUploadMaxBitrateMedium), so mobile
+#   data gets 720p and the preset keeps following the server's medium one.
+# - SendMessagesHelper.createCompressionSettings (11679-11777), sending without
+#   the editor (straight from the attachment menu, a share from another app),
+#   picks step round(v / (100 / steps)) (1-based, 11727-11731) with long sides
+#   432, 640, 848 and 1280 (11736-11749), one step below the editor's 480, 854,
+#   1280 and 1920 (PhotoViewer.calculateResultVideoSize 21403-21438), and
+#   scaled every source above 1280 px down to 1280 (11733-11734). It takes the
+#   editor's sizes and scales only a source above 1920 px, so 85 gives 720p and
+#   100 keeps 1080p, as in the editor.
+# - A muted video, sent as a GIF, has no bitrate of its own (-1, PhotoViewer
+#   9818-9820): the convertor gives it 921,600 bit/s
+#   (MediaCodecVideoConvertor.java:424-426) and the size estimate the same
+#   (PhotoViewer 21296-21298). Both become 1,843,200.
+MEDIA_CONTROLLER = "TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java"
+PHOTO_VIEWER = "TMessagesProj/src/main/java/org/telegram/ui/PhotoViewer.java"
+DOWNLOAD_CONTROLLER = "TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java"
+SEND_MESSAGES_HELPER = "TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java"
+VIDEO_CONVERTOR = "TMessagesProj/src/main/java/org/telegram/messenger/video/MediaCodecVideoConvertor.java"
+VIDEO_BITRATE_OLD = (
+    "        if (Math.min(height, width) >= 1080) {\n"
+    "            maxBitrate = 6800_000;\n"
+    "            compressFactor = 1f;\n"
+    "            minCompressFactor = 1f;\n"
+    "        } else if (Math.min(height, width) >= 720) {\n"
+    "            maxBitrate = 2600_000;\n"
+    "            compressFactor = 1f;\n"
+    "            minCompressFactor = 1f;\n"
+    "        } else if (Math.min(height, width) >= 480) {\n"
+    "            maxBitrate = 1000_000;\n"
+    "            compressFactor = 0.75f;\n"
+    "            minCompressFactor = 0.9f;\n"
+    "        } else {\n"
+    "            maxBitrate = 750_000;\n"
+    "            compressFactor = 0.6f;\n"
+    "            minCompressFactor = 0.7f;\n"
+    "        }\n")
+VIDEO_BITRATE_NEW = (
+    "        // pluma: higher caps than Telegram's, and no tier cuts the source\n"
+    "        // bitrate; the convertor never goes above the source bitrate.\n"
+    "        if (Math.min(height, width) >= 1080) {\n"
+    "            maxBitrate = 12000_000;\n"
+    "            compressFactor = 1f;\n"
+    "            minCompressFactor = 1f;\n"
+    "        } else if (Math.min(height, width) >= 720) {\n"
+    "            maxBitrate = 5000_000;\n"
+    "            compressFactor = 1f;\n"
+    "            minCompressFactor = 1f;\n"
+    "        } else if (Math.min(height, width) >= 480) {\n"
+    "            maxBitrate = 2500_000;\n"
+    "            compressFactor = 1f;\n"
+    "            minCompressFactor = 1f;\n"
+    "        } else {\n"
+    "            maxBitrate = 1500_000;\n"
+    "            compressFactor = 1f;\n"
+    "            minCompressFactor = 1f;\n"
+    "        }\n")
+VIDEO_STEPS_OLD = (
+    "                switch (selectedCompression) {\n"
+    "                    case 1:\n"
+    "                        maxSize = 432.0f;\n"
+    "                        break;\n"
+    "                    case 2:\n"
+    "                        maxSize = 640.0f;\n"
+    "                        break;\n"
+    "                    case 3:\n"
+    "                        maxSize = 848.0f;\n"
+    "                        break;\n"
+    "                    default:\n"
+    "                        maxSize = 1280.0f;\n"
+    "                        break;\n"
+    "                }\n")
+VIDEO_STEPS_NEW = (
+    "                // pluma: the sizes of the editor's steps (PhotoViewer.calculateResultVideoSize).\n"
+    "                switch (selectedCompression) {\n"
+    "                    case 1:\n"
+    "                        maxSize = 480.0f;\n"
+    "                        break;\n"
+    "                    case 2:\n"
+    "                        maxSize = 854.0f;\n"
+    "                        break;\n"
+    "                    case 3:\n"
+    "                        maxSize = 1280.0f;\n"
+    "                        break;\n"
+    "                    default:\n"
+    "                        maxSize = 1920.0f;\n"
+    "                        break;\n"
+    "                }\n")
+VIDEO_QUALITY_EDITS = (
+    (MEDIA_CONTROLLER, VIDEO_BITRATE_OLD, VIDEO_BITRATE_NEW),
+    (PHOTO_VIEWER,
+     "        int maxCompression = 2;\n",
+     "        // pluma: up to the top step, so that a 1080p choice is kept.\n"
+     "        int maxCompression = this.compressionsCount - 1;\n"),
+    (PHOTO_VIEWER,
+     "        return Math.min(maxCompression, Math.round(DownloadController.getInstance(currentAccount)"
+     ".getMaxVideoBitrate() / (100f / compressionsCount)) - 1);\n",
+     "        // pluma: the steps of this video, not the count the loop above has left.\n"
+     "        return Math.min(maxCompression, Math.round(DownloadController.getInstance(currentAccount)"
+     ".getMaxVideoBitrate() / (100f / this.compressionsCount)) - 1);\n"),
+    (PHOTO_VIEWER,
+     "                bitrate = 921600;\n"
+     "            }\n"
+     "            estimatedSize = (long) (bitrate / 8 * (estimatedDuration / 1000.0f));\n",
+     "                bitrate = 1843200; // pluma: as the convertor gives a muted video\n"
+     "            }\n"
+     "            estimatedSize = (long) (bitrate / 8 * (estimatedDuration / 1000.0f));\n"),
+    (DOWNLOAD_CONTROLLER,
+     '        String defaultMedium = "13_13_13_13_1048576_10485760_1048576_524288_1_1_1_0_100_1";\n',
+     "        // pluma: video_upload_maxbitrate 85, the server's medium preset (720p on mobile data).\n"
+     '        String defaultMedium = "13_13_13_13_1048576_10485760_1048576_524288_1_1_1_0_85_1";\n'),
+    (SEND_MESSAGES_HELPER,
+     "            if (selectedCompression != compressionsCount || "
+     "Math.max(videoEditedInfo.originalWidth, videoEditedInfo.originalHeight) > 1280) {\n",
+     "            // pluma: the top step keeps up to 1920 px, as in the editor.\n"
+     "            if (selectedCompression != compressionsCount || "
+     "Math.max(videoEditedInfo.originalWidth, videoEditedInfo.originalHeight) > 1920) {\n"),
+    (SEND_MESSAGES_HELPER, VIDEO_STEPS_OLD, VIDEO_STEPS_NEW),
+    (VIDEO_CONVERTOR,
+     "                            } else if (bitrate <= 0) {\n"
+     "                                bitrate = 921600;\n"
+     "                            }\n"
+     "                            if (originalBitrate > 0) {\n",
+     "                            } else if (bitrate <= 0) {\n"
+     "                                bitrate = 1843200; // pluma: twice Telegram's, for a muted video (GIF)\n"
+     "                            }\n"
+     "                            if (originalBitrate > 0) {\n"),
+)
+
+
+def video_quality(tree):
+    for rel, old, new in VIDEO_QUALITY_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_video_quality(tree):
+    for rel, old, new in VIDEO_QUALITY_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text:
+            changed = next(line for line in new.splitlines()
+                           if line not in old.splitlines() and "// pluma:" not in line.split(";")[0])
+            raise PatchError(f"{rel}: the video quality edit {changed.strip()!r} is not there")
 
 
 # --- branding ----------------------------------------------------------------
@@ -2359,7 +2563,9 @@ def verify(tree, c):
     for rel in ("TMessagesProj/src/main/res/xml/auth.xml", "TMessagesProj/src/main/res/xml/sync_contacts.xml"):
         if "org.telegram.messenger" in tree.read(rel):
             raise PatchError(f"{rel}: Telegram's account type is still there")
+    verify_video_quality(tree)
     verify_birthdays(tree)
+    verify_sticker_sets(tree)
     verify_brand(tree)
 
 
