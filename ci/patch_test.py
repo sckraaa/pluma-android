@@ -235,6 +235,30 @@ class BirthdaysTest(unittest.TestCase):
                         patch.verify_birthdays(tree)
 
 
+class StickerSetsTest(unittest.TestCase):
+    def tree(self, root, text):
+        (root / patch.MESSAGES_CONTROLLER).parent.mkdir(parents=True, exist_ok=True)
+        (root / patch.MESSAGES_CONTROLLER).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_kind_of_sets(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), "x\n" + patch.STICKER_SETS_OLD + "y\n")
+            with self.assertRaises(patch.PatchError):
+                patch.verify_sticker_sets(tree)
+            patch.sticker_sets(tree)
+            patch.verify_sticker_sets(tree)
+            text = tree.read(patch.MESSAGES_CONTROLLER)
+            self.assertIn("type = MediaDataController.TYPE_EMOJIPACKS;", text)
+            self.assertNotIn("loadStickers(MediaDataController.TYPE_IMAGE, false, true)", text)
+
+    def test_upstream_changed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), patch.STICKER_SETS_OLD.replace("TYPE_IMAGE", "TYPE_IMAGE "))
+            with self.assertRaises(patch.PatchError):
+                patch.sticker_sets(tree)
+
+
 class BrandTest(unittest.TestCase):
     def test_rename_strings(self):
         xml = ('<string name="TelegramFAQ">Telegram FAQ</string>\n'
