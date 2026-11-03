@@ -235,6 +235,75 @@ class BirthdaysTest(unittest.TestCase):
                         patch.verify_birthdays(tree)
 
 
+class VideoQualityTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.VIDEO_QUALITY_EDITS):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "class X {\n") + old + "        x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text + "}\n", encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_bitrates(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_video_quality(tree)
+            patch.video_quality(tree)
+            patch.verify_video_quality(tree)
+            caps = re.findall(r"maxBitrate = (\d+)_000;", tree.read(patch.MEDIA_CONTROLLER))
+            self.assertEqual([int(c) * 1000 for c in caps], [12_000_000, 5_000_000, 2_500_000, 1_500_000])
+            self.assertNotRegex(tree.read(patch.MEDIA_CONTROLLER), r"ompressFactor = 0\.\d+f;")
+            viewer = tree.read(patch.PHOTO_VIEWER)
+            self.assertIn("int maxCompression = this.compressionsCount - 1;", viewer)
+            self.assertIn("(100f / this.compressionsCount)) - 1);", viewer)
+            self.assertNotIn("(100f / compressionsCount)", viewer)
+            self.assertIn('"13_13_13_13_1048576_10485760_1048576_524288_1_1_1_0_85_1"',
+                          tree.read(patch.DOWNLOAD_CONTROLLER))
+            helper = tree.read(patch.SEND_MESSAGES_HELPER)
+            self.assertEqual(re.findall(r"maxSize = (\d+)\.0f;", helper), ["480", "854", "1280", "1920"])
+            self.assertIn("videoEditedInfo.originalHeight) > 1920) {", helper)
+            self.assertNotIn("> 1280", helper)
+            for rel in (patch.PHOTO_VIEWER, patch.VIDEO_CONVERTOR):
+                self.assertNotIn("921600", tree.read(rel))
+                self.assertIn("bitrate = 1843200;", tree.read(rel))
+            # A second run finds none of the upstream texts.
+            with self.assertRaises(patch.PatchError):
+                patch.video_quality(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.VIDEO_QUALITY_EDITS):
+            changed = old.replace(" = ", " =  ", 1) if " = " in old else old.replace("(", "( ", 1)
+            self.assertNotEqual(changed, old)
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.VIDEO_QUALITY_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.video_quality(tree)
+        # An anchor upstream uses twice.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), patch.VIDEO_QUALITY_EDITS + patch.VIDEO_QUALITY_EDITS[1:2])
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.video_quality(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.video_quality(tree)
+            for rel, old, new in patch.VIDEO_QUALITY_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old), patched.replace(new, ""), patched + new):
+                    with self.subTest(file=rel, edit=new.splitlines()[0]):
+                        self.assertNotEqual(text, patched)
+                        tree.write(rel, text)
+                        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                            patch.verify_video_quality(tree)
+                tree.write(rel, patched)
+            patch.verify_video_quality(tree)
+
+
 class BrandTest(unittest.TestCase):
     def test_rename_strings(self):
         xml = ('<string name="TelegramFAQ">Telegram FAQ</string>\n'
