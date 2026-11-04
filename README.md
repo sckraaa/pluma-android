@@ -23,6 +23,9 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - closing it hides it as upstream does, without the toast that Premium can be gifted later in Settings, which has no such row in Pluma;
   - it no longer preloads the star gifts.
   - the chat it opens and the contact's profile offer no gift either: upstream checks there that Premium can be bought (`ChatActivityEnterView`, `ProfileActivity`).
+- **Self-update** (task 054 of the server repository). The APK from the site updates itself, as Telegram's APK from its site does: the app asks the server (`help.getAppUpdate`), shows the update sheet and the side menu panel, downloads the APK over MTProto and opens the system installer.
+  - Only the update places of upstream's standalone build are turned on (`ApplicationLoader.isSelfUpdatingBuild()`); the rest of the standalone build (its package, SMS jobs, the TON row) stays off. The sheet and the panel are the standalone module's files, copied as they are.
+  - The version is `<upstream version>.<build>`, e.g. `12.9.1.57`, the build being the run number: Android compares versions part by part, so each build is newer than the one before. `versionCode` rises with it.
 
 After the edits, the result is checked again: no Telegram datacenter address or server key may remain, no "Telegram" and no link to Telegram's desktop or web client in the text of the built-in strings, no `tg:` link scheme, nothing in the birthday notice that leads to Premium or gifts, and no Telegram blue in the built-in themes. For that last check the patch works out the colour the theme engine gives each key of the five themes, with every accent a theme shows before the user picks a colour, and fails on any blue outside the keys the engine leaves alone (user colours, calls, statistics, Premium, stories).
 
@@ -137,6 +140,17 @@ shasum -a 256 -c pluma-android-*.apk.sha256
 ```
 
 A failed signing (a wrong password, say) costs minutes: fix the secret and use *Re-run failed jobs*. The build's artifact is kept for three days.
+
+## Releases
+
+A signed build of `main` goes to the releases service of the server right after signing (`ci/publish.sh`): the site offers it for download and the installed apps offer it as an update. One approval of the `sign` job publishes it. The notes are [`release/notes.en.txt`](release/notes.en.txt) and [`release/notes.ru.txt`](release/notes.ru.txt); change them with the change they describe.
+
+- `PLUMA_RELEASES_URL`, a repository variable: the site, `https://pluma.chat`.
+- `RELEASES_UPLOAD_TOKEN`, a secret of the `release` environment: `teamgramd/deploy/releases/put-token.sh` of the server repository sets it.
+
+Without them the `sign` job of `main` fails. Installs of a build before self-update (version `12.9.1`, three parts) do not see updates: Android compares only the parts both versions have. Install the app from the site once.
+
+A bad release is withdrawn on the server (`pluma-admin release withdraw android <build>`, `docs/ops/releases.md` of the server repository); the next build replaces it.
 
 ## When it builds
 

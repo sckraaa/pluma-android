@@ -4,7 +4,8 @@
 #   build  fetch, patch, compile (native code through ccache, Java through
 #          the Gradle build cache), APK with the upstream's test signature;
 #   sign   the release key, in the protected "release" environment, for
-#          builds for a real server only.
+#          builds for a real server only; the signed APK goes to the site
+#          and to the installed apps (the releases service of the server).
 #
 # APKs for a real server leave a job only encrypted for the owner (age):
 # artifacts of a public repository are readable by anyone (ADR 0010 of the
@@ -87,6 +88,9 @@ jobs:
           ABIS: ${{ inputs.abis }}
           DEV_SERVER_IPV4: ${{ inputs.dev_address }}
           CCACHE: "1"
+          # The fourth part of the version, rising with each run: the
+          # installed apps take a build as newer by it.
+          PLUMA_BUILD: ${{ github.run_number }}
         run: ci/configure.sh
       - name: Preflight
         if: steps.configure.outputs.target == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -168,6 +172,8 @@ jobs:
           PLUMA_AGE_IDENTITY: ${{ secrets.PLUMA_AGE_IDENTITY }}
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
           PLUMA_SIGNING_CERT_SHA256: ${{ vars.PLUMA_SIGNING_CERT_SHA256 }}
+          RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+          PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL }}
           APK: ${{ needs.build.outputs.apk }}
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
@@ -186,6 +192,13 @@ jobs:
           printf '%s' "$KEYSTORE_B64" | base64 -d >"$PLUMA_KEYSTORE"
           mkdir -p signed
           ci/sign.sh "$RUNNER_TEMP/$APK" "signed/$APK"
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            if [ -z "$RELEASES_UPLOAD_TOKEN" ] || [ -z "$PLUMA_RELEASES_URL" ]; then
+              echo "::error::The release environment has no RELEASES_UPLOAD_TOKEN or PLUMA_RELEASES_URL; the build cannot reach the site (README, Releases)."
+              exit 1
+            fi
+            ci/publish.sh "signed/$APK" "$GITHUB_RUN_NUMBER"
+          fi
           ci/encrypt.sh signed
           echo "signed=true" >>"$GITHUB_OUTPUT"
       - name: Upload signed APK
