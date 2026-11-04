@@ -111,6 +111,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(c.ipv6, "2001:0db8:0000:0000:0000:0000:0000:0001")
         self.assertEqual(c.abis, ["arm64-v8a", "x86_64"])
         self.assertEqual(c.package, "chat.pluma.app")
+        self.assertEqual(c.version_name, "12.9.1.0")
+        self.assertEqual(config(build=57).version_name, "12.9.1.57")
 
     def test_rejects(self):
         for over in (
@@ -123,6 +125,8 @@ class ConfigTest(unittest.TestCase):
             {"abis": "mips"},
             {"abis": "arm64-v8a arm64-v8a"},
             {"abis": ""},
+            {"build": -1},
+            {"build": 1000000},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
@@ -396,6 +400,97 @@ class SavedTagsTest(unittest.TestCase):
                        patched.replace("        return true;\n", "        return getUserConfig().isPremium();\n", 1))
             with self.assertRaises(patch.PatchError):
                 patch.verify_saved_tags(tree)
+
+
+class SelfUpdateTest(unittest.TestCase):
+    COMPONENTS = {"UpdateAppAlertDialog.java": b"class UpdateAppAlertDialog {}\n", "UpdateLayout.java": b"class UpdateLayout {}\n"}
+
+    # The upstream files, made of the texts the edits expect, and the
+    # standalone module's sheet and panel.
+    def tree(self, root):
+        files = {}
+        for rel, old, _ in patch.SELF_UPDATE_EDITS:
+            files[rel] = files.get(rel, "class X {\n") + old + "        x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text + "}\n", encoding="utf-8")
+        (root / patch.APP_LOADER_IMPL).parent.mkdir(parents=True, exist_ok=True)
+        (root / patch.APP_LOADER_IMPL).write_text(patch.APP_LOADER_IMPL_UPSTREAM, encoding="utf-8")
+        (root / "gradle.properties").write_text("APP_VERSION_CODE=6979\nAPP_VERSION_NAME=12.9.1\n", encoding="utf-8")
+        (root / patch.APP_BUILD_GRADLE).write_text("android {\n" + patch.VERSION_CODE + "}\ndependencies {\n" + patch.APP_DEPENDENCY + "}\n",
+                                                   encoding="utf-8")
+        (root / "TMessagesProj/build.gradle").write_text("dependencies {\n" + patch.ANDROIDX_CORE + "}\n", encoding="utf-8")
+        (root / patch.STANDALONE_COMPONENTS).mkdir(parents=True)
+        for name, data in self.COMPONENTS.items():
+            (root / patch.STANDALONE_COMPONENTS / name).write_bytes(data)
+        return patch.Tree(root)
+
+    def setUp(self):
+        shas = {name: hashlib.sha256(data).hexdigest() for name, data in self.COMPONENTS.items()}
+        p = unittest.mock.patch.object(patch, "SELF_UPDATE_FILES", shas)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_self_update(self):
+        c = config(build=57)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_self_update(tree, c)
+            patch.self_update(tree, c)
+            patch.verify_self_update(tree, c)
+            # Only the update places ask the new method; isStandaloneBuild()
+            # keeps every other place of the standalone build off.
+            for rel, _, new in patch.SELF_UPDATE_EDITS[1:]:
+                self.assertNotIn("isStandaloneBuild()", new)
+            self.assertIn("public static boolean isSelfUpdatingBuild() {\n        return true;\n    }\n",
+                          tree.read(patch.APPLICATION_LOADER))
+            self.assertNotIn("isStandalone()", tree.read(patch.APP_LOADER_IMPL))
+            for name, data in self.COMPONENTS.items():
+                self.assertEqual((tree.root / patch.APP_COMPONENTS / name).read_bytes(), data)
+            self.assertIn("APP_VERSION_NAME=12.9.1.57\n", tree.read("gradle.properties"))
+            self.assertIn("Integer.parseInt(APP_VERSION_CODE) * 1000 + 57 ", tree.read(patch.APP_BUILD_GRADLE))
+            # A second run finds none of the upstream texts.
+            with self.assertRaises(patch.PatchError):
+                patch.self_update(tree, c)
+
+    def test_upstream_changed(self):
+        c = config()
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            (tree.root / patch.STANDALONE_COMPONENTS / "UpdateLayout.java").write_bytes(b"class UpdateLayout { int x; }\n")
+            with self.assertRaisesRegex(patch.PatchError, "changed upstream"):
+                patch.self_update(tree, c)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            tree.write(patch.APP_LOADER_IMPL, patch.APP_LOADER_IMPL_UPSTREAM.replace("}\n}\n", "}\n    void y() {}\n}\n"))
+            with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                patch.self_update(tree, c)
+
+    def test_check(self):
+        c = config(build=3)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.self_update(tree, c)
+            for rel, old, new in patch.SELF_UPDATE_EDITS:
+                patched = tree.read(rel)
+                with self.subTest(file=rel, edit=new.strip().splitlines()[-1]):
+                    tree.write(rel, patched.replace(new, old))
+                    with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                        patch.verify_self_update(tree, c)
+                tree.write(rel, patched)
+            # One more place that asks it.
+            for rel in patch.SELF_UPDATE_USES:
+                patched = tree.read(rel)
+                with self.subTest(file=rel):
+                    tree.write(rel, patched + "        if (ApplicationLoader.isSelfUpdatingBuild()) {\n")
+                    with self.assertRaisesRegex(patch.PatchError, "uses of"):
+                        patch.verify_self_update(tree, c)
+                tree.write(rel, patched)
+            # Another build number than the configuration's.
+            with self.assertRaisesRegex(patch.PatchError, "APP_VERSION_NAME"):
+                patch.verify_self_update(tree, config(build=4))
+            patch.verify_self_update(tree, c)
 
 
 class StickerSetsTest(unittest.TestCase):

@@ -186,7 +186,7 @@ def load_env(path):
 
 
 class Config:
-    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, abis, ccache, google_services):
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, abis, ccache, google_services, build=0):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -196,6 +196,13 @@ class Config:
         self.version = need(upstream, "UPSTREAM_VERSION")
         self.ndk = need(upstream, "NDK_VERSION")
         self.cmake = need(upstream, "CMAKE_VERSION")
+        # Pluma's build number, the fourth part of versionName (self-update).
+        if not isinstance(build, int) or not 0 <= build < 1000000:
+            raise PatchError(f"build number {build!r}: 0 to 999999")
+        self.build = build
+        self.version_name = f"{self.version}.{build}"
+        if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", self.version_name):
+            raise PatchError(f"version {self.version_name!r}: four numbers, as Android compares them")
 
         self.package = need(app, "PLUMA_PACKAGE")
         if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", self.package):
@@ -383,6 +390,7 @@ def patch(tree, c):
     birthdays(tree)
     sticker_sets(tree)
     saved_tags(tree)
+    self_update(tree, c)
     brand(tree)
 
 
@@ -881,6 +889,243 @@ def verify_saved_tags(tree):
     definition = re.findall(r"public boolean savedTagsAvailable\(\) \{\n\s*return (\w+);\n", tree.read(MESSAGES_CONTROLLER))
     if definition != ["true"]:
         raise PatchError(f"{MESSAGES_CONTROLLER}: savedTagsAvailable() does not return true")
+
+
+# --- self-update -------------------------------------------------------------
+# Task 054 of the server repository (ADR 0035): the APK from the site updates
+# itself, as Telegram's own APK from its site does. Upstream checks for updates
+# only in the standalone build (LaunchActivity 5958) and keeps the update sheet
+# and the side menu panel in its module TMessagesProj_AppStandalone, which
+# Pluma does not build: it changes the package (applicationIdSuffix ".web") and
+# adds Telegram's SMS jobs. Making TMessagesProj_App standalone
+# (isStandalone()) would also turn on what the standalone build shows besides
+# updates, the TON row of the settings and the profile (SettingsActivity 712,
+# ProfileActivity 10628) among them. So:
+# - ApplicationLoader gets isSelfUpdatingBuild(), true, and only the update
+#   places ask it instead of isStandaloneBuild(): the check (LaunchActivity
+#   5958) and its sheet (6011), the "update the app" buttons of unsupported
+#   messages and stories (ChatActivity 41304, PeerStoriesView 4416), the
+#   blocking screen (BlockingUpdateView 142, 303), the side menu panel
+#   (SharedConfig 771), and the debug menu's "Check app update" (ProfileActivity
+#   4653, SettingsActivity 1430);
+# - the app's ApplicationLoaderImpl gets the standalone module's install,
+#   sheet and panel overrides (its ApplicationLoaderImpl 63-114, without the SMS
+#   jobs), and the sheet and the panel files are copied from that module as
+#   they are (SHA-256 below).
+# The server compares versions as Android does (SharedConfig 811-824: only the
+# parts both have, each an integer), so versionName gets Pluma's build number
+# as a fourth part, 12.9.1.N, and versionCode rises with it: (APP_VERSION_CODE *
+# 1000 + N) * 10 + the ABI digit, above every earlier Pluma build (69799); it
+# keeps rising across upstream versions. Lines are those of upstream
+# 12.9.1.
+LAUNCH_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java"
+PEER_STORIES_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Stories/PeerStoriesView.java"
+BLOCKING_UPDATE_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Components/BlockingUpdateView.java"
+SHARED_CONFIG = "TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java"
+PROFILE_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
+SETTINGS_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java"
+APPLICATION_LOADER = "TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java"
+APP_LOADER_IMPL = "TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java"
+APP_BUILD_GRADLE = "TMessagesProj_App/build.gradle"
+SELF_UPDATE_CALL = "ApplicationLoader.isSelfUpdatingBuild()"
+SELF_UPDATE_EDITS = (
+    (APPLICATION_LOADER,
+     "    public static boolean isStandaloneBuild() {\n"
+     "        return applicationLoaderInstance.isStandalone();\n"
+     "    }\n",
+     "    public static boolean isStandaloneBuild() {\n"
+     "        return applicationLoaderInstance.isStandalone();\n"
+     "    }\n"
+     "\n"
+     "    // pluma: the APK from the site updates itself from the server (help.getAppUpdate).\n"
+     "    public static boolean isSelfUpdatingBuild() {\n"
+     "        return true;\n"
+     "    }\n"),
+    (LAUNCH_ACTIVITY,
+     "        if (!ApplicationLoader.isStandaloneBuild() && !ApplicationLoader.isBetaBuild()) {\n",
+     "        if (!ApplicationLoader.isSelfUpdatingBuild() && !ApplicationLoader.isBetaBuild()) {\n"),
+    (LAUNCH_ACTIVITY,
+     "                        } else if (ApplicationLoader.isStandaloneBuild() || BuildVars.DEBUG_VERSION) {\n",
+     "                        } else if (ApplicationLoader.isSelfUpdatingBuild() || BuildVars.DEBUG_VERSION) {\n"),
+    (CHAT_ACTIVITY,
+     "                if (ApplicationLoader.isStandaloneBuild()) {\n",
+     "                if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+    (PEER_STORIES_VIEW,
+     "            if (ApplicationLoader.isStandaloneBuild()) {\n",
+     "            if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+    (BLOCKING_UPDATE_VIEW,
+     "            if (ApplicationLoader.isStandaloneBuild() || BuildVars.DEBUG_VERSION) {\n",
+     "            if (ApplicationLoader.isSelfUpdatingBuild() || BuildVars.DEBUG_VERSION) {\n"),
+    (BLOCKING_UPDATE_VIEW,
+     "        if (check && ApplicationLoader.isStandaloneBuild()) {\n",
+     "        if (check && ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+    (SHARED_CONFIG,
+     "        if (pendingAppUpdate == null || pendingAppUpdate.document == null || !ApplicationLoader.isStandaloneBuild()) {\n",
+     "        if (pendingAppUpdate == null || pendingAppUpdate.document == null || !ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+    (PROFILE_ACTIVITY,
+     "                                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isStandaloneBuild() || ApplicationLoader.isBetaBuild() ? "
+     "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n",
+     "                                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isSelfUpdatingBuild() || ApplicationLoader.isBetaBuild() ? "
+     "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n"),
+    (SETTINGS_ACTIVITY,
+     "                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isStandaloneBuild() || ApplicationLoader.isBetaBuild() ? "
+     "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n",
+     "                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isSelfUpdatingBuild() || ApplicationLoader.isBetaBuild() ? "
+     "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n"),
+)
+# Where the update places ask it, and how often.
+SELF_UPDATE_USES = {
+    LAUNCH_ACTIVITY: 2, CHAT_ACTIVITY: 1, PEER_STORIES_VIEW: 1, BLOCKING_UPDATE_VIEW: 2,
+    SHARED_CONFIG: 1, PROFILE_ACTIVITY: 1, SETTINGS_ACTIVITY: 1,
+}
+STANDALONE_COMPONENTS = "TMessagesProj_AppStandalone/src/main/java/org/telegram/ui/Components"
+APP_COMPONENTS = "TMessagesProj_App/src/main/java/org/telegram/ui/Components"
+SELF_UPDATE_FILES = {
+    "UpdateAppAlertDialog.java": "4545e52ece790001b1056dbcbd4e7e58e0fe4b9ca454b7788e08f58fb1d0af20",
+    "UpdateLayout.java": "e1050c8c68cc6ba015edf354be819ea10ba3ca648779b03b33a76aa521f94c99",
+}
+APP_LOADER_IMPL_UPSTREAM = """package org.telegram.messenger;
+
+import org.telegram.messenger.regular.BuildConfig;
+
+public class ApplicationLoaderImpl extends ApplicationLoader {
+    @Override
+    protected String onGetApplicationId() {
+        return BuildConfig.APPLICATION_ID;
+    }
+}
+"""
+APP_LOADER_IMPL_PLUMA = """package org.telegram.messenger;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Build;
+import android.view.ViewGroup;
+
+import androidx.core.content.FileProvider;
+
+import org.telegram.messenger.regular.BuildConfig;
+import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.AlertsCreator;
+import org.telegram.ui.Components.UpdateAppAlertDialog;
+import org.telegram.ui.Components.UpdateLayout;
+import org.telegram.ui.IUpdateLayout;
+
+import java.io.File;
+
+public class ApplicationLoaderImpl extends ApplicationLoader {
+    @Override
+    protected String onGetApplicationId() {
+        return BuildConfig.APPLICATION_ID;
+    }
+
+    // pluma: the install, the update sheet and the side menu panel of the
+    // standalone build (TMessagesProj_AppStandalone, ApplicationLoaderImpl):
+    // the APK from the site updates itself from the server.
+    @Override
+    public boolean checkApkInstallPermissions(final Context context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !ApplicationLoader.applicationContext.getPackageManager().canRequestPackageInstalls()) {
+            AlertsCreator.createApkRestrictedDialog(context, null).show();
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    public boolean openApkInstall(Activity activity, TLRPC.Document document) {
+        boolean exists = false;
+        try {
+            File f = FileLoader.getInstance(UserConfig.selectedAccount).getPathToAttach(document, true);
+            if (exists = f.exists()) {
+                Intent intent = new Intent(Intent.ACTION_VIEW);
+                intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+                if (Build.VERSION.SDK_INT >= 24) {
+                    intent.setDataAndType(FileProvider.getUriForFile(activity, ApplicationLoader.getApplicationId() + ".provider", f), "application/vnd.android.package-archive");
+                } else {
+                    intent.setDataAndType(Uri.fromFile(f), "application/vnd.android.package-archive");
+                }
+                try {
+                    activity.startActivityForResult(intent, 500);
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return exists;
+    }
+
+    @Override
+    public boolean showUpdateAppPopup(Context context, TLRPC.TL_help_appUpdate update, int account) {
+        try {
+            (new UpdateAppAlertDialog(context, update, account)).show();
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return true;
+    }
+
+    @Override
+    public IUpdateLayout takeUpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
+        return new UpdateLayout(activity, sideMenuContainer);
+    }
+}
+"""
+VERSION_CODE = "    defaultConfig.versionCode = Integer.parseInt(APP_VERSION_CODE)\n"
+# FileProvider of the install and NestedScrollView of the sheet: the library
+# keeps androidx.core to itself (implementation), so the app names it too, at
+# the library's version, as the standalone module does.
+ANDROIDX_CORE = "    implementation 'androidx.core:core:1.16.0'\n"
+APP_DEPENDENCY = "    implementation project(':TMessagesProj')\n"
+
+
+def version_code_line(build):
+    return f"    defaultConfig.versionCode = Integer.parseInt(APP_VERSION_CODE) * 1000 + {build} // pluma: the build number\n"
+
+
+def self_update(tree, c):
+    for rel, old, new in SELF_UPDATE_EDITS:
+        tree.replace(rel, old, new)
+    tree.replace(APP_LOADER_IMPL, APP_LOADER_IMPL_UPSTREAM, APP_LOADER_IMPL_PLUMA)
+    for name, sha in SELF_UPDATE_FILES.items():
+        data = (tree.root / STANDALONE_COMPONENTS / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise PatchError(f"{STANDALONE_COMPONENTS}/{name}: changed upstream (SHA-256); read it again")
+        dst = tree.root / APP_COMPONENTS / name
+        if dst.exists():
+            raise PatchError(f"{APP_COMPONENTS}/{name}: upstream has it now")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+    tree.replace("gradle.properties", f"APP_VERSION_NAME={c.version}\n", f"APP_VERSION_NAME={c.version_name}\n")
+    tree.replace(APP_BUILD_GRADLE, VERSION_CODE, version_code_line(c.build))
+    tree.expect("TMessagesProj/build.gradle", ANDROIDX_CORE)
+    tree.replace(APP_BUILD_GRADLE, APP_DEPENDENCY, APP_DEPENDENCY + ANDROIDX_CORE)
+
+
+def verify_self_update(tree, c):
+    for rel, old, new in SELF_UPDATE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the self-update edit {new.strip().splitlines()[-1]!r} is not there")
+    for rel, count in SELF_UPDATE_USES.items():
+        found = tree.read(rel).count(SELF_UPDATE_CALL)
+        if found != count:
+            raise PatchError(f"{rel}: {found} uses of {SELF_UPDATE_CALL}, expected {count}")
+    if tree.read(APP_LOADER_IMPL) != APP_LOADER_IMPL_PLUMA:
+        raise PatchError(f"{APP_LOADER_IMPL}: not the self-updating loader")
+    for name, sha in SELF_UPDATE_FILES.items():
+        if hashlib.sha256((tree.root / APP_COMPONENTS / name).read_bytes()).hexdigest() != sha:
+            raise PatchError(f"{APP_COMPONENTS}/{name}: not the standalone module's file")
+    if f"APP_VERSION_NAME={c.version_name}\n" not in tree.read("gradle.properties"):
+        raise PatchError(f"gradle.properties: APP_VERSION_NAME is not {c.version_name}")
+    if tree.read(APP_BUILD_GRADLE).count(version_code_line(c.build)) != 1:
+        raise PatchError(f"{APP_BUILD_GRADLE}: the versionCode of build {c.build} is not there")
+    if tree.read(APP_BUILD_GRADLE).count(APP_DEPENDENCY + ANDROIDX_CORE) != 1:
+        raise PatchError(f"{APP_BUILD_GRADLE}: androidx.core is not a dependency")
 
 
 # --- branding ----------------------------------------------------------------
@@ -2765,6 +3010,7 @@ def verify(tree, c):
     verify_birthdays(tree)
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
+    verify_self_update(tree, c)
     verify_brand(tree)
 
 
@@ -2780,19 +3026,20 @@ def main(argv=None):
     ap.add_argument("--abis", default="", help="ABIs of the APK (default: PLUMA_ABIS of the app config)")
     ap.add_argument("--google-services", default="", help="the Firebase config of the app")
     ap.add_argument("--ccache", action="store_true")
+    ap.add_argument("--build", type=int, default=0, help="Pluma's build number, the fourth part of versionName")
     a = ap.parse_args(argv)
     try:
         app = load_env(a.app)
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
                    pathlib.Path(a.rsa_public_key).read_text(), a.abis or app.get("PLUMA_ABIS", ""),
-                   a.ccache, a.google_services)
+                   a.ccache, a.google_services, a.build)
         tree = Tree(a.source)
         patch(tree, c)
         verify(tree, c)
     except PatchError as e:
         print(f"patch: {e}", file=sys.stderr)
         return 1
-    print(f"patch: {c.package} \"{c.app_name}\", layer {c.layer}, server key {c.fingerprint:#018x}, "
+    print(f"patch: {c.package} \"{c.app_name}\" {c.version_name}, layer {c.layer}, server key {c.fingerprint:#018x}, "
           f"ABIs {' '.join(c.abis)}, Firebase {'given' if c.google_services else 'placeholder'}")
     return 0
 

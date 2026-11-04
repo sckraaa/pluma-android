@@ -5,7 +5,9 @@
 #
 # Environment: SERVER_IPV4, SERVER_PORT, SERVER_IPV6 (optional),
 # RSA_PUBLIC_KEY (PKCS#1 PEM), GOOGLE_SERVICES_JSON (optional), ABIS
-# (optional), CCACHE=1 to compile the native code through ccache.
+# (optional), CCACHE=1 to compile the native code through ccache,
+# PLUMA_BUILD (Pluma's build number, the fourth part of the version; 0 for a
+# local build).
 # DEV_SERVER_IPV4 makes a development build for a stand at that address
 # instead of the emulator's 10.0.2.2, whatever the server variables say: the
 # Wi-Fi address of the stand's machine for a phone on the same network, or
@@ -60,6 +62,7 @@ fi
 if [ "${CCACHE:-}" = 1 ]; then
 	args+=(--ccache)
 fi
+args+=(--build "${PLUMA_BUILD:-0}")
 python3 -I ci/patch.py "${args[@]}"
 echo "configure: $target build, server $SERVER_IPV4:$SERVER_PORT"
 echo "target=$target" >>"${GITHUB_OUTPUT:-/dev/null}"
