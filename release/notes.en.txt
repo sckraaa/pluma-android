@@ -1,0 +1,1 @@
+Pluma now updates itself: when a new version comes out, the app offers it and installs it in a couple of taps.
