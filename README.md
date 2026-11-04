@@ -145,7 +145,7 @@ A failed signing (a wrong password, say) costs minutes: fix the secret and use *
 
 A signed build of `main` goes to the releases service of the server right after signing (`ci/publish.sh`): the site offers it for download and the installed apps offer it as an update. One approval of the `sign` job publishes it. The notes are [`release/notes.en.txt`](release/notes.en.txt) and [`release/notes.ru.txt`](release/notes.ru.txt); change them with the change they describe.
 
-- `PLUMA_RELEASES_URL`, a repository variable: the site, `https://pluma.chat`.
+- `PLUMA_RELEASES_URL`, a repository variable: the site; `https://pluma.chat` when unset.
 - `RELEASES_UPLOAD_TOKEN`, a secret of the `release` environment: `teamgramd/deploy/releases/put-token.sh` of the server repository sets it.
 
 Without them the `sign` job of `main` fails. Installs of a build before self-update (version `12.9.1`, three parts) do not see updates: Android compares only the parts both versions have. Install the app from the site once.

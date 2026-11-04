@@ -176,7 +176,7 @@ jobs:
           PLUMA_SIGNING_CERT_SHA256: ${{ vars.PLUMA_SIGNING_CERT_SHA256 }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
           INPUT_ABIS: ${{ inputs.abis }}
-          PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL }}
+          PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
           APK: ${{ needs.build.outputs.apk }}
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
