@@ -11,7 +11,8 @@ After the edits the result is checked again (no Telegram datacenter address
 or server key is left, no Telegram name and no link to Telegram's desktop
 and web clients in the built-in strings, no tg:// link scheme, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
-the chat rather than to gifts, the video bitrates of Pluma).
+the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
+Messages that ask for no Premium).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -381,6 +382,7 @@ def patch(tree, c):
     video_quality(tree)
     birthdays(tree)
     sticker_sets(tree)
+    saved_tags(tree)
     brand(tree)
 
 
@@ -683,6 +685,202 @@ def verify_video_quality(tree):
             changed = next(line for line in new.splitlines()
                            if line not in old.splitlines() and "// pluma:" not in line.split(";")[0])
             raise PatchError(f"{rel}: the video quality edit {changed.strip()!r} is not there")
+
+
+# --- saved message tags ------------------------------------------------------
+# Task 053 of the server repository: reaction tags in Saved Messages work for
+# every user, as for a Premium user of Telegram (the owner's decision); Pluma
+# sells no Premium. The client reads no server setting for tags: each place
+# asks whether the user has Premium (UserConfig.isPremium), and
+# premium_purchase_blocked, which the server sets, even hides the tag selector
+# of the message menu (ChatActivity 31909, premiumFeaturesBlocked). Premium
+# itself would open every Premium feature, so MessagesController gets
+# savedTagsAvailable(), true, and only the tag places ask it instead. Lines are
+# those of upstream 12.9.1.
+# - ChatActivity: the long-press hint over a tag (8851), the Tag action of the
+#   selection (10252, 19217) and its selector (10271, 10324), the hint and the
+#   selector of the message menu (31899, 31909), adding or removing a tag
+#   (32654), the search by tags (38579, isSupportedTags), a tap on a tag under a
+#   message (44862) and its Rename item (44934).
+# - SearchTagsList, the tags over the search results: filtering (272), renaming
+#   on a long press (303-306), the Premium banner (655).
+# - ReactionsContainerLayout, the tag selector: the full list of reactions with
+#   the expand button (1073), the recent and the default reactions in it
+#   (1390), the lock on each tag (1964). The expand button of tags stays off as
+#   for Premium (1119-1122); custom emoji in the expanded list still ask for
+#   Premium (CustomEmojiReactionsWindow 209), as reactions do elsewhere.
+# - SharedMediaLayout, the search icon of Saved Messages in the profile (3787).
+# - BulletinFactory, the tag selector in the notice of messages forwarded to
+#   Saved Messages (1321, 1361).
+# - MessageObject.selectReaction (12341): a message takes as many tags as a
+#   Premium user may put, reactions_user_max_premium (3 from the server);
+#   reactions elsewhere keep getMaxUserReactionsCount, which for a user without
+#   Premium is the server's reactions_user_max_default.
+# The Premium sheets these places showed are no longer reached; no new text.
+CHAT_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java"
+SEARCH_TAGS_LIST = "TMessagesProj/src/main/java/org/telegram/ui/Components/SearchTagsList.java"
+REACTIONS_CONTAINER = "TMessagesProj/src/main/java/org/telegram/ui/Components/ReactionsContainerLayout.java"
+SHARED_MEDIA_LAYOUT = "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
+BULLETIN_FACTORY = "TMessagesProj/src/main/java/org/telegram/ui/Components/BulletinFactory.java"
+MESSAGE_OBJECT = "TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java"
+SAVED_TAGS_CALL = "savedTagsAvailable()"
+SAVED_TAGS_COMMENT = "// pluma: saved message tags without Premium."
+SAVED_TAGS_EDITS = (
+    (MESSAGES_CONTROLLER,
+     "    public boolean premiumPurchaseBlocked() {\n"
+     "        return premiumLocked;\n"
+     "    }\n",
+     "    public boolean premiumPurchaseBlocked() {\n"
+     "        return premiumLocked;\n"
+     "    }\n"
+     "    // pluma: tags in Saved Messages are open to every user; Pluma sells no Premium.\n"
+     "    public boolean savedTagsAvailable() {\n"
+     "        return true;\n"
+     "    }\n"),
+    (CHAT_ACTIVITY,
+     "            if (getUserConfig().isPremium()) {\n"
+     "                savedMessagesTagHint = new HintView2(",
+     f"            {SAVED_TAGS_COMMENT}\n"
+     "            if (getMessagesController().savedTagsAvailable()) {\n"
+     "                savedMessagesTagHint = new HintView2("),
+    (CHAT_ACTIVITY,
+     "        actionMode.setItemVisibility(tag_message, getUserConfig().isPremium() ? View.VISIBLE : View.GONE);\n",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        actionMode.setItemVisibility(tag_message, getMessagesController().savedTagsAvailable() ? View.VISIBLE : View.GONE);\n"),
+    (CHAT_ACTIVITY,
+     "        if (getDialogId() != getUserConfig().getClientUserId() || !getUserConfig().isPremium()) return;\n"
+     "        if (tagSelector != null) return;\n",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        if (getDialogId() != getUserConfig().getClientUserId() || !getMessagesController().savedTagsAvailable()) return;\n"
+     "        if (tagSelector != null) return;\n"),
+    (CHAT_ACTIVITY,
+     "                if (getDialogId() == getUserConfig().getClientUserId() && !getUserConfig().isPremium()) {\n"
+     "                    new PremiumFeatureBottomSheet(ChatActivity.this, PremiumPreviewFragment.PREMIUM_FEATURE_SAVED_TAGS, true).show();\n"
+     "                    clearSelectionMode(false);\n",
+     f"                {SAVED_TAGS_COMMENT}\n"
+     "                if (getDialogId() == getUserConfig().getClientUserId() && !getMessagesController().savedTagsAvailable()) {\n"
+     "                    new PremiumFeatureBottomSheet(ChatActivity.this, PremiumPreviewFragment.PREMIUM_FEATURE_SAVED_TAGS, true).show();\n"
+     "                    clearSelectionMode(false);\n"),
+    (CHAT_ACTIVITY,
+     "                    tagItem.setVisibility(getUserConfig().isPremium() && (\n",
+     f"                    {SAVED_TAGS_COMMENT}\n"
+     "                    tagItem.setVisibility(getMessagesController().savedTagsAvailable() && (\n"),
+    (CHAT_ACTIVITY,
+     "                    reactionsLayout.setHint(getUserConfig().isPremium() ? LocaleController.getString(R.string.SavedTagReactionsHint2) : ",
+     f"                    {SAVED_TAGS_COMMENT}\n"
+     "                    reactionsLayout.setHint(getMessagesController().savedTagsAvailable() ? LocaleController.getString(R.string.SavedTagReactionsHint2) : "),
+    (CHAT_ACTIVITY,
+     "                if (isReactionsAvailable && (!tags || !getMessagesController().premiumFeaturesBlocked())) {\n",
+     f"                {SAVED_TAGS_COMMENT}\n"
+     "                if (isReactionsAvailable && (!tags || getMessagesController().savedTagsAvailable())) {\n"),
+    (CHAT_ACTIVITY,
+     "        if (getDialogId() == getUserConfig().getClientUserId() && !getUserConfig().isPremium() && primaryMessage.messageOwner != null && ",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        if (getDialogId() == getUserConfig().getClientUserId() && !getMessagesController().savedTagsAvailable() && primaryMessage.messageOwner != null && "),
+    (CHAT_ACTIVITY,
+     "\t\treturn getUserConfig().getClientUserId() == getDialogId() && !getMessagesController().getSavedMessagesController().unsupported && getUserConfig().isPremium();\n",
+     f"\t\t{SAVED_TAGS_COMMENT}\n"
+     "\t\treturn getUserConfig().getClientUserId() == getDialogId() && !getMessagesController().getSavedMessagesController().unsupported && getMessagesController().savedTagsAvailable();\n"),
+    (CHAT_ACTIVITY,
+     "        if (getUserConfig().getClientUserId() == getDialogId() && messageObject.areTags() && !getUserConfig().isPremium()) {\n",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        if (getUserConfig().getClientUserId() == getDialogId() && messageObject.areTags() && !getMessagesController().savedTagsAvailable()) {\n"),
+    (CHAT_ACTIVITY,
+     "                if (getUserConfig().isPremium()) {\n"
+     "                    ActionBarMenuSubItem editTag = ",
+     f"                {SAVED_TAGS_COMMENT}\n"
+     "                if (getMessagesController().savedTagsAvailable()) {\n"
+     "                    ActionBarMenuSubItem editTag = "),
+    (SEARCH_TAGS_LIST,
+     "            if (!UserConfig.getInstance(currentAccount).isPremium()) {\n"
+     "                new PremiumFeatureBottomSheet(fragment, PremiumPreviewFragment.PREMIUM_FEATURE_SAVED_TAGS, true).show();\n"
+     "                return;\n",
+     f"            {SAVED_TAGS_COMMENT}\n"
+     "            if (!MessagesController.getInstance(currentAccount).savedTagsAvailable()) {\n"
+     "                new PremiumFeatureBottomSheet(fragment, PremiumPreviewFragment.PREMIUM_FEATURE_SAVED_TAGS, true).show();\n"
+     "                return;\n"),
+    (SEARCH_TAGS_LIST,
+     "            if (position < 0 || position >= items.size() || !UserConfig.getInstance(currentAccount).isPremium())\n"
+     "                return false;\n"
+     "            if (!UserConfig.getInstance(currentAccount).isPremium()) {\n",
+     f"            {SAVED_TAGS_COMMENT}\n"
+     "            if (position < 0 || position >= items.size() || !MessagesController.getInstance(currentAccount).savedTagsAvailable())\n"
+     "                return false;\n"
+     "            if (!MessagesController.getInstance(currentAccount).savedTagsAvailable()) {\n"),
+    (SEARCH_TAGS_LIST,
+     "        if (shownPremiumLayout = !UserConfig.getInstance(currentAccount).isPremium()) {\n",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        if (shownPremiumLayout = !MessagesController.getInstance(currentAccount).savedTagsAvailable()) {\n"),
+    (REACTIONS_CONTAINER,
+     "            allReactionsAvailable = UserConfig.getInstance(currentAccount).isPremium();\n"
+     "            fillRecentReactionsList(visibleReactions);\n",
+     f"            {SAVED_TAGS_COMMENT}\n"
+     "            allReactionsAvailable = MessagesController.getInstance(currentAccount).savedTagsAvailable();\n"
+     "            fillRecentReactionsList(visibleReactions);\n"),
+    (REACTIONS_CONTAINER,
+     "        if (type != TYPE_TAGS || UserConfig.getInstance(currentAccount).isPremium()) {\n",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        if (type != TYPE_TAGS || MessagesController.getInstance(currentAccount).savedTagsAvailable()) {\n"),
+    (REACTIONS_CONTAINER,
+     "            isLocked = type == TYPE_TAGS && !userIsPremium || ",
+     f"            {SAVED_TAGS_COMMENT}\n"
+     "            isLocked = type == TYPE_TAGS && !MessagesController.getInstance(currentAccount).savedTagsAvailable() || "),
+    (SHARED_MEDIA_LAYOUT,
+     "                        searchItemIcon.setIcon(hasFilters() && profileActivity.getUserConfig().isPremium() ? ",
+     f"                        {SAVED_TAGS_COMMENT}\n"
+     "                        searchItemIcon.setIcon(hasFilters() && profileActivity.getMessagesController().savedTagsAvailable() ? "),
+    (BULLETIN_FACTORY,
+     "        if (!UserConfig.getInstance(UserConfig.selectedAccount).isPremium() || fragment == null) {\n"
+     "            return false;\n"
+     "        }\n"
+     "        final Bulletin.LottieLayoutWithReactions layout",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        if (!MessagesController.getInstance(UserConfig.selectedAccount).savedTagsAvailable() || fragment == null) {\n"
+     "            return false;\n"
+     "        }\n"
+     "        final Bulletin.LottieLayoutWithReactions layout"),
+    (BULLETIN_FACTORY,
+     "        final Bulletin.LottieLayout layout = UserConfig.getInstance(UserConfig.selectedAccount).isPremium() && fragment != null && ",
+     f"        {SAVED_TAGS_COMMENT}\n"
+     "        final Bulletin.LottieLayout layout = MessagesController.getInstance(UserConfig.selectedAccount).savedTagsAvailable() && fragment != null && "),
+    (MESSAGE_OBJECT,
+     "        int maxReactionsCount = MessagesController.getInstance(currentAccount).getMaxUserReactionsCount();\n",
+     "        // pluma: tags in Saved Messages take the Premium limit.\n"
+     "        int maxReactionsCount = areTags() ? MessagesController.getInstance(currentAccount).reactionsUserMaxPremium : "
+     "MessagesController.getInstance(currentAccount).getMaxUserReactionsCount();\n"),
+)
+# The places that ask savedTagsAvailable(), each file with its count; nothing
+# else may ask it.
+SAVED_TAGS_USES = {
+    MESSAGES_CONTROLLER: 1,
+    CHAT_ACTIVITY: 11,
+    SEARCH_TAGS_LIST: 4,
+    REACTIONS_CONTAINER: 3,
+    SHARED_MEDIA_LAYOUT: 1,
+    BULLETIN_FACTORY: 2,
+}
+
+
+def saved_tags(tree):
+    for rel, old, new in SAVED_TAGS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_saved_tags(tree):
+    for rel, old, new in SAVED_TAGS_EDITS:
+        text = tree.read(rel)
+        # The method is added after the text it is anchored on, which stays.
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            changed = next(line for line in new.splitlines()
+                           if line not in old.splitlines() and "// pluma:" not in line)
+            raise PatchError(f"{rel}: the saved tags edit {changed.strip()!r} is not there")
+    for rel, count in SAVED_TAGS_USES.items():
+        found = tree.read(rel).count(SAVED_TAGS_CALL)
+        if found != count:
+            raise PatchError(f"{rel}: {found} uses of {SAVED_TAGS_CALL}, expected {count}")
+    definition = re.findall(r"public boolean savedTagsAvailable\(\) \{\n\s*return (\w+);\n", tree.read(MESSAGES_CONTROLLER))
+    if definition != ["true"]:
+        raise PatchError(f"{MESSAGES_CONTROLLER}: savedTagsAvailable() does not return true")
 
 
 # --- branding ----------------------------------------------------------------
@@ -2566,6 +2764,7 @@ def verify(tree, c):
     verify_video_quality(tree)
     verify_birthdays(tree)
     verify_sticker_sets(tree)
+    verify_saved_tags(tree)
     verify_brand(tree)
 
 
