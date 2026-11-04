@@ -3,8 +3,8 @@
 # on the site and offers it to installed apps (task 054 and ADR 0035 of the
 # server repository): publish.sh <signed.apk> <build>.
 #
-# The version is the patched versionName, <UPSTREAM_VERSION>.<build>; the
-# notes are release/notes.en.txt and release/notes.ru.txt.
+# The version is the patched versionName, <UPSTREAM_VERSION>.<build>, the
+# build zero-padded to five digits (ci/patch.py, self-update); the notes are release/notes.en.txt and release/notes.ru.txt.
 #
 # Environment: PLUMA_RELEASES_URL (the site, https://pluma.chat),
 # RELEASES_UPLOAD_TOKEN (the service's upload token, never printed).
@@ -15,11 +15,11 @@ apk=${1:?usage: publish.sh signed.apk build}
 build=${2:?usage: publish.sh signed.apk build}
 : "${PLUMA_RELEASES_URL:?PLUMA_RELEASES_URL is not set}"
 : "${RELEASES_UPLOAD_TOKEN:?RELEASES_UPLOAD_TOKEN is not set}"
-if [[ ! "$build" =~ ^[0-9]{1,6}$ ]]; then
+if [[ ! "$build" =~ ^[0-9]{1,5}$ ]]; then
 	echo "publish: build $build is not a number" >&2
 	exit 1
 fi
-version="$UPSTREAM_VERSION.$build"
+version="$UPSTREAM_VERSION.$(printf %05d "$((10#$build))")"
 for f in release/notes.en.txt release/notes.ru.txt; do
 	[ -s "$f" ] || { echo "publish: $f is missing or empty" >&2; exit 1; }
 done
