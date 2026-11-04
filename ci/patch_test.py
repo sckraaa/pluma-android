@@ -303,6 +303,101 @@ class VideoQualityTest(unittest.TestCase):
                 tree.write(rel, patched)
             patch.verify_video_quality(tree)
 
+class SavedTagsTest(unittest.TestCase):
+    # Premium checks of upstream that are not about tags; they must stay.
+    OTHER_PREMIUM = {
+        patch.MESSAGES_CONTROLLER: "    public int getMaxUserReactionsCount() {\n"
+                                   "        return getUserConfig().isPremium() ? reactionsUserMaxPremium : reactionsUserMaxDefault;\n"
+                                   "    }\n",
+        patch.CHAT_ACTIVITY: "        if (SharedConfig.multipleReactionsPromoShowed || cell == null || visibleReaction == null || "
+                             "getUserConfig().isPremium()) {\n",
+        patch.REACTIONS_CONTAINER: "        if (type == TYPE_TAGS && !UserConfig.getInstance(currentAccount).isPremium()) {\n"
+                                   "            showExpandableReactions = false;\n",
+    }
+
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.SAVED_TAGS_EDITS):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "class X {\n" + self.OTHER_PREMIUM.get(rel, "")) + old + "        x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text + "}\n", encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_tags_without_premium(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_saved_tags(tree)
+            patch.saved_tags(tree)
+            patch.verify_saved_tags(tree)
+            self.assertIn("    public boolean savedTagsAvailable() {\n        return true;\n    }\n",
+                          tree.read(patch.MESSAGES_CONTROLLER))
+            # Every tag place asks savedTagsAvailable() instead of Premium.
+            for rel, _, new in patch.SAVED_TAGS_EDITS:
+                self.assertNotIn("isPremium()", new)
+                self.assertNotIn("userIsPremium", new)
+                self.assertNotIn("premiumFeaturesBlocked", new)
+            self.assertIn("if (isReactionsAvailable && (!tags || getMessagesController().savedTagsAvailable())) {",
+                          tree.read(patch.CHAT_ACTIVITY))
+            # A message takes as many tags as with Premium; reactions keep the
+            # server's limit for a user without Premium.
+            self.assertIn("int maxReactionsCount = areTags() ? MessagesController.getInstance(currentAccount)"
+                          ".reactionsUserMaxPremium : MessagesController.getInstance(currentAccount)"
+                          ".getMaxUserReactionsCount();", tree.read(patch.MESSAGE_OBJECT))
+            # The other Premium checks stay as upstream has them.
+            for rel, text in self.OTHER_PREMIUM.items():
+                self.assertEqual(tree.read(rel).count(text), 1)
+            # A second run finds none of the upstream texts.
+            with self.assertRaises(patch.PatchError):
+                patch.saved_tags(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.SAVED_TAGS_EDITS):
+            changed = old.replace("(", "( ", 1) if "(" in old else old.replace(" == ", " ==  ", 1)
+            self.assertNotEqual(changed, old)
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.SAVED_TAGS_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.saved_tags(tree)
+        # An anchor upstream uses twice.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), patch.SAVED_TAGS_EDITS + patch.SAVED_TAGS_EDITS[2:3])
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.saved_tags(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.saved_tags(tree)
+            for rel, old, new in patch.SAVED_TAGS_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old), patched.replace(new, ""), patched + new):
+                    with self.subTest(file=rel, edit=new.splitlines()[1]):
+                        self.assertNotEqual(text, patched)
+                        tree.write(rel, text)
+                        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                            patch.verify_saved_tags(tree)
+                tree.write(rel, patched)
+            patch.verify_saved_tags(tree)
+            # One more place that asks it: some other feature would open.
+            for rel in patch.SAVED_TAGS_USES:
+                patched = tree.read(rel)
+                with self.subTest(file=rel):
+                    tree.write(rel, patched + "        if (getMessagesController().savedTagsAvailable()) {\n")
+                    with self.assertRaisesRegex(patch.PatchError, "uses of savedTagsAvailable"):
+                        patch.verify_saved_tags(tree)
+                tree.write(rel, patched)
+            # The tags available only with Premium again.
+            patched = tree.read(patch.MESSAGES_CONTROLLER)
+            tree.write(patch.MESSAGES_CONTROLLER,
+                       patched.replace("        return true;\n", "        return getUserConfig().isPremium();\n", 1))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_saved_tags(tree)
+
+
 class StickerSetsTest(unittest.TestCase):
     def tree(self, root, text):
         (root / patch.MESSAGES_CONTROLLER).parent.mkdir(parents=True, exist_ok=True)
