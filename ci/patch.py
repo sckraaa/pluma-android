@@ -197,10 +197,10 @@ class Config:
         self.ndk = need(upstream, "NDK_VERSION")
         self.cmake = need(upstream, "CMAKE_VERSION")
         # Pluma's build number, the fourth part of versionName (self-update).
-        if not isinstance(build, int) or not 0 <= build < 1000000:
-            raise PatchError(f"build number {build!r}: 0 to 999999")
+        if not isinstance(build, int) or not 0 <= build < 100000:
+            raise PatchError(f"build number {build!r}: 0 to 99999")
         self.build = build
-        self.version_name = f"{self.version}.{build}"
+        self.version_name = f"{self.version}.{build:05d}"
         if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", self.version_name):
             raise PatchError(f"version {self.version_name!r}: four numbers, as Android compares them")
 
@@ -914,7 +914,14 @@ def verify_saved_tags(tree):
 #   they are (SHA-256 below).
 # The server compares versions as Android does (SharedConfig 811-824: only the
 # parts both have, each an integer), so versionName gets Pluma's build number
-# as a fourth part, 12.9.1.N, and versionCode rises with it: (APP_VERSION_CODE *
+# as a fourth part, 12.9.1.NNNNN. Five digits, zero-padded: after a restart
+# Android keeps a pending update only while the installed versionName is
+# below it as a string (SharedConfig 576), and fixed width makes the string
+# order the number order (12.9.1.00099 < 12.9.1.00100). It is set in the app
+# module only: the library's BuildConfig (BUILD_VERSION_STRING) keeps
+# upstream's version, so its compile stays in the Gradle build cache; the
+# version the app reports and compares is the package's (ConnectionsManager
+# 223, SharedConfig 567, 791). versionCode rises with it: (APP_VERSION_CODE *
 # 1000 + N) * 10 + the ABI digit, above every earlier Pluma build (69799); it
 # keeps rising across upstream versions. Lines are those of upstream
 # 12.9.1.
@@ -1083,6 +1090,13 @@ ANDROIDX_CORE = "    implementation 'androidx.core:core:1.16.0'\n"
 APP_DEPENDENCY = "    implementation project(':TMessagesProj')\n"
 
 
+VERSION_NAME = "        versionName APP_VERSION_NAME\n"
+
+
+def version_name_line(c):
+    return f'        versionName APP_VERSION_NAME + ".{c.build:05d}" // pluma: {c.version_name}, the build number\n'
+
+
 def version_code_line(build):
     return f"    defaultConfig.versionCode = Integer.parseInt(APP_VERSION_CODE) * 1000 + {build} // pluma: the build number\n"
 
@@ -1100,7 +1114,7 @@ def self_update(tree, c):
             raise PatchError(f"{APP_COMPONENTS}/{name}: upstream has it now")
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(data)
-    tree.replace("gradle.properties", f"APP_VERSION_NAME={c.version}\n", f"APP_VERSION_NAME={c.version_name}\n")
+    tree.replace(APP_BUILD_GRADLE, VERSION_NAME, version_name_line(c))
     tree.replace(APP_BUILD_GRADLE, VERSION_CODE, version_code_line(c.build))
     tree.expect("TMessagesProj/build.gradle", ANDROIDX_CORE)
     tree.replace(APP_BUILD_GRADLE, APP_DEPENDENCY, APP_DEPENDENCY + ANDROIDX_CORE)
@@ -1120,8 +1134,8 @@ def verify_self_update(tree, c):
     for name, sha in SELF_UPDATE_FILES.items():
         if hashlib.sha256((tree.root / APP_COMPONENTS / name).read_bytes()).hexdigest() != sha:
             raise PatchError(f"{APP_COMPONENTS}/{name}: not the standalone module's file")
-    if f"APP_VERSION_NAME={c.version_name}\n" not in tree.read("gradle.properties"):
-        raise PatchError(f"gradle.properties: APP_VERSION_NAME is not {c.version_name}")
+    if tree.read(APP_BUILD_GRADLE).count(version_name_line(c)) != 1 or VERSION_NAME in tree.read(APP_BUILD_GRADLE):
+        raise PatchError(f"{APP_BUILD_GRADLE}: versionName is not {c.version_name}")
     if tree.read(APP_BUILD_GRADLE).count(version_code_line(c.build)) != 1:
         raise PatchError(f"{APP_BUILD_GRADLE}: the versionCode of build {c.build} is not there")
     if tree.read(APP_BUILD_GRADLE).count(APP_DEPENDENCY + ANDROIDX_CORE) != 1:

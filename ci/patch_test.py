@@ -111,8 +111,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(c.ipv6, "2001:0db8:0000:0000:0000:0000:0000:0001")
         self.assertEqual(c.abis, ["arm64-v8a", "x86_64"])
         self.assertEqual(c.package, "chat.pluma.app")
-        self.assertEqual(c.version_name, "12.9.1.0")
-        self.assertEqual(config(build=57).version_name, "12.9.1.57")
+        self.assertEqual(c.version_name, "12.9.1.00000")
+        self.assertEqual(config(build=57).version_name, "12.9.1.00057")
 
     def test_rejects(self):
         for over in (
@@ -126,7 +126,7 @@ class ConfigTest(unittest.TestCase):
             {"abis": "arm64-v8a arm64-v8a"},
             {"abis": ""},
             {"build": -1},
-            {"build": 1000000},
+            {"build": 100000},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
@@ -417,7 +417,8 @@ class SelfUpdateTest(unittest.TestCase):
         (root / patch.APP_LOADER_IMPL).parent.mkdir(parents=True, exist_ok=True)
         (root / patch.APP_LOADER_IMPL).write_text(patch.APP_LOADER_IMPL_UPSTREAM, encoding="utf-8")
         (root / "gradle.properties").write_text("APP_VERSION_CODE=6979\nAPP_VERSION_NAME=12.9.1\n", encoding="utf-8")
-        (root / patch.APP_BUILD_GRADLE).write_text("android {\n" + patch.VERSION_CODE + "}\ndependencies {\n" + patch.APP_DEPENDENCY + "}\n",
+        (root / patch.APP_BUILD_GRADLE).write_text("android {\n" + patch.VERSION_CODE + "    defaultConfig {\n" + patch.VERSION_NAME
+                                                   + "    }\n}\ndependencies {\n" + patch.APP_DEPENDENCY + "}\n",
                                                    encoding="utf-8")
         (root / "TMessagesProj/build.gradle").write_text("dependencies {\n" + patch.ANDROIDX_CORE + "}\n", encoding="utf-8")
         (root / patch.STANDALONE_COMPONENTS).mkdir(parents=True)
@@ -448,7 +449,10 @@ class SelfUpdateTest(unittest.TestCase):
             self.assertNotIn("isStandalone()", tree.read(patch.APP_LOADER_IMPL))
             for name, data in self.COMPONENTS.items():
                 self.assertEqual((tree.root / patch.APP_COMPONENTS / name).read_bytes(), data)
-            self.assertIn("APP_VERSION_NAME=12.9.1.57\n", tree.read("gradle.properties"))
+            # The library keeps upstream's version; the app module gets the build.
+            self.assertIn("APP_VERSION_NAME=12.9.1\n", tree.read("gradle.properties"))
+            self.assertIn('        versionName APP_VERSION_NAME + ".00057" // pluma: 12.9.1.00057, the build number\n',
+                          tree.read(patch.APP_BUILD_GRADLE))
             self.assertIn("Integer.parseInt(APP_VERSION_CODE) * 1000 + 57 ", tree.read(patch.APP_BUILD_GRADLE))
             # A second run finds none of the upstream texts.
             with self.assertRaises(patch.PatchError):
@@ -488,7 +492,7 @@ class SelfUpdateTest(unittest.TestCase):
                         patch.verify_self_update(tree, c)
                 tree.write(rel, patched)
             # Another build number than the configuration's.
-            with self.assertRaisesRegex(patch.PatchError, "APP_VERSION_NAME"):
+            with self.assertRaisesRegex(patch.PatchError, "versionName"):
                 patch.verify_self_update(tree, config(build=4))
             patch.verify_self_update(tree, c)
 
