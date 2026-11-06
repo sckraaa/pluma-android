@@ -497,6 +497,166 @@ class SelfUpdateTest(unittest.TestCase):
             patch.verify_self_update(tree, c)
 
 
+class LinksTest(unittest.TestCase):
+    STRINGS = {
+        "values": '<string name="GroupDescription3">Public links such as t.me/title</string>\n'
+                  '<string name="TelegramFeaturesUrl">https://t.me/TelegramTips</string>\n',
+        "values-de": '<string name="TelegramFeaturesUrl">https://t.me/TelegramTipsDE</string>\n',
+    }
+
+    # The upstream files, made of the texts the edits expect, with the t.me
+    # literals and host checks upstream keeps.
+    def tree(self, root, edits=patch.LINKS_EDITS, strings=STRINGS):
+        files, kept = {}, {}
+        for rel, old, new, count in edits:
+            files[rel] = files.get(rel, "") + (old + "\n") * count
+            kept[rel] = kept.get(rel, "") + (new + "\n") * count
+        for rel, (full, bare) in patch.LINKS_OUT.items():
+            rel = f"{patch.JAVA}/{rel}"
+            files[rel] = files.get(rel, "") + 'share("https://t.me/" + name);\n' * full + 'show("t.me/" + name);\n' * bare
+        for rel, n in patch.LINKS_KEEP.items():
+            rel = f"{patch.JAVA}/{rel}"
+            n -= len(patch.LINK_LITERAL.findall(kept.get(rel, "")))
+            # The kept literals are not of the forms the table replaces.
+            files[rel] = files.get(rel, "") + 'open("http://t.me/BotFather");\n' * n
+        for rel, n in patch.HOSTS_KEEP.items():
+            rel = f"{patch.JAVA}/{rel}"
+            files[rel] = files.get(rel, "") + 'if ("t.me".equals(uri.getHost())) {}\n' * n
+        for lang, text in strings.items():
+            files[f"{patch.RES}/{lang}/strings.xml"] = text
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_links(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_links(tree)
+            patch.links(tree)
+            patch.verify_links(tree)
+            for rel in patch.LINKS_OUT:
+                self.assertNotRegex(tree.read(f"{patch.JAVA}/{rel}"), r'"(?:https://)?t\.me/" \+ name')
+            self.assertIn('"https://pluma.chat/" + name', tree.read(f"{patch.JAVA}/ui/ChatActivity.java"))
+            self.assertIn('show("pluma.chat/" + name)', tree.read(f"{patch.JAVA}/ui/Cells/StickerSetCell.java"))
+            manifest = tree.read(f"{patch.MAIN}/AndroidManifest.xml")
+            self.assertEqual(manifest.count('<data android:host="pluma.chat" android:scheme="https" />'), 1)
+            self.assertEqual(manifest.count('<intent-filter android:autoVerify="true">'), 1)
+            # pluma.chat is only in the filter with the paths of links.
+            for block in re.findall(r"<intent-filter.*?</intent-filter>", manifest, re.S):
+                if "pluma.chat" in block:
+                    self.assertIn('android:autoVerify="true"', block)
+                    self.assertIn('<data android:pathPrefix="/joinchat/" />', block)
+                    self.assertIn('<data android:pathAdvancedPattern="/[A-Za-z][A-Za-z0-9_]{4,31}" />', block)
+                    self.assertNotIn("android:pathPattern", block)
+            self.assertIn('<data android:scheme="https"/>', manifest)
+            browser = tree.read(f"{patch.JAVA}/messenger/browser/Browser.java")
+            for name in patch.LINK_SITE_PATHS:
+                self.assertIn(f'"{name}"', browser)
+            self.assertIn("return plumaUsername(link.substring(19));", browser)
+            self.assertIn("pluma.chat/title", tree.read(f"{patch.RES}/values/strings.xml"))
+            self.assertIn("https://t.me/TelegramTipsDE", tree.read(f"{patch.RES}/values-de/strings.xml"))
+            # A second run finds none of the upstream texts.
+            with self.assertRaises(patch.PatchError):
+                patch.links(tree)
+
+    def test_upstream_changed(self):
+        for i, (_, old, _, _) in enumerate(patch.LINKS_EDITS):
+            changed = old[0] + "x" + old[1:]
+            edits = [(r, changed if j == i else o, n, c) for j, (r, o, n, c) in enumerate(patch.LINKS_EDITS)]
+            with self.subTest(edit=old.strip()[:60]), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.links(tree)
+        # One more outgoing t.me link in a file of the table.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.JAVA}/ui/PhotoViewer.java"
+            tree.write(rel, tree.read(rel) + 'share("https://t.me/" + name);\n')
+            with self.assertRaisesRegex(patch.PatchError, "3 occurrences"):
+                patch.links(tree)
+        # The text about public links in a bundled translation too.
+        strings = dict(self.STRINGS, **{"values-de": self.STRINGS["values"]})
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), strings=strings)
+            with self.assertRaisesRegex(patch.PatchError, "GroupDescription3 in values, values-de"):
+                patch.links(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.links(tree)
+            for rel, old, new, _ in patch.LINKS_EDITS:
+                patched = tree.read(rel)
+                with self.subTest(edit=old.strip()[:60]):
+                    tree.write(rel, patched.replace(new, old))
+                    with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                        patch.verify_links(tree)
+                tree.write(rel, patched)
+            patch.verify_links(tree)
+            # A new t.me link anywhere, a new t.me host check without
+            # pluma.chat, a new built-in text with t.me.
+            for rel, extra, error in (
+                    (f"{patch.JAVA}/ui/ProfileActivity.java", 'share("https://t.me/" + name);\n', "t.me links left"),
+                    (f"{patch.JAVA}/ui/PhotoViewer.java", 'show("t.me/" + name);\n', "t.me links left"),
+                    (f"{patch.JAVA}/ui/LaunchActivity.java", 'if (host.equals("telegram.me")) {}\n', "host checks"),
+                    (f"{patch.JAVA}/ui/LinkManager.java", 'if ("t.me".equalsIgnoreCase(host)) {}\n', "host checks"),
+                    (f"{patch.RES}/values-de/strings.xml", '<string name="X">Links wie t.me/name</string>\n',
+                     "X still shows t.me")):
+                path = tree.root / rel
+                patched = path.read_text(encoding="utf-8") if path.exists() else None
+                with self.subTest(file=rel, extra=extra):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text((patched or "") + extra, encoding="utf-8")
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_links(tree)
+                if patched is None:
+                    path.unlink()
+                else:
+                    path.write_text(patched, encoding="utf-8")
+            patch.verify_links(tree)
+
+    def test_tables(self):
+        for rel, old, new, count in patch.LINKS_EDITS:
+            self.assertTrue(patch.LINK_HOST in new or r"pluma\\.chat" in new, new)
+            self.assertNotIn(patch.LINK_HOST, old)
+            self.assertGreater(count, 0)
+        for rel, counts in patch.LINKS_OUT.items():
+            self.assertGreater(sum(counts), 0, rel)
+        for table in (patch.LINKS_KEEP, patch.HOSTS_KEEP):
+            self.assertTrue(all(n > 0 for n in table.values()))
+        self.assertFalse({key for key, _, _, _ in patch.LINK_STRINGS} & patch.LINK_STRINGS_KEEP)
+
+    def test_site_paths(self):
+        # The site's paths, the same list in every client.
+        self.assertEqual(patch.LINK_SITE_PATHS, (
+            "iphone", "ipad", "android", "mac", "windows", "linux", "web", "pero", "app", "en", "dl", "ios",
+            "collect", "assets", "_l", ".well-known",
+            "favicon.svg", "og.png", "apple-touch-icon.png", "404.html", "progress.json"))
+        self.assertEqual(len(set(patch.LINK_SITE_PATHS)), len(patch.LINK_SITE_PATHS))
+        self.assertTrue(all(p == p.lower() for p in patch.LINK_SITE_PATHS))
+        # No link prefix the manifest takes is a page of the site.
+        for prefix in patch.LINK_PATH_PREFIXES:
+            self.assertTrue(prefix.startswith("/"), prefix)
+            self.assertNotIn(prefix.strip("/").lower(), patch.LINK_SITE_PATHS)
+
+    def test_username_patterns(self):
+        # The manifest's patterns read as Android's advanced glob does: the
+        # whole path, a set or a dot with an optional count, no alternatives.
+        def matches(path):
+            return any(re.fullmatch(p, path) for p in patch.LINK_USERNAME_PATTERNS)
+        for path in ("/durov", "/Durov_1", "/durov/123", "/durov/s/5", "/durov/", "/a" + "b" * 31):
+            self.assertTrue(matches(path), path)
+        for path in ("/", "/abcd", "/1abcd", "/_abcd", "/a" + "b" * 32, "/en/iphone", "/ipad", "/dl/x",
+                     "/.well-known/assetlinks.json", "/favicon.svg", "/_l/x", "/pero", "/web"):
+            self.assertFalse(matches(path), path)
+        # The site's words of 5 letters and more still match: the app opens
+        # those in the browser (Browser.isPlumaSite in LaunchActivity).
+        self.assertEqual(sorted(p for p in patch.LINK_SITE_PATHS if matches("/" + p)),
+                         ["android", "assets", "collect", "iphone", "linux", "windows"])
+
+
 class StickerSetsTest(unittest.TestCase):
     def tree(self, root, text):
         (root / patch.MESSAGES_CONTROLLER).parent.mkdir(parents=True, exist_ok=True)
