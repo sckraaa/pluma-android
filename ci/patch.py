@@ -9,7 +9,8 @@ replace upstream files only when those are byte for byte the ones expected,
 and add files only under names upstream does not use.
 After the edits the result is checked again (no Telegram datacenter address
 or server key is left, no Telegram name and no link to Telegram's desktop
-and web clients in the built-in strings, no tg:// link scheme, no Telegram
+and web clients in the built-in strings, no tg:// link scheme, no t.me link
+the app makes itself and pluma.chat taken wherever t.me is, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
 the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
 Messages that ask for no Premium).
@@ -391,6 +392,7 @@ def patch(tree, c):
     sticker_sets(tree)
     saved_tags(tree)
     self_update(tree, c)
+    links(tree)
     brand(tree)
 
 
@@ -1781,6 +1783,366 @@ SCHEME_KEEP = {
 }
 SCHEME_LITERAL = re.compile(r'"tg(?::|")')
 
+# Links: pluma.chat is to Pluma what t.me is to Telegram (task 026 of the
+# server repository). The server makes its links with pluma.chat (invites,
+# boosts, me_url_prefix of the config, which the app keeps as linkPrefix), and
+# the app takes pluma.chat links as its own, as it takes t.me, telegram.me and
+# telegram.dog, which stay. Only the exact host: x.pluma.chat is not a
+# username, as x.t.me is (PREFIX_T_ME_PATTERN), because web.pluma.chat and the
+# like are sites. Exact edits, each with its number of occurrences.
+LINK_HOST = "pluma.chat"
+# The site's own addresses, by the first segment of the path: its pages and
+# files, which look like links to a username. With the root they open in the
+# browser, never in the app. Every client keeps the same list.
+LINK_SITE_PATHS = (
+    "iphone", "ipad", "android", "mac", "windows", "linux", "web", "pero", "app", "en", "dl", "ios",
+    "collect", "assets", "_l", ".well-known",
+    "favicon.svg", "og.png", "apple-touch-icon.png", "404.html", "progress.json",
+)
+# The paths of pluma.chat the system hands to the app: those of the links the
+# server and the app make and the app opens (LaunchActivity.handleIntent), and
+# a username of 5 to 32 characters with whatever follows it. The patterns are
+# pathAdvancedPattern, which Android 12 (API 31) and later read; earlier ones
+# skip the attribute and hand the app only the prefixed links, since a
+# pathPattern there, which has no character classes, would take every path of
+# 5 characters or more, the site's pages among them.
+LINK_PATH_PREFIXES = (
+    "/+", "/joinchat/", "/addstickers/", "/addemoji/", "/addlist/", "/folder/", "/c/", "/s/", "/m/", "/call/",
+    "/boost", "/proxy", "/socks", "/setlanguage/", "/addtheme/", "/bg/", "/login/", "/contact/", "/share",
+)
+LINK_USERNAME_PATTERNS = ("/[A-Za-z][A-Za-z0-9_]{4,31}", "/[A-Za-z][A-Za-z0-9_]{4,31}/.*")
+# Browser.java: the list, the checks the edits below call, and the browser a
+# page of the site goes to by name.
+PLUMA_SITE_JAVA = (
+    "    // pluma: the pages and files of the site pluma.chat, by the first segment of the path. Their\n"
+    "    // addresses look like links to a username; they and the root open in the browser, as t.me/iv does.\n"
+    "    public static final java.util.Set<String> PLUMA_SITE_PATHS = new java.util.HashSet<>(java.util.Arrays.asList(\n"
+    + "".join(f"        {', '.join(chr(34) + p + chr(34) for p in LINK_SITE_PATHS[i:i + 8])}"
+              f"{',' if i + 8 < len(LINK_SITE_PATHS) else ''}\n" for i in range(0, len(LINK_SITE_PATHS), 8))
+    + "    ));\n"
+    "\n"
+    "    // pluma: whether a path of pluma.chat, with or without its leading slash, query and fragment, is\n"
+    "    // the root or a page of the site.\n"
+    "    public static boolean isPlumaSitePath(String path) {\n"
+    "        if (path == null) return true;\n"
+    "        if (path.startsWith(\"/\")) path = path.substring(1);\n"
+    "        int end = path.length();\n"
+    "        for (char c : new char[] {'/', '?', '#'}) {\n"
+    "            final int i = path.indexOf(c);\n"
+    "            if (i >= 0 && i < end) end = i;\n"
+    "        }\n"
+    "        final String first = path.substring(0, end);\n"
+    "        return first.isEmpty() || PLUMA_SITE_PATHS.contains(first.toLowerCase(java.util.Locale.ROOT));\n"
+    "    }\n"
+    "\n"
+    "    // pluma: whether a link is the root or a page of the site pluma.chat.\n"
+    "    public static boolean isPlumaSite(Uri uri) {\n"
+    "        if (uri == null) return false;\n"
+    "        final String scheme = uri.getScheme();\n"
+    "        if (!\"http\".equalsIgnoreCase(scheme) && !\"https\".equalsIgnoreCase(scheme)) return false;\n"
+    "        return \"pluma.chat\".equalsIgnoreCase(uri.getHost()) && isPlumaSitePath(uri.getPath());\n"
+    "    }\n"
+    "\n"
+    "    // pluma: the username of a link to pluma.chat without its host, or null for a page of the site.\n"
+    "    private static String plumaUsername(String path) {\n"
+    "        return isPlumaSitePath(path) ? null : path;\n"
+    "    }\n"
+    "\n"
+    "    // pluma: the browser that shows a page of pluma.chat: the default one, or else the first, never\n"
+    "    // this app. The app is the verified handler of some of the site's addresses, so an intent left to\n"
+    "    // the system could come back here. Null when there is none, and the system chooses.\n"
+    "    private static String plumaSiteBrowser(Context context) {\n"
+    "        try {\n"
+    "            final android.content.pm.PackageManager pm = context.getPackageManager();\n"
+    "            final Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(\"https://example.com/\"));\n"
+    "            intent.addCategory(Intent.CATEGORY_BROWSABLE);\n"
+    "            final ResolveInfo preferred = pm.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);\n"
+    "            final String preferredPackage = preferred != null && preferred.activityInfo != null ? preferred.activityInfo.packageName : null;\n"
+    "            String first = null;\n"
+    "            for (ResolveInfo info : pm.queryIntentActivities(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)) {\n"
+    "                final String name = info.activityInfo.packageName;\n"
+    "                if (name.equals(context.getPackageName())) continue;\n"
+    "                if (name.equals(preferredPackage)) return name;\n"
+    "                if (first == null) first = name;\n"
+    "            }\n"
+    "            return first;\n"
+    "        } catch (Exception e) {\n"
+    "            FileLog.e(e);\n"
+    "        }\n"
+    "        return null;\n"
+    "    }\n"
+    "\n"
+)
+LINKS_EDITS = (
+    # Before the first config arrives the app makes its links with this.
+    (f"{JAVA}/messenger/MessagesController.java",
+     'linkPrefix = mainPreferences.getString("linkPrefix", "t.me");',
+     'linkPrefix = mainPreferences.getString("linkPrefix", "pluma.chat");', 1),
+    # The http(s) branch of handleIntent (system intents and Browser.openUrl),
+    # LinkManager, and proxy links.
+    (f"{JAVA}/ui/LaunchActivity.java",
+     'host.equals("t.me") || host.equals("telegram.dog") || isPrefix',
+     'host.equals("t.me") || host.equals("telegram.dog") || host.equals("pluma.chat") || isPrefix', 1),
+    (f"{JAVA}/ui/LinkManager.java",
+     'host.equals("t.me") || host.equals("telegram.dog") || isPrefix',
+     'host.equals("t.me") || host.equals("telegram.dog") || host.equals("pluma.chat") || isPrefix', 1),
+    (f"{JAVA}/ui/LinkManager.java",
+     '!"telegram.dog".equalsIgnoreCase(host) && !isPrefix',
+     '!"telegram.dog".equalsIgnoreCase(host) && !"pluma.chat".equalsIgnoreCase(host) && !isPrefix', 1),
+    (f"{JAVA}/messenger/AndroidUtilities.java",
+     'if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog")) {',
+     'if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog") || host.equals("pluma.chat")) {',
+     1),
+    # In the app or in the browser: every tapped link asks isInternalUri.
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '} else if ("telegram.me".equals(host) || "t.me".equals(host)) {',
+     '} else if ("telegram.me".equals(host) || "t.me".equals(host) || "pluma.chat".equals(host)) {', 1),
+    # The username of a scanned QR code (QrActivity, NewContactBottomSheet)
+    # and of a pasted link (ChatActivity, PeerStoriesView).
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '        if (link.startsWith("https://t.me/")) {\n'
+     '            return link.substring(13);\n'
+     '        }\n',
+     '        if (link.startsWith("https://t.me/")) {\n'
+     '            return link.substring(13);\n'
+     '        }\n'
+     '        if (link.startsWith("pluma.chat/")) {\n'
+     '            return plumaUsername(link.substring(11));\n'
+     '        }\n'
+     '        if (link.startsWith("http://pluma.chat/")) {\n'
+     '            return plumaUsername(link.substring(18));\n'
+     '        }\n'
+     '        if (link.startsWith("https://pluma.chat/")) {\n'
+     '            return plumaUsername(link.substring(19));\n'
+     '        }\n', 1),
+    # The pages of the site (LINK_SITE_PATHS) open in the browser, as t.me/iv
+    # and t.me/s/: isInternalUri sends them there (forceBrowser), the app
+    # never offers them to another app, which on Android 11 and later could be
+    # Pluma itself through its verified links, and they go to a browser by
+    # name, never to whatever the system resolves (plumaSiteBrowser).
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '                if (path.equals("iv") || path.startsWith("s/")) {\n',
+     '                if (path.equals("iv") || path.startsWith("s/") || "pluma.chat".equals(host) && isPlumaSitePath(path)) {\n',
+     1),
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '            if (isTonsite(url) || isInternalUrl(url, null)) return false;\n',
+     '            // pluma: a page of pluma.chat is no other app\'s, and the system could hand it back to this one.\n'
+     '            if (isTonsite(url) || isInternalUrl(url, null) || isPlumaSite(Uri.parse(url))) return false;\n', 1),
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '                    CustomTabsIntent intent = builder.build();\n',
+     '                    CustomTabsIntent intent = builder.build();\n'
+     '                    // pluma: without a bound session the tab is left to the system, which hands some pages of\n'
+     '                    // pluma.chat to this app; it goes to a browser by name instead.\n'
+     '                    if (intent.intent.getPackage() == null && isPlumaSite(uri)) {\n'
+     '                        intent.intent.setPackage(plumaSiteBrowser(context));\n'
+     '                    }\n', 1),
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '            if (!TextUtils.isEmpty(browser)) {\n'
+     '                intent.setPackage(browser);\n'
+     '            }\n',
+     '            if (!TextUtils.isEmpty(browser)) {\n'
+     '                intent.setPackage(browser);\n'
+     '            } else if (!isIntentScheme && isPlumaSite(uri)) {\n'
+     '                // pluma: a page of pluma.chat goes to a browser by name, not back to this app.\n'
+     '                intent.setPackage(plumaSiteBrowser(context));\n'
+     '            }\n', 1),
+    (f"{JAVA}/messenger/browser/Browser.java",
+     '    public static String getBrowserPackageName(String browser) {\n',
+     PLUMA_SITE_JAVA + '    public static String getBrowserPackageName(String browser) {\n', 1),
+    # A page of the site that reaches the app from another one (a site word
+    # that looks like a username matches the manifest's username pattern)
+    # opens in the browser.
+    (f"{JAVA}/ui/LaunchActivity.java",
+     '                    final LinkManager linkManager = new LinkManager(this, intentAccount[0], progress, openedTelegram);\n',
+     '                    // pluma: a page of pluma.chat, handed to the app because its address looks like a\n'
+     '                    // username link, is shown by the browser.\n'
+     '                    if (Browser.isPlumaSite(data)) {\n'
+     '                        Browser.openInExternalBrowser(this, data.toString(), false);\n'
+     '                        intent.setAction(null);\n'
+     '                        if (progress != null) {\n'
+     '                            progress.end();\n'
+     '                        }\n'
+     '                        return false;\n'
+     '                    }\n'
+     '                    final LinkManager linkManager = new LinkManager(this, intentAccount[0], progress, openedTelegram);\n',
+     1),
+    # A bot button with a page of the site is no mini app link.
+    (f"{JAVA}/ui/LinkManager.java",
+     '    public static boolean isWebAppLink(String url) {\n'
+     '        if (url == null) return false;\n'
+     '        try {\n'
+     '            Uri uri = Uri.parse(url);\n',
+     '    public static boolean isWebAppLink(String url) {\n'
+     '        if (url == null) return false;\n'
+     '        try {\n'
+     '            Uri uri = Uri.parse(url);\n'
+     '            // pluma: a page of pluma.chat is no mini app.\n'
+     '            if (Browser.isPlumaSite(uri)) return false;\n', 1),
+    # The browsers plumaSiteBrowser chooses from, which package visibility
+    # (Android 11 and later) hides otherwise.
+    (f"{MAIN}/AndroidManifest.xml",
+     '            <data android:scheme="ton"/>\n'
+     '        </intent>\n',
+     '            <data android:scheme="ton"/>\n'
+     '        </intent>\n'
+     '        <!-- pluma: the browsers that show the pages of pluma.chat (Browser.plumaSiteBrowser) -->\n'
+     '        <intent>\n'
+     '            <action android:name="android.intent.action.VIEW"/>\n'
+     '            <category android:name="android.intent.category.BROWSABLE"/>\n'
+     '            <data android:scheme="https"/>\n'
+     '        </intent>\n', 1),
+    # A bot's "add to group" button.
+    (f"{JAVA}/ui/Cells/ChatMessageCell.java",
+     '|| "telegram.dog".equals(host)) ||',
+     '|| "telegram.dog".equals(host) || "pluma.chat".equals(host)) ||', 1),
+    # An embedded post a mini app opens stays in its web view.
+    (f"{JAVA}/ui/web/BotWebViewContainer.java",
+     '"1".equals(uriNew.getQueryParameter("embed")) && "t.me".equals(uriNew.getAuthority())',
+     '"1".equals(uriNew.getQueryParameter("embed")) && ("t.me".equals(uriNew.getAuthority()) || '
+     '"pluma.chat".equals(uriNew.getAuthority()))', 1),
+    # The "add stickers" button of a set's link preview, and the links to a
+    # message of the open chat, which scroll to it instead of opening the chat
+    # again.
+    (f"{JAVA}/ui/ChatActivity.java",
+     r'Pattern.compile("^https?\\:\\/\\/t\\.me\\/add(?:emoji|stickers)\\/(.+)$");',
+     r'Pattern.compile("^https?\\:\\/\\/(?:t\\.me|pluma\\.chat)\\/add(?:emoji|stickers)\\/(.+)$");', 1),
+    (f"{JAVA}/ui/ChatActivity.java",
+     'Pattern.compile("(https://)?t.me/([0-9a-zA-Z_]+)/([0-9]+)/?([0-9]+)?");',
+     r'Pattern.compile("(https://)?(?:t.me|pluma\\.chat)/([0-9a-zA-Z_]+)/([0-9]+)/?([0-9]+)?");', 1),
+    (f"{JAVA}/ui/ChatActivity.java",
+     r'Pattern.compile("(https://)?t.me/([0-9a-zA-Z_]+)\\?(voicechat+)");',
+     r'Pattern.compile("(https://)?(?:t.me|pluma\\.chat)/([0-9a-zA-Z_]+)\\?(voicechat+)");', 1),
+    (f"{JAVA}/ui/ChatActivity.java",
+     'Pattern.compile("(https://)?t.me/c/([0-9]+)/([0-9]+)/?([0-9]+)?");',
+     r'Pattern.compile("(https://)?(?:t.me|pluma\\.chat)/c/([0-9]+)/([0-9]+)/?([0-9]+)?");', 1),
+    # A proxy link pasted into the proxy settings.
+    (f"{JAVA}/ui/ProxySettingsActivity.java", '{"t.me/socks?", ', '{"t.me/socks?", "pluma.chat/socks?", ', 1),
+    (f"{JAVA}/ui/ProxySettingsActivity.java", '{"t.me/proxy?", ', '{"t.me/proxy?", "pluma.chat/proxy?", ', 1),
+    # A link of the account's own business chat (links the server makes).
+    (f"{JAVA}/ui/Business/BusinessLinksController.java",
+     '                    TextUtils.equals(chatLink.link, "https://t.me/m/" + slug) ||\n',
+     '                    TextUtils.equals(chatLink.link, "https://t.me/m/" + slug) ||\n'
+     '                    TextUtils.equals(chatLink.link, "https://pluma.chat/m/" + slug) ||\n', 1),
+    # A translated mention, which comes back as a link to the username.
+    (f"{JAVA}/ui/Components/TranslateAlert2.java",
+     '                    entity.url.startsWith("https://t.me/") &&\n'
+     '                    text.startsWith("@") &&\n'
+     '                    TextUtils.equals(text.substring(1), entity.url.substring(13))\n',
+     '                    (entity.url.startsWith("https://t.me/") || entity.url.startsWith("https://pluma.chat/")) &&\n'
+     '                    text.startsWith("@") &&\n'
+     "                    TextUtils.equals(text.substring(1), entity.url.substring(entity.url.indexOf('/', 8) + 1))\n",
+     1),
+    # The system hands the app pluma.chat links, as t.me ones, but only those
+    # of links (LINK_PATH_PREFIXES, LINK_USERNAME_PATTERNS), never the site's
+    # root or pages; once the site's /.well-known/assetlinks.json names the
+    # app and its signing certificate, it opens them in the app without
+    # asking. pluma.chat is in no filter without a path: the system verifies
+    # a host for all the filters that name it, so one such entry would claim
+    # the whole site.
+    (f"{MAIN}/AndroidManifest.xml",
+     '                <data android:host="t.me" android:scheme="https" />\n'
+     '            </intent-filter>\n',
+     '                <data android:host="t.me" android:scheme="https" />\n'
+     '            </intent-filter>\n'
+     '            <!-- pluma: verified app links of pluma.chat, the links and not the site\'s pages -->\n'
+     '            <intent-filter android:autoVerify="true">\n'
+     '                <action android:name="android.intent.action.VIEW"/>\n'
+     '                <category android:name="android.intent.category.DEFAULT" />\n'
+     '                <category android:name="android.intent.category.BROWSABLE" />\n'
+     '                <data android:host="pluma.chat" android:scheme="http" />\n'
+     '                <data android:host="pluma.chat" android:scheme="https" />\n'
+     + "".join(f'                <data android:pathPrefix="{p}" />\n' for p in LINK_PATH_PREFIXES)
+     + "".join(f'                <data android:pathAdvancedPattern="{p}" />\n' for p in LINK_USERNAME_PATTERNS)
+     + '            </intent-filter>\n', 1),
+)
+# The links the app makes itself, for the user to copy, share, show as a QR
+# code or read: message links with a timestamp, public and invite links of
+# chats (and the invite link's title, which drops the address), the phone
+# number link, boost, story and conference call links, proxy links, the
+# connected chatbots named when all other sessions are terminated (Settings >
+# Devices), and the address prefixes shown
+# before a sticker set's or a bot's name. Per file under JAVA, the number of
+# "https://t.me/ and of "t.me/ literals, which become pluma.chat.
+LINKS_OUT = {
+    "messenger/SharedConfig.java": (2, 0),
+    "messenger/voip/VoIPService.java": (1, 0),
+    "ui/Cells/StickerSetCell.java": (0, 2),
+    "ui/ChatActivity.java": (4, 0),
+    "ui/ChatEditActivity.java": (0, 1),
+    "ui/Components/PermanentLinkBottomSheet.java": (1, 0),
+    "ui/Components/StickersAlert.java": (0, 1),
+    "ui/FilterChatlistActivity.java": (0, 1),
+    "ui/GroupStickersActivity.java": (0, 1),
+    "ui/ManageLinksActivity.java": (5, 0),
+    "ui/PhotoViewer.java": (2, 0),
+    "ui/PrivacyControlActivity.java": (1, 0),
+    "ui/ProxySettingsActivity.java": (2, 0),
+    "ui/SessionsActivity.java": (1, 0),
+    "ui/Stories/ChannelBoostUtilities.java": (2, 0),
+    "ui/Stories/PeerStoriesView.java": (4, 0),
+}
+# The t.me literals that stay, per file under JAVA:
+# - links the app turns back into t.me to open them itself (x.t.me, @username,
+#   a mini app's openTgLink, a bot in the chat list) and the t.me forms it still
+#   recognises next to pluma.chat (extractUsername, a pasted proxy link, a
+#   business chat link, a translated mention);
+# - Telegram's own services, which Pluma does not have: Premium and its bot,
+#   gift codes, Stars, collectible gifts, BotFather, @stickers, AI styles, the
+#   appeal bot of a frozen account, the "+PublicChat" marker of the admin log
+#   and instant view (t.me/iv);
+# - two commented-out lines of SecretMediaViewer.
+LINKS_KEEP = {
+    "messenger/MessageObject.java": 1,
+    "messenger/MessagesController.java": 3,
+    "messenger/browser/Browser.java": 4,
+    "ui/Business/BusinessLinksController.java": 1,
+    "ui/ChannelAdminLogActivity.java": 1,
+    "ui/ChatActivity.java": 1,
+    "ui/ChatEditActivity.java": 4,
+    "ui/Components/AIEditorAlert.java": 1,
+    "ui/Components/CreateBotAlert.java": 1,
+    "ui/Components/DialogsBotsAdapter.java": 1,
+    "ui/Components/Premium/boosts/PremiumPreviewGiftLinkBottomSheet.java": 1,
+    "ui/Components/Premium/boosts/adapters/GiftInfoAdapter.java": 1,
+    "ui/Components/Premium/boosts/cells/LinkCell.java": 3,
+    "ui/Components/Reactions/ChatCustomReactionsEditActivity.java": 1,
+    "ui/Components/TranslateAlert2.java": 1,
+    "ui/Components/URLSpanNoUnderline.java": 1,
+    "ui/LaunchActivity.java": 1,
+    "ui/LinkManager.java": 1,
+    "ui/PremiumPreviewFragment.java": 2,
+    "ui/ProxySettingsActivity.java": 2,
+    "ui/SecretMediaViewer.java": 2,
+    "ui/Stars/ProfileGiftsView.java": 1,
+    "ui/Stars/StarsIntroActivity.java": 1,
+    "ui/web/BotWebViewContainer.java": 1,
+}
+LINK_LITERAL = re.compile(r'"(?:https?://)?t\.me/')
+# Lines that name t.me, telegram.me or telegram.dog as a host and not
+# pluma.chat, per file under JAVA: the telegram.dog branch of isInternalUri
+# (Telegram's blog and FAQ) and the gift code and payment checks.
+HOSTS_KEEP = {
+    "messenger/browser/Browser.java": 1,
+    "ui/Components/Premium/GiftPremiumBottomSheet.java": 1,
+    "ui/Components/Premium/boosts/GiftInfoBottomSheet.java": 1,
+    "ui/Components/Premium/boosts/UserSelectorBottomSheet.java": 1,
+    "ui/Gifts/SendGiftSheet.java": 1,
+    "ui/PaymentFormActivity.java": 2,
+    "ui/PremiumPreviewFragment.java": 1,
+}
+HOST_LITERAL = re.compile(r'"(?:t\.me|telegram\.me|telegram\.dog)"')
+# Built-in texts with a t.me address: the one about public links of the empty
+# group screen (English only, no bundled translation has it) becomes
+# pluma.chat; the others are Telegram's (feature tips, Cocoon, the Premium
+# limits sheet) and stay.
+LINK_STRINGS = (
+    ("GroupDescription3", "Public links such as t.me/title", "Public links such as pluma.chat/title", ("values",)),
+)
+LINK_STRINGS_KEEP = {"TelegramFeaturesUrl", "PublicLinksLimitSubtitle", "CocoonFeature1TextLink", "CocoonFooter",
+                     "CocoonFooterLink"}
+STRING_ELEMENT = re.compile(r'<string name="(\w+)">([^<]*)</string>')
+TME_IN_TEXT = re.compile(r"(?<![\w.])t\.me/")
+
 # Palette "graphite and sage" (docs/tasks/017-rebranding.md of the server
 # repository) in the five themes the app bundles: the default day theme "Blue"
 # with its home accent, the default night theme "Dark Blue", and "Day",
@@ -2793,6 +3155,51 @@ def brand_scheme(tree):
     tree.replace(f"{RES}/xml/shortcuts.xml", 'android:value="tg://', 'android:value="plm://', count=6)
 
 
+def links(tree):
+    for rel, old, new, count in LINKS_EDITS:
+        tree.replace(rel, old, new, count)
+    for rel, counts in LINKS_OUT.items():
+        # A file may keep literals of the other form (t.me/iv of ChatActivity).
+        for old, count in zip(('"https://t.me/', '"t.me/'), counts):
+            if count:
+                tree.replace(f"{JAVA}/{rel}", old, old.replace("t.me", LINK_HOST), count)
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    for key, old, new, langs in LINK_STRINGS:
+        have = {lang for lang, rel in files.items() if f'<string name="{key}">' in tree.read(rel)}
+        if have != set(langs):
+            raise PatchError(f"{RES}: {key} in {', '.join(sorted(have))}, expected {', '.join(sorted(langs))}; "
+                             "upstream changed it")
+        for lang in langs:
+            tree.write(files[lang], edit_string(tree.read(files[lang]), files[lang], key, old, new))
+
+
+def verify_links(tree):
+    """Checks that the app makes no t.me link of its own and takes pluma.chat
+    wherever it takes t.me."""
+    for rel, old, new, count in LINKS_EDITS:
+        if tree.read(rel).count(new) != count:
+            changed = next(line for line in new.splitlines() if line not in old.splitlines())
+            raise PatchError(f"{rel}: the link edit {changed.strip()!r} is not there")
+    literals, hosts = {}, {}
+    for p in sorted((tree.root / JAVA).rglob("*.java")):
+        text = p.read_text(encoding="utf-8")
+        rel = p.relative_to(tree.root / JAVA).as_posix()
+        n = len(LINK_LITERAL.findall(text))
+        if n:
+            literals[rel] = n
+        n = sum(1 for line in text.splitlines() if HOST_LITERAL.search(line) and LINK_HOST not in line)
+        if n:
+            hosts[rel] = n
+    if literals != LINKS_KEEP:
+        raise PatchError(f"t.me links left in {literals}, expected only {LINKS_KEEP}")
+    if hosts != HOSTS_KEEP:
+        raise PatchError(f"t.me host checks without {LINK_HOST} in {hosts}, expected only {HOSTS_KEEP}")
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        for key, text in STRING_ELEMENT.findall(p.read_text(encoding="utf-8")):
+            if TME_IN_TEXT.search(text) and key not in LINK_STRINGS_KEEP:
+                raise PatchError(f"{p.relative_to(tree.root)}: {key} still shows t.me: {text[:80]!r}")
+
+
 def add_asset(tree, rel, sha):
     """Adds brand/android/res/<rel>, the file BRAND_ADDED names, as a resource
     upstream does not have. R.raw.qr_login is raw/qr_login.json: no upstream
@@ -3025,6 +3432,7 @@ def verify(tree, c):
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
     verify_self_update(tree, c)
+    verify_links(tree)
     verify_brand(tree)
 
 
