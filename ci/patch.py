@@ -541,20 +541,24 @@ def verify_birthdays(tree):
 #   never inflated: the convertor takes Math.min(originalBitrate, bitrate)
 #   (MediaCodecVideoConvertor.java:427-429).
 # - PhotoViewer.selectCompression (21689-21705) caps both the saved choice
-#   (compress_video_%d, didChangedCompressionLevel 21233-21243) and the default
-#   at step 2, 720p: a 1080p choice came back as 720p. The cap becomes the top
-#   step of the source. The default divides video_upload_maxbitrate by the
-#   local compressionsCount, which the loop over the saved choices has left at
-#   5 (21697-21704), so 85 would give the top step; it divides by the steps of
-#   the source instead, as SendMessagesHelper does (11727): for a 1080p source
-#   (4 steps) 85 gives step 2, 720p, and 100 gives step 3, 1080p.
+#   (compress_video_%d, didChangedCompressionLevel 21233-21243, written on any
+#   move of the slider and on Cancel of the picker, 6140-6143) and the default
+#   at step 2, 720p. The cap becomes the step of the network: round(
+#   video_upload_maxbitrate / (100 / steps)) - 1 over the steps of the source,
+#   as SendMessagesHelper does (11727), not over the local compressionsCount
+#   the loop has left at 5 (21697-21704). For a 1080p source (4 steps) 85, the
+#   mobile preset, gives step 2, 720p, and 100, the Wi-Fi one, step 3, 1080p.
+#   A choice saved on Wi-Fi comes back no higher than 720p on mobile data, as
+#   the brief of task 052 asks; a lower one is kept, as upstream keeps it.
 # - DownloadController (261-275): the mobile preset of a new install is the
-#   built-in medium one, and loadAutoDownloadConfig (363-383) gives it the
-#   server's medium values only when it equals the medium preset already
-#   updated from the server, so a video_upload_maxbitrate different from the
-#   built-in 100 never reaches it. The built-in medium preset takes the
-#   server's 85 (app/bff/autodownload, videoUploadMaxBitrateMedium), so mobile
-#   data gets 720p and the preset keeps following the server's medium one.
+#   built-in medium one; the built-in medium preset takes the server's 85
+#   (app/bff/autodownload, videoUploadMaxBitrateMedium). loadAutoDownloadConfig
+#   (360-383) sets the low, medium and high presets from the server first and
+#   then moves the mobile, Wi-Fi and roaming presets that equal them, so a
+#   preset that followed the medium one stops following it once the server's
+#   value changes (installs from before 85 kept 100, 1080p on mobile data). It
+#   compares with the presets as they were before the answer, and a preset left
+#   at upstream's built-in medium one (bitrate 100) follows the medium one too.
 # - SendMessagesHelper.createCompressionSettings (11679-11777), sending without
 #   the editor (straight from the attachment menu, a share from another app),
 #   picks step round(v / (100 / steps)) (1-based, 11727-11731) with long sides
@@ -645,14 +649,38 @@ VIDEO_QUALITY_EDITS = (
     (MEDIA_CONTROLLER, VIDEO_BITRATE_OLD, VIDEO_BITRATE_NEW),
     (PHOTO_VIEWER,
      "        int maxCompression = 2;\n",
-     "        // pluma: up to the top step, so that a 1080p choice is kept.\n"
-     "        int maxCompression = this.compressionsCount - 1;\n"),
+     "        // pluma: the network's step is the top: 720p on mobile data, 1080p on Wi-Fi; a lower saved choice is kept.\n"
+     "        int maxCompression = Math.max(0, Math.min(this.compressionsCount - 1, Math.round(DownloadController"
+     ".getInstance(currentAccount).getMaxVideoBitrate() / (100f / this.compressionsCount)) - 1));\n"),
     (PHOTO_VIEWER,
      "        return Math.min(maxCompression, Math.round(DownloadController.getInstance(currentAccount)"
      ".getMaxVideoBitrate() / (100f / compressionsCount)) - 1);\n",
-     "        // pluma: the steps of this video, not the count the loop above has left.\n"
-     "        return Math.min(maxCompression, Math.round(DownloadController.getInstance(currentAccount)"
-     ".getMaxVideoBitrate() / (100f / this.compressionsCount)) - 1);\n"),
+     "        return maxCompression; // pluma: the network's step, above\n"),
+    (DOWNLOAD_CONTROLLER,
+     "                TL_account.autoDownloadSettings res = (TL_account.autoDownloadSettings) response;\n"
+     "                lowPreset.set(res.low);\n",
+     "                TL_account.autoDownloadSettings res = (TL_account.autoDownloadSettings) response;\n"
+     "                // pluma: a preset follows the server's one it equalled before this answer, and one left at\n"
+     "                // upstream's built-in medium (bitrate 100) follows the medium one.\n"
+     "                final Preset oldLow = new Preset(lowPreset.toString(), lowPreset.toString());\n"
+     "                final Preset oldMedium = new Preset(mediumPreset.toString(), mediumPreset.toString());\n"
+     "                final Preset oldHigh = new Preset(highPreset.toString(), highPreset.toString());\n"
+     "                final Preset upstreamMedium = new Preset(\"13_13_13_13_1048576_10485760_1048576_524288_1_1_1_0_100_1\", "
+     "\"13_13_13_13_1048576_10485760_1048576_524288_1_1_1_0_100_1\");\n"
+     "                lowPreset.set(res.low);\n"),
+    (DOWNLOAD_CONTROLLER,
+     "                    if (preset.equals(lowPreset)) {\n"
+     "                        preset.set(res.low);\n"
+     "                        preset.preloadStories = false;\n"
+     "                    } else if (preset.equals(mediumPreset)) {\n"
+     "                        preset.set(res.medium);\n"
+     "                    } else if (preset.equals(highPreset)) {\n",
+     "                    if (preset.equals(oldLow)) {\n"
+     "                        preset.set(res.low);\n"
+     "                        preset.preloadStories = false;\n"
+     "                    } else if (preset.equals(oldMedium) || preset.equals(upstreamMedium)) {\n"
+     "                        preset.set(res.medium);\n"
+     "                    } else if (preset.equals(oldHigh)) {\n"),
     (PHOTO_VIEWER,
      "                bitrate = 921600;\n"
      "            }\n"
