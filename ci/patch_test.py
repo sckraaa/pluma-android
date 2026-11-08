@@ -430,8 +430,12 @@ class PremiumStickersTest(unittest.TestCase):
                           tree.read(patch.MESSAGES_CONTROLLER))
             self.assertIn("if (premiumStickersAvailable() || !premiumFeaturesBlocked() || stickerSet == null) {",
                           tree.read(patch.MESSAGES_CONTROLLER))
+            # The sender's effect stays for what else Premium plays there.
             for rel, _, new in patch.PREMIUM_STICKERS_EDITS:
-                self.assertNotIn("isPremium()", new)
+                if rel != patch.CHAT_ACTIVITY:
+                    self.assertNotIn("isPremium()", new)
+            self.assertIn("getUserConfig().isPremium() || (getMessagesController().premiumStickersAvailable() && messageObject.isPremiumSticker())",
+                          tree.read(patch.CHAT_ACTIVITY))
             for rel, text in self.OTHER_PREMIUM.items():
                 self.assertEqual(tree.read(rel).count(text), 1)
             # Both cells import the class they now ask.

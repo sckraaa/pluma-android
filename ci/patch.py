@@ -911,7 +911,10 @@ def verify_saved_tags(tree):
 #   (ContentPreviewViewer 714);
 # - stickers suggested for an emoji (MentionsAdapter 273, 298);
 # - the mark on a sticker: the lock in the middle or the Premium star in the
-#   corner (StickerEmojiCell 298-318, StickerCell 212-231).
+#   corner (StickerEmojiCell 298-318, StickerCell 212-231);
+# - the sender's effect: only a sender with Premium has it played when the
+#   sticker has just been sent (ChatActivity 25320, forcePlayEffect, which
+#   15985 asks for an outgoing message).
 # The recipient plays the effect from the document alone (ChatActivity 15984,
 # EmojiAnimationsOverlay 682-687, ImageLocation.getForDocument(videoSize,
 # document)), asking no Premium; custom emoji are another matter and stay.
@@ -962,6 +965,10 @@ PREMIUM_STICKERS_EDITS = (
      f"            {PREMIUM_STICKERS_COMMENT}\n"
      "            if (!MessagesController.getInstance(currentAccount).premiumStickersAvailable() && MessagesController.getInstance(currentAccount).premiumFeaturesBlocked()) {\n"
      "                for (int a = 0; a < favouriteStickers.size(); a++) {\n"),
+    (CHAT_ACTIVITY,
+     "                if (messageObject.wasJustSent && (getUserConfig().isPremium() || messageObject.isAnimatedAnimatedEmoji() || messageObject.getEffect() != null) && ",
+     f"                {PREMIUM_STICKERS_COMMENT}\n"
+     "                if (messageObject.wasJustSent && (getUserConfig().isPremium() || (getMessagesController().premiumStickersAvailable() && messageObject.isPremiumSticker()) || messageObject.isAnimatedAnimatedEmoji() || messageObject.getEffect() != null) && "),
     (STICKER_CELL, _USER_CONFIG_IMPORT, _MESSAGES_IMPORT + _USER_CONFIG_IMPORT),
     (STICKER_CELL,
      "        FrameLayout.LayoutParams layoutParams = (LayoutParams) premiumIconView.getLayoutParams();\n"
@@ -990,6 +997,7 @@ PREMIUM_STICKERS_EDITS = (
 PREMIUM_STICKERS_USES = {
     MESSAGES_CONTROLLER: 2,
     CONTENT_PREVIEW_VIEWER: 1,
+    CHAT_ACTIVITY: 1,
     MENTIONS_ADAPTER: 2,
     EMOJI_VIEW: 2,
     STICKER_CELL: 2,
