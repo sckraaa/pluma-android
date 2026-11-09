@@ -1117,7 +1117,7 @@ class IntroTest(unittest.TestCase):
         text = intro_text()
         still = "markDrawable.setCurrentFrame(markDrawable.getFramesCount() - 1, true);\n"
         self.assertEqual(text.count(still), 1)
-        self.assertLess(text.index('new RLottieDrawable(R.raw.pluma_mark_write, "'), text.index(still))
+        self.assertLess(text.index('new RLottieDrawable(R.raw.pluma_mark_write, markSize'), text.index(still))
         self.assertLess(text.index(still), text.index("markView.setAnimation(markDrawable);\n"))
         show = intro_method("showMark")
         self.assertIn("            } else if (!markDrawable.isLastFrame()) {\n", show)

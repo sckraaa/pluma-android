@@ -1681,7 +1681,7 @@ INTRO_EDITS = (
      "        // again (rebuildAllFragmentViews) starts with a mark of its own.\n"
      "        releaseMark();\n"
      "        int markSize = dp(MARK_DP * MARK_GRID / (MARK_INK_BOTTOM - MARK_INK_TOP));\n"
-     '        markDrawable = new RLottieDrawable(R.raw.pluma_mark_write, "" + R.raw.pluma_mark_write, markSize, markSize, false, null);\n'
+     '        markDrawable = new RLottieDrawable(R.raw.pluma_mark_write, markSize, markSize, false, null);\n'
      "        // With the system's animations off, the written mark. Its frame is set while nothing decodes yet\n"
      "        // (setAnimation starts the first decode): a frame set during a decode can be lost, as that decode\n"
      "        // then takes the new frame for the end and keeps its own.\n"
@@ -1846,7 +1846,7 @@ INTRO_MARK = (
     "private final static float MARK_DP = ",
     "private RLottieImageView markView;\n",
     "logoDrawable.setBounds(0, 0, dp(115), dp(26.333f));\n",
-    'new RLottieDrawable(R.raw.pluma_mark_write, "" + R.raw.pluma_mark_write,',
+    'new RLottieDrawable(R.raw.pluma_mark_write, markSize, markSize,',
     "markScroll = position == 0 ? Math.max(0, 1 - 2 * positionOffset) : 0;\n",
     "showMark(i == 0, true);",
     "showMark(viewPager.getCurrentItem() == 0, false);",
