@@ -1293,5 +1293,53 @@ class GoogleServicesTest(unittest.TestCase):
                          ["chat.pluma.app", "chat.pluma.app.beta"])
 
 
+class PremiumForEveryoneTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.PREMIUM_FOR_EVERYONE_EDITS):
+        (root / "TMessagesProj").mkdir(exist_ok=True)
+        files = {}
+        for edit in edits:
+            rel, old = edit[0], edit[1]
+            count = edit[3] if len(edit) > 3 else 1
+            files[rel] = files.get(rel, "") + (old + "x\n") * count
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the edit of task 071 is not there"):
+                patch.verify_premium_for_everyone(tree)
+            patch.premium_for_everyone(tree)
+            patch.verify_premium_for_everyone(tree)
+            # A second run is refused: nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.premium_for_everyone(tree)
+
+    def test_upstream_changed(self):
+        for i, edit in enumerate(patch.PREMIUM_FOR_EVERYONE_EDITS):
+            changed = edit[1][:-2] + "~" + edit[1][-1]
+            edits = [e if j != i else (edit[0], changed) + tuple(edit[2:]) for j, e in enumerate(patch.PREMIUM_FOR_EVERYONE_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.premium_for_everyone(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.premium_for_everyone(tree)
+            for edit in patch.PREMIUM_FOR_EVERYONE_EDITS:
+                rel, old, new = edit[0], edit[1], edit[2]
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(file=rel), self.assertRaisesRegex(patch.PatchError, "the edit of task 071 is not there"):
+                    patch.verify_premium_for_everyone(tree)
+                tree.write(rel, patched)
+            patch.verify_premium_for_everyone(tree)
+
+
 if __name__ == "__main__":
     unittest.main()

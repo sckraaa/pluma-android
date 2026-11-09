@@ -392,6 +392,7 @@ def patch(tree, c):
     sticker_sets(tree)
     saved_tags(tree)
     premium_stickers(tree)
+    premium_for_everyone(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -3593,10 +3594,122 @@ def verify(tree, c):
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
+    verify_premium_for_everyone(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
 
+
+
+# --- Premium for everyone -----------------------------------------------------
+# Task 071 (ADR 0041): every user has Premium and every boost-gated feature is
+# open, so the server sends the Premium flag for everybody. Only what the flag
+# would make wrong is edited: the star by every name, the purchase rows that
+# show for anyone with Premium, and what the server does not serve.
+PREMIUM_FOR_EVERYONE_EDITS = (
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     '            if (MessagesController.getInstance(currentAccount).premiumFeaturesBlocked() && !UserConfig.getInstance(currentAccount).isPremium())\n',
+     '            if (MessagesController.getInstance(currentAccount).premiumPurchaseBlocked()) // pluma: the search results are the purchase screen\n'),
+    ("TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java",
+     "        return currentUser != null && currentUser.premium && !isSupportUser(currentUser);\n",
+     "        // pluma: no star by a name: everybody has Premium (ADR 0041).\n        return false;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/messenger/ImageReceiver.java",
+     "animationEnabled && MessagesController.getInstance(currentAccount).isPremiumUser(user) && user.photo.has_video",
+     "animationEnabled && user.premium && user.photo.has_video"),
+    ("TMessagesProj/src/main/java/org/telegram/messenger/ImageLocation.java",
+     "            if (MessagesController.getInstance(currentAccount).isPremiumUser(user) && user.photo.has_video) {\n",
+     "            if (user.premium && user.photo.has_video) {\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
+     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(11,",
+     "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(11,"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
+     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(15,",
+     "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(15,"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
+     "            } else if (user != null && user.premium) {\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)",
+     "            } else if (false) { // pluma: no star: everybody has Premium\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    premiumRow = rowCount++;\n",
+     "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    premiumRow = rowCount++;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    businessRow = rowCount++;\n",
+     "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    businessRow = rowCount++;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java",
+     "UserObject.getUserName(user))), user.scam, user.fake, user.verified, user.premium, user.emoji_status, animated);",
+     "UserObject.getUserName(user))), user.scam, user.fake, user.verified, false, user.emoji_status, animated); // pluma: no star"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java",
+     "            } else if (currentUser.premium) {\n                return ContextCompat.getDrawable(ApplicationLoader.applicationContext, R.drawable.msg_premium_liststar).mutate();",
+     "            } else if (false) { // pluma: no star: everybody has Premium\n                return ContextCompat.getDrawable(ApplicationLoader.applicationContext, R.drawable.msg_premium_liststar).mutate();"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java",
+     "        useTranscribeButton = (\n            currentMessageObject != null &&\n",
+     "        // pluma: the server has no transcription to offer.\n        useTranscribeButton = (\n            false && currentMessageObject != null &&\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/GroupCallUserCell.java",
+     "            } else if (currentUser != null && currentUser.premium) {\n",
+     "            } else if (false) { // pluma: no star: everybody has Premium\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/StatusBadgeComponent.java",
+     "        } else if (user != null && user.premium) {\n",
+     "        } else if (false) { // pluma: no star: everybody has Premium\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/TableView.java",
+     "                isPremium = user != null && user.premium;\n",
+     "                isPremium = false; // pluma: no star: everybody has Premium\n"),
+    # Boosts do not exist here: nothing waits for a level of a channel, no
+    # screen, prompt or link offers one.
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/Reactions/ChatCustomReactionsEditActivity.java",
+     "            if (boostsStatus != null && boostsStatus.level < selectedCustomReactions) {\n                ReactionsUtils.showLimitReachedDialogForReactions(",
+     "            if (false && boostsStatus != null && boostsStatus.level < selectedCustomReactions) { // pluma: custom reactions need no boost level\n                ReactionsUtils.showLimitReachedDialogForReactions("),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/Reactions/ChatCustomReactionsEditActivity.java",
+     "        if (boostsStatus != null && boostsStatus.level < selectedCustomReactions) {\n            hasChanges = false;\n",
+     "        if (false && boostsStatus != null && boostsStatus.level < selectedCustomReactions) { // pluma: custom reactions need no boost level\n            hasChanges = false;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/Reactions/ChatCustomReactionsEditActivity.java",
+     "        if (boostsStatus.level < selectedCustomReactions) {\n            if (withToast) {\n",
+     "        if (false && boostsStatus.level < selectedCustomReactions) { // pluma: custom reactions need no boost level\n            if (withToast) {\n"),
+    ("TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java",
+     "            return isGroup ? groupLvl : channelLvl;\n",
+     "            return 0; // pluma: no colour needs a boost level (ADR 0041)\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ChannelColorActivity.java",
+     "                addView(infoLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.BOTTOM));\n",
+     "                addView(infoLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.BOTTOM));\n                infoLayout.setVisibility(View.GONE); // pluma: boosts do not exist here (ADR 0041)\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java",
+     "            if (ChatObject.isBoostSupported(currentChat) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatInfo) || ChatObject.hasAdminRights(currentChat))) {\n",
+     "            if (false && ChatObject.isBoostSupported(currentChat) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatInfo) || ChatObject.hasAdminRights(currentChat))) { // pluma: boosts do not exist here (ADR 0041)\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/TopicsFragment.java",
+     "        boostGroupSubmenu.setVisibility(ChatObject.isBoostSupported(chatLocal) && (",
+     "        boostGroupSubmenu.setVisibility(false && ChatObject.isBoostSupported(chatLocal) && ("),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ChatEditActivity.java",
+     "            if (ChatObject.isBoostSupported(currentChat)) {\n                statsAndBoosts = new TextCell(context);\n",
+     "            if (false && ChatObject.isBoostSupported(currentChat)) { // pluma: boosts do not exist here (ADR 0041)\n                statsAndBoosts = new TextCell(context);\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/StatisticActivity.java",
+     "        boolean isBoostSupported = ChatObject.isBoostSupported(currentChat);\n",
+     "        boolean isBoostSupported = false; // pluma: boosts do not exist here (ADR 0041)\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java",
+     "                            if (ChatObject.isBoostSupported(chat)) {\n                                processBoostDialog(peerId, dismissLoading, progress);\n",
+     "                            if (false && ChatObject.isBoostSupported(chat)) { // pluma: a boost link opens the channel\n                                processBoostDialog(peerId, dismissLoading, progress);\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java",
+     "                if (chatLocal != null && ChatObject.isBoostSupported(chatLocal) && isBoost) {\n",
+     "                if (false && chatLocal != null && ChatObject.isBoostSupported(chatLocal) && isBoost) { // pluma: a boost link opens the channel\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java",
+     "                                            if (chat != null && isBoost && ChatObject.isBoostSupported(chat)) {\n",
+     "                                            if (false && chat != null && isBoost && ChatObject.isBoostSupported(chat)) { // pluma: a boost link opens the channel\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ChatUsersActivity.java",
+     "        return currentChat.megagroup && !currentChat.gigagroup && ChatObject.canUserDoAdminAction(currentChat,ChatObject.ACTION_DELETE_MESSAGES) &&\n",
+     "        return false && currentChat.megagroup && !currentChat.gigagroup && ChatObject.canUserDoAdminAction(currentChat,ChatObject.ACTION_DELETE_MESSAGES) && // pluma: boosts do not exist here (ADR 0041)\n"),
+    # Without statistics the item opens the boosts screen (StatisticActivity.create).
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     "                    if ((chatInfo.can_view_stats || chatInfo.can_view_revenue || chatInfo.can_view_stars_revenue || getMessagesController().getStoriesController().canPostStories(getDialogId())) && topicId == 0) {\n",
+     "                    if ((chatInfo.can_view_stats || chatInfo.can_view_revenue || chatInfo.can_view_stars_revenue) && topicId == 0) { // pluma: boosts do not exist here (ADR 0041)\n"),
+)
+
+
+def premium_for_everyone(tree):
+    for rel, old, new in PREMIUM_FOR_EVERYONE_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_premium_for_everyone(tree):
+    for rel, old, new in PREMIUM_FOR_EVERYONE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 071 is not there")
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
