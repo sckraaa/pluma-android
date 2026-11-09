@@ -97,7 +97,7 @@ class KeyTest(unittest.TestCase):
 
 
 def config(**over):
-    upstream = {"UPSTREAM_LAYER": "228", "UPSTREAM_VERSION": "12.9.1", "NDK_VERSION": "27.2.12479018", "CMAKE_VERSION": "3.10.2"}
+    upstream = {"UPSTREAM_LAYER": "233", "UPSTREAM_VERSION": "13.2.1", "NDK_VERSION": "27.2.12479018", "CMAKE_VERSION": "3.22.1"}
     app = patch.load_env(ROOT / "config/app.env")
     args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=TELEGRAM_TEST,
                 abis="arm64-v8a", ccache=False, google_services="")
@@ -111,8 +111,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(c.ipv6, "2001:0db8:0000:0000:0000:0000:0000:0001")
         self.assertEqual(c.abis, ["arm64-v8a", "x86_64"])
         self.assertEqual(c.package, "chat.pluma.app")
-        self.assertEqual(c.version_name, "12.9.1.00000")
-        self.assertEqual(config(build=57).version_name, "12.9.1.00057")
+        self.assertEqual(c.version_name, "13.2.1.00000")
+        self.assertEqual(config(build=57).version_name, "13.2.1.00057")
 
     def test_rejects(self):
         for over in (
@@ -502,7 +502,7 @@ class SelfUpdateTest(unittest.TestCase):
             (root / rel).write_text(text + "}\n", encoding="utf-8")
         (root / patch.APP_LOADER_IMPL).parent.mkdir(parents=True, exist_ok=True)
         (root / patch.APP_LOADER_IMPL).write_text(patch.APP_LOADER_IMPL_UPSTREAM, encoding="utf-8")
-        (root / "gradle.properties").write_text("APP_VERSION_CODE=6979\nAPP_VERSION_NAME=12.9.1\n", encoding="utf-8")
+        (root / "gradle.properties").write_text("APP_VERSION_CODE=7291\nAPP_VERSION_NAME=13.2.1\n", encoding="utf-8")
         (root / patch.APP_BUILD_GRADLE).write_text("android {\n" + patch.VERSION_CODE + "    defaultConfig {\n" + patch.VERSION_NAME
                                                    + "    }\n}\ndependencies {\n" + patch.APP_DEPENDENCY + "}\n",
                                                    encoding="utf-8")
@@ -536,8 +536,8 @@ class SelfUpdateTest(unittest.TestCase):
             for name, data in self.COMPONENTS.items():
                 self.assertEqual((tree.root / patch.APP_COMPONENTS / name).read_bytes(), data)
             # The library keeps upstream's version; the app module gets the build.
-            self.assertIn("APP_VERSION_NAME=12.9.1\n", tree.read("gradle.properties"))
-            self.assertIn('        versionName APP_VERSION_NAME + ".00057" // pluma: 12.9.1.00057, the build number\n',
+            self.assertIn("APP_VERSION_NAME=13.2.1\n", tree.read("gradle.properties"))
+            self.assertIn('        versionName APP_VERSION_NAME + ".00057" // pluma: 13.2.1.00057, the build number\n',
                           tree.read(patch.APP_BUILD_GRADLE))
             self.assertIn("Integer.parseInt(APP_VERSION_CODE) * 1000 + 57 ", tree.read(patch.APP_BUILD_GRADLE))
             # A second run finds none of the upstream texts.
@@ -634,6 +634,7 @@ class LinksTest(unittest.TestCase):
                 if "pluma.chat" in block:
                     self.assertIn('android:autoVerify="true"', block)
                     self.assertIn('<data android:pathPrefix="/joinchat/" />', block)
+                    self.assertIn('<data android:pathPrefix="/webproxy" />', block)
                     self.assertIn('<data android:pathAdvancedPattern="/[A-Za-z][A-Za-z0-9_]{4,31}" />', block)
                     self.assertNotIn("android:pathPattern", block)
             self.assertIn('<data android:scheme="https"/>', manifest)
@@ -743,6 +744,36 @@ class LinksTest(unittest.TestCase):
                          ["android", "assets", "collect", "iphone", "linux", "windows"])
 
 
+class SchemeTest(unittest.TestCase):
+    # The files the scheme edits read, with the literals they expect.
+    def tree(self, root):
+        files = {f"{patch.JAVA}/{rel}": '"tg://x";\n' * colon + '"tg";\n' * bare
+                 for rel, (colon, bare) in patch.SCHEME_JAVA.items()}
+        link_manager = f"{patch.JAVA}/{patch.SCHEME_REGEX[0]}"
+        files[link_manager] = files.get(link_manager, "") + patch.SCHEME_REGEX[1] + "\n"
+        files[f"{patch.JAVA}/messenger/AndroidUtilities.java"] += "|ton|tg|tonsite):\n"
+        files[f"{patch.JAVA}/messenger/LinkifyPort.java"] = "|ton|tg|tonsite)://\n"
+        files[f"{patch.MAIN}/AndroidManifest.xml"] = '<data android:scheme="tg" />\n'
+        files[f"{patch.RES}/xml/shortcuts.xml"] = 'android:value="tg://x"\n' * 6
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_scheme_of_the_new_places(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.brand_scheme(tree)
+            for rel in ("utils/proxy/ProxySettings.java", "ui/Cells/ChatMessageBotButtons.java",
+                        "ui/QrShare/QrScanOverlay.java", "messenger/NotificationsController.java"):
+                text = tree.read(f"{patch.JAVA}/{rel}")
+                self.assertIn('"plm:', text, rel)
+                self.assertNotRegex(text, patch.SCHEME_LITERAL)
+            link_manager = tree.read(f"{patch.JAVA}/{patch.SCHEME_REGEX[0]}")
+            self.assertNotIn(patch.SCHEME_REGEX[1], link_manager)
+            self.assertIn(patch.SCHEME_REGEX[2], link_manager)
+
+
 class StickerSetsTest(unittest.TestCase):
     def tree(self, root, text):
         (root / patch.MESSAGES_CONTROLLER).parent.mkdir(parents=True, exist_ok=True)
@@ -774,15 +805,33 @@ class BrandTest(unittest.TestCase):
                '<string name="Faq">https://telegram.org/faq and Telegram.org</string>\n'
                '<string name="A">__Telegram Premium.__ Use Telegram. INVITE TO TELEGRAM</string>\n'
                '<string name="B">Telegramm, @Telegram, Telegram\'s</string>\n'
-               '<string name="C">텔레그램이 텔레그램</string>\n')
+               '<string name="C">텔레그램이 텔레그램</string>\n'
+               '<string name="D">no linked\\nTelegram account, Telegram</string>\n')
         out, counts = patch.rename_strings(xml, (("텔레그램이", "Pluma가", 1), ("텔레그램", "Pluma", 1)))
         self.assertEqual(out, '<string name="TelegramFAQ">Pluma FAQ</string>\n'
                               '<string name="Tips">https://t.me/TelegramTips</string>\n'
                               '<string name="Faq">https://telegram.org/faq and Telegram.org</string>\n'
                               '<string name="A">__Pluma Premium.__ Use Pluma. INVITE TO PLUMA</string>\n'
                               '<string name="B">Telegramm, @Telegram, Pluma\'s</string>\n'
-                              '<string name="C">Pluma가 Pluma</string>\n')
-        self.assertEqual((counts["Telegram"], counts["TELEGRAM"], counts["텔레그램이"], counts["텔레그램"]), (4, 1, 1, 1))
+                              '<string name="C">Pluma가 Pluma</string>\n'
+                              '<string name="D">no linked\\nPluma account, Pluma</string>\n')
+        self.assertEqual((counts["Telegram"], counts["TELEGRAM"], counts["텔레그램이"], counts["텔레그램"]), (6, 1, 1, 1))
+        self.assertTrue(patch.JAVA_NAME_LITERAL.search(r'text = "no linked\nTelegram account";'))
+        self.assertFalse(patch.JAVA_NAME_LITERAL.search(r'text = "no linked\nTelegramm";'))
+
+    def test_invite_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in patch.INVITE_LINK_FILES:
+                (root / patch.JAVA / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / patch.JAVA / rel).write_text('link = "https://telegram.org/dl";\n', encoding="utf-8")
+            tree = patch.Tree(root)
+            patch.brand_invite_link(tree)
+            for rel in patch.INVITE_LINK_FILES:
+                self.assertEqual(tree.read(f"{patch.JAVA}/{rel}"), 'link = "https://pluma.chat/";\n')
+            with self.assertRaises(patch.PatchError):
+                patch.brand_invite_link(tree)
+        self.assertFalse(set(patch.INVITE_LINK_FILES) & set(patch.TELEGRAM_SITE_KEEP))
 
     def test_assets_are_rendered(self):
         res = patch.BRAND / "res"
@@ -1086,7 +1135,7 @@ class IntroTest(unittest.TestCase):
         text = intro_text()
         still = "markDrawable.setCurrentFrame(markDrawable.getFramesCount() - 1, true);\n"
         self.assertEqual(text.count(still), 1)
-        self.assertLess(text.index('new RLottieDrawable(R.raw.pluma_mark_write, "'), text.index(still))
+        self.assertLess(text.index('new RLottieDrawable(R.raw.pluma_mark_write, markSize'), text.index(still))
         self.assertLess(text.index(still), text.index("markView.setAnimation(markDrawable);\n"))
         show = intro_method("showMark")
         self.assertIn("            } else if (!markDrawable.isLastFrame()) {\n", show)
@@ -1339,6 +1388,60 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+
+class NotServedTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.NOT_SERVED_EDITS):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        files[patch.SETTINGS_ACTIVITY] += "R.string.SettingsExperimental\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is open again"):
+                patch.verify_not_served(tree)
+            patch.not_served(tree)
+            patch.verify_not_served(tree)
+            with self.assertRaises(patch.PatchError):
+                patch.not_served(tree)
+
+    def test_upstream_changed(self):
+        # A row added inside a block stops the patch: the block is exact.
+        for i, (rel, old, new) in enumerate(patch.NOT_SERVED_EDITS):
+            changed = old[:len(old) // 2] + "        added();\n" + old[len(old) // 2:]
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.NOT_SERVED_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.not_served(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.not_served(tree)
+            for rel, old, new in patch.NOT_SERVED_EDITS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(file=rel), self.assertRaisesRegex(patch.PatchError, "is open again"):
+                    patch.verify_not_served(tree)
+                tree.write(rel, patched)
+            patch.verify_not_served(tree)
+
+    def test_experimental_section_stays(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.not_served(tree)
+            text = tree.read(patch.SETTINGS_ACTIVITY)
+            tree.write(patch.SETTINGS_ACTIVITY, text.replace("R.string.SettingsExperimental", ""))
+            with self.assertRaisesRegex(patch.PatchError, "experimental section is gone"):
+                patch.verify_not_served(tree)
 
 
 if __name__ == "__main__":

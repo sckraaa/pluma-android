@@ -1,8 +1,9 @@
 # Builds the Pluma Android client from the upstream release upstream.env pins.
 #
 #   check  the patch script's tests and the shell scripts' lint;
-#   build  fetch, patch, compile (native code through ccache, Java through
-#          the Gradle build cache), APK with the upstream's test signature;
+#   build  fetch (the upstream commit and the submodules it records), patch,
+#          compile (native code through ccache, Java through the Gradle
+#          build cache), APK with the upstream's test signature;
 #   sign   the release key, in the protected "release" environment, for
 #          builds for a real server only; the signed APK goes to the site
 #          and to the installed apps (the releases service of the server).
@@ -77,7 +78,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/julia* || true
           df -h /
-      - name: Fetch upstream
+      - name: Fetch upstream and its submodules
         run: ci/fetch-upstream.sh
       - name: Patch
         id: configure

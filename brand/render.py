@@ -464,7 +464,7 @@ def main():
     # The white plane over QR codes and the round video watermark: the white
     # mark, still, over the same frames.
     s = 230 / (x1 - x0)
-    for name in ("qr_code_logo", "qr_code_logo_2", "plane_logo_plain"):
+    for name in ("qr_code_logo", "plane_logo_plain"):
         text(f"res/raw/{name}.json", json.dumps(lottie_static(mono, 512, s, 20, 74, WHITE), separators=(",", ":")))
 
     # "Link desktop device" animation: the logo layer, centred on its oval
