@@ -3607,6 +3607,9 @@ def verify(tree, c):
 # would make wrong is edited: the star by every name, the purchase rows that
 # show for anyone with Premium, and what the server does not serve.
 PREMIUM_FOR_EVERYONE_EDITS = (
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     '            if (MessagesController.getInstance(currentAccount).premiumFeaturesBlocked() && !UserConfig.getInstance(currentAccount).isPremium())\n',
+     '            if (MessagesController.getInstance(currentAccount).premiumPurchaseBlocked()) // pluma: the search results are the purchase screen\n'),
     ("TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java",
      "        return currentUser != null && currentUser.premium && !isSupportUser(currentUser);\n",
      "        // pluma: no star by a name: everybody has Premium (ADR 0041).\n        return false;\n"),
