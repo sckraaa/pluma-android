@@ -1988,7 +1988,7 @@ SCHEME_JAVA = {
     "ui/Components/Premium/boosts/GiftInfoBottomSheet.java": (2, 1),
     "ui/Components/Premium/boosts/UserSelectorBottomSheet.java": (2, 1),
     "ui/Components/UndoView.java": (3, 0),
-    "ui/LaunchActivity.java": (160, 2),
+    "ui/LaunchActivity.java": (158, 2),
     "ui/LinkManager.java": (3, 2),
     "ui/LoginActivity.java": (1, 0),
     "ui/PaymentFormActivity.java": (0, 1),
@@ -3688,6 +3688,21 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
      '        if ("getpremium".equalsIgnoreCase(first))\n            return handleGetPremium(uri.getQueryParameter("ref"));\n',
      '        // pluma: no getpremium route, everybody has Premium (ADR 0041).\n'),
+    # The same purchase screen behind the other links.
+    ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
+     '        if ("premium".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment("link"));\n            return true;\n        }\n\n'
+     '        if ("business".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
+     '            if ("do-not-hide-ads".equalsIgnoreCase(second)) {\n                scrollTo("showAdsRow");\n            }\n            return true;\n        }\n\n',
+     '        // pluma: no settings/premium and settings/business links: everybody has Premium (ADR 0041).\n\n'),
+    ("TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java",
+     '                                        String finalUrl = url.replace("tg:premium_offer", "tg://premium_offer");\n'
+     '                                        AndroidUtilities.runOnUIThread(() -> {\n'
+     '                                        if (!actionBarLayout.getFragmentStack().isEmpty()) {\n'
+     '                                            BaseFragment fragment = actionBarLayout.getFragmentStack().get(0);\n'
+     '                                            Uri uri = Uri.parse(finalUrl);\n'
+     '                                            fragment.presentFragment(new PremiumPreviewFragment(uri.getQueryParameter("ref")));\n'
+     '                                        }});\n',
+     '                                        // pluma: the link opens the app and no offer: everybody has Premium (ADR 0041).\n'),
     ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
      '            if (MessagesController.getInstance(currentAccount).premiumFeaturesBlocked() && !UserConfig.getInstance(currentAccount).isPremium())\n',
      '            if (MessagesController.getInstance(currentAccount).premiumPurchaseBlocked()) // pluma: the search results are the purchase screen\n'),
