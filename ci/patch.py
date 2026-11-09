@@ -1924,7 +1924,6 @@ JAVA_NAME_LITERAL = re.compile(r'"[^"\n]*(?:\b|(?<=\\n))Telegram\b[^"\n]*"')
 # until it is read and either rebranded or put here.
 TELEGRAM_SITE_KEEP = {
     "messenger/AppGlobalConfig.java": 1,
-    "messenger/ContactsController.java": 1,
     "messenger/MessagesController.java": 1,
     "messenger/browser/Browser.java": 3,
     "ui/ArticleViewer.java": 1,
@@ -1935,7 +1934,6 @@ TELEGRAM_SITE_KEEP = {
     "ui/IdenticonActivity.java": 1,
     "ui/LaunchActivity.java": 18,
     "ui/LoginActivity.java": 3,
-    "ui/NewContactBottomSheet.java": 1,
     "ui/PassportActivity.java": 2,
     "ui/ReportBottomSheet.java": 9,
     "ui/ThemePreviewActivity.java": 1,
@@ -1944,6 +1942,10 @@ TELEGRAM_SITE_KEEP = {
     "ui/WebviewActivity.java": 1,
     "utils/proxy/ProxySettings.java": 1,
 }
+# The download link every invitation carries: an SMS from the New Contact
+# sheet always, and getInviteText until help.getInviteText answers, which the
+# server does not serve.
+INVITE_LINK_FILES = ("messenger/ContactsController.java", "ui/NewContactBottomSheet.java")
 TELEGRAM_SITE_LITERAL = re.compile(r'"[^"\n]*telegram\.org[^"\n]*"')
 # The QR login's links to the desktop and web clients, the one exception to
 # keeping telegram.org: Pluma's site and its web client (the owner's
@@ -3297,6 +3299,7 @@ def brand(tree):
     brand_entry_points(tree)
     brand_strings(tree)
     brand_client_links(tree)
+    brand_invite_link(tree)
     brand_scheme(tree)
     brand_assets(tree)
     brand_devices(tree)
@@ -3353,6 +3356,11 @@ def brand_strings(tree):
         tree.write(rel, text)
     for rel, old, new, count in JAVA_NAMES:
         tree.replace(f"{JAVA}/{rel}", old, new, count)
+
+
+def brand_invite_link(tree):
+    for rel in INVITE_LINK_FILES:
+        tree.replace(f"{JAVA}/{rel}", '"https://telegram.org/dl"', '"https://pluma.chat/"')
 
 
 def brand_client_links(tree):

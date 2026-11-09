@@ -819,6 +819,20 @@ class BrandTest(unittest.TestCase):
         self.assertTrue(patch.JAVA_NAME_LITERAL.search(r'text = "no linked\nTelegram account";'))
         self.assertFalse(patch.JAVA_NAME_LITERAL.search(r'text = "no linked\nTelegramm";'))
 
+    def test_invite_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in patch.INVITE_LINK_FILES:
+                (root / patch.JAVA / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / patch.JAVA / rel).write_text('link = "https://telegram.org/dl";\n', encoding="utf-8")
+            tree = patch.Tree(root)
+            patch.brand_invite_link(tree)
+            for rel in patch.INVITE_LINK_FILES:
+                self.assertEqual(tree.read(f"{patch.JAVA}/{rel}"), 'link = "https://pluma.chat/";\n')
+            with self.assertRaises(patch.PatchError):
+                patch.brand_invite_link(tree)
+        self.assertFalse(set(patch.INVITE_LINK_FILES) & set(patch.TELEGRAM_SITE_KEEP))
+
     def test_assets_are_rendered(self):
         res = patch.BRAND / "res"
         files = {p.relative_to(res).as_posix() for p in res.rglob("*") if p.is_file()}
