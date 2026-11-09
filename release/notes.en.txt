@@ -1,1 +1,1 @@
-Links to profiles, groups and messages now lead to pluma.chat and open right in Pluma. Opened in a browser, they show a page that starts Pluma in one tap.
+Videos are now sent in the quality of the network: 720p on mobile data, 1080p on Wi-Fi. A quality chosen on Wi-Fi no longer carries over to mobile data.
