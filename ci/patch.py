@@ -1901,6 +1901,48 @@ JAVA_NAMES = (
     ("ui/SessionsActivity.java", 'session.app_name = "Telegram Android";', 'session.app_name = "Pluma Android";', 1),
     ("ui/ThemePreviewActivity.java", '"Telegram Beta Chat"', '"Pluma Beta Chat"', 1),
 )
+# The name in Java literals that stays, per file under JAVA: directories on the
+# device's storage, the mini app API and the user agent, none of them read by
+# the user. A new literal with the name stops the build until it is read and
+# put either in JAVA_NAMES or here.
+JAVA_NAMES_KEEP = {
+    "messenger/AndroidUtilities.java": 1,
+    "messenger/FilesMigrationService.java": 3,
+    "messenger/ImageLoader.java": 12,
+    "messenger/MediaController.java": 11,
+    "messenger/SharedConfig.java": 3,
+    "ui/Components/ChatAttachAlertDocumentLayout.java": 2,
+    "ui/bots/BotSensors.java": 4,
+    "ui/web/BotWebViewContainer.java": 4,
+}
+JAVA_NAME_LITERAL = re.compile(r'"[^"\n]*\bTelegram\b[^"\n]*"')
+# Lines with a literal naming telegram.org that stay, per file under JAVA:
+# Telegram's own pages behind services Pluma does not have, the sender of
+# Telegram's login letters and internal base URIs. A new one stops the build
+# until it is read and either rebranded or put here.
+TELEGRAM_SITE_KEEP = {
+    "messenger/AppGlobalConfig.java": 1,
+    "messenger/ContactsController.java": 1,
+    "messenger/MessagesController.java": 1,
+    "messenger/browser/Browser.java": 3,
+    "ui/ArticleViewer.java": 1,
+    "ui/Cells/ThemePreviewMessagesCell.java": 2,
+    "ui/ChatActivity.java": 3,
+    "ui/Components/EmbedBottomSheet.java": 3,
+    "ui/Components/PhotoViewerWebView.java": 2,
+    "ui/IdenticonActivity.java": 1,
+    "ui/LaunchActivity.java": 18,
+    "ui/LoginActivity.java": 3,
+    "ui/NewContactBottomSheet.java": 1,
+    "ui/PassportActivity.java": 2,
+    "ui/ReportBottomSheet.java": 9,
+    "ui/ThemePreviewActivity.java": 1,
+    "ui/Wallet/GramWalletTonConnect.java": 2,
+    "ui/WearAuthSheet.java": 1,
+    "ui/WebviewActivity.java": 1,
+    "utils/proxy/ProxySettings.java": 1,
+}
+TELEGRAM_SITE_LITERAL = re.compile(r'"[^"\n]*telegram\.org[^"\n]*"')
 # The QR login's links to the desktop and web clients, the one exception to
 # keeping telegram.org: Pluma's site and its web client (the owner's
 # decision). The steps of "Link Desktop Device" (ActionIntroActivity), the
@@ -3543,13 +3585,26 @@ def verify_brand(tree):
     if sessions.count("R.raw.pluma_devices") != 1 or "STICKERS_PLACEHOLDER_PACK_NAME" in sessions:
         raise PatchError(f"{SESSIONS}: Settings > Devices does not play the bundled animation")
     verify_intro(tree)
-    found = {}
+    found, names, sites = {}, {}, {}
     for p in sorted((tree.root / JAVA).rglob("*.java")):
-        n = len(SCHEME_LITERAL.findall(p.read_text(encoding="utf-8")))
+        text = p.read_text(encoding="utf-8")
+        rel = p.relative_to(tree.root / JAVA).as_posix()
+        n = len(SCHEME_LITERAL.findall(text))
         if n:
-            found[p.relative_to(tree.root / JAVA).as_posix()] = n
+            found[rel] = n
+        lines = text.splitlines()
+        n = sum(1 for line in lines if JAVA_NAME_LITERAL.search(line))
+        if n:
+            names[rel] = n
+        n = sum(1 for line in lines if TELEGRAM_SITE_LITERAL.search(line))
+        if n:
+            sites[rel] = n
     if found != SCHEME_KEEP:
         raise PatchError(f"tg: literals left in {found}, expected only the internal ones {SCHEME_KEEP}")
+    if names != JAVA_NAMES_KEEP:
+        raise PatchError(f"Java literals with the name Telegram in {names}, expected only {JAVA_NAMES_KEEP}")
+    if sites != TELEGRAM_SITE_KEEP:
+        raise PatchError(f"Java literals with telegram.org in {sites}, expected only {TELEGRAM_SITE_KEEP}")
     if SCHEME_REGEX[1] in tree.read(f"{JAVA}/{SCHEME_REGEX[0]}"):
         raise PatchError(f"{SCHEME_REGEX[0]}: the sendgrams link still has the tg: scheme")
     if 'android:scheme="tg"' in tree.read(f"{MAIN}/AndroidManifest.xml"):
