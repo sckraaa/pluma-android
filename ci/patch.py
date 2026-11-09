@@ -3693,6 +3693,10 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("TMessagesProj/src/main/java/org/telegram/ui/ChatUsersActivity.java",
      "        return currentChat.megagroup && !currentChat.gigagroup && ChatObject.canUserDoAdminAction(currentChat,ChatObject.ACTION_DELETE_MESSAGES) &&\n",
      "        return false && currentChat.megagroup && !currentChat.gigagroup && ChatObject.canUserDoAdminAction(currentChat,ChatObject.ACTION_DELETE_MESSAGES) && // pluma: boosts do not exist here (ADR 0041)\n"),
+    # Without statistics the item opens the boosts screen (StatisticActivity.create).
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     "                    if ((chatInfo.can_view_stats || chatInfo.can_view_revenue || chatInfo.can_view_stars_revenue || getMessagesController().getStoriesController().canPostStories(getDialogId())) && topicId == 0) {\n",
+     "                    if ((chatInfo.can_view_stats || chatInfo.can_view_revenue || chatInfo.can_view_stars_revenue) && topicId == 0) { // pluma: boosts do not exist here (ADR 0041)\n"),
 )
 
 
