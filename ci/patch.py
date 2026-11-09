@@ -1861,10 +1861,12 @@ INTRO_MARK = (
 # (t.me/TelegramTips, telegram.org) and other words ("Telegramm") stay. The
 # counts are per file, after the AppName edit; a new language file or a
 # changed count stops the build.
-TELEGRAM_WORD = re.compile(r"(?<![A-Za-z0-9@/.])(Telegram|TELEGRAM)(?![A-Za-z0-9]|\.\w)")
+# The two characters \n of a line break in the text end the word before it,
+# though its "n" is a letter to the lookbehind.
+TELEGRAM_WORD = re.compile(r"(?:(?<![A-Za-z0-9@/.])|(?<=\\n))(Telegram|TELEGRAM)(?![A-Za-z0-9]|\.\w)")
 ELEMENT_TEXT = re.compile(r">[^<]*<")
 STRING_RENAMES = {
-    "values": (533, 1),
+    "values": (534, 1),
     "values-ar": (0, 0),
     "values-de": (80, 0),
     "values-es": (95, 0),
@@ -1915,7 +1917,7 @@ JAVA_NAMES_KEEP = {
     "ui/bots/BotSensors.java": 4,
     "ui/web/BotWebViewContainer.java": 4,
 }
-JAVA_NAME_LITERAL = re.compile(r'"[^"\n]*\bTelegram\b[^"\n]*"')
+JAVA_NAME_LITERAL = re.compile(r'"[^"\n]*(?:\b|(?<=\\n))Telegram\b[^"\n]*"')
 # Lines with a literal naming telegram.org that stay, per file under JAVA:
 # Telegram's own pages behind services Pluma does not have, the sender of
 # Telegram's login letters and internal base URIs. A new one stops the build
