@@ -408,6 +408,86 @@ class SavedTagsTest(unittest.TestCase):
                 patch.verify_saved_tags(tree)
 
 
+class PremiumStickersTest(unittest.TestCase):
+    # Premium checks of upstream that are not about premium stickers; they stay.
+    OTHER_PREMIUM = {
+        patch.EMOJI_VIEW: "            if (UserConfig.getInstance(currentAccount).isPremium()) {\n"
+                          "                premiumStickers = MediaDataController.getInstance(currentAccount).getRecentStickers(MediaDataController.TYPE_PREMIUM_STICKERS);\n",
+    }
+
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.PREMIUM_STICKERS_EDITS):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "class X {\n" + self.OTHER_PREMIUM.get(rel, "")) + old + "        x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text + "}\n", encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_stickers_without_premium(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_premium_stickers(tree)
+            patch.premium_stickers(tree)
+            patch.verify_premium_stickers(tree)
+            self.assertIn("    public boolean premiumStickersAvailable() {\n        return true;\n    }\n",
+                          tree.read(patch.MESSAGES_CONTROLLER))
+            self.assertIn("if (premiumStickersAvailable() || !premiumFeaturesBlocked() || stickerSet == null) {",
+                          tree.read(patch.MESSAGES_CONTROLLER))
+            # The sender's effect stays for what else Premium plays there.
+            for rel, _, new in patch.PREMIUM_STICKERS_EDITS:
+                if rel != patch.CHAT_ACTIVITY:
+                    self.assertNotIn("isPremium()", new)
+            self.assertIn("getUserConfig().isPremium() || (getMessagesController().premiumStickersAvailable() && messageObject.isPremiumSticker())",
+                          tree.read(patch.CHAT_ACTIVITY))
+            for rel, text in self.OTHER_PREMIUM.items():
+                self.assertEqual(tree.read(rel).count(text), 1)
+            # Both cells import the class they now ask.
+            for rel in (patch.STICKER_CELL, patch.STICKER_EMOJI_CELL):
+                self.assertEqual(tree.read(rel).count("import org.telegram.messenger.MessagesController;\n"), 1)
+            with self.assertRaises(patch.PatchError):
+                patch.premium_stickers(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.PREMIUM_STICKERS_EDITS):
+            changed = old.replace("(", "( ", 1) if "(" in old else old.replace("import", "import  ", 1)
+            self.assertNotEqual(changed, old)
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.PREMIUM_STICKERS_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.premium_stickers(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.premium_stickers(tree)
+            for rel, old, new in patch.PREMIUM_STICKERS_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old), patched.replace(new, "")):
+                    with self.subTest(file=rel, edit=new.splitlines()[0]):
+                        self.assertNotEqual(text, patched)
+                        tree.write(rel, text)
+                        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                            patch.verify_premium_stickers(tree)
+                tree.write(rel, patched)
+            patch.verify_premium_stickers(tree)
+            for rel in patch.PREMIUM_STICKERS_USES:
+                patched = tree.read(rel)
+                with self.subTest(file=rel):
+                    tree.write(rel, patched + "        if (getMessagesController().premiumStickersAvailable()) {\n")
+                    with self.assertRaisesRegex(patch.PatchError, "uses of premiumStickersAvailable"):
+                        patch.verify_premium_stickers(tree)
+                tree.write(rel, patched)
+            patched = tree.read(patch.MESSAGES_CONTROLLER)
+            tree.write(patch.MESSAGES_CONTROLLER,
+                       patched.replace("        return true;\n", "        return getUserConfig().isPremium();\n", 1))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_premium_stickers(tree)
+
+
 class SelfUpdateTest(unittest.TestCase):
     COMPONENTS = {"UpdateAppAlertDialog.java": b"class UpdateAppAlertDialog {}\n", "UpdateLayout.java": b"class UpdateLayout {}\n"}
 

@@ -13,7 +13,7 @@ and web clients in the built-in strings, no tg:// link scheme, no t.me link
 the app makes itself and pluma.chat taken wherever t.me is, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
 the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
-Messages that ask for no Premium).
+Messages that ask for no Premium, premium stickers sent without Premium).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -391,6 +391,7 @@ def patch(tree, c):
     birthdays(tree)
     sticker_sets(tree)
     saved_tags(tree)
+    premium_stickers(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -919,6 +920,138 @@ def verify_saved_tags(tree):
     definition = re.findall(r"public boolean savedTagsAvailable\(\) \{\n\s*return (\w+);\n", tree.read(MESSAGES_CONTROLLER))
     if definition != ["true"]:
         raise PatchError(f"{MESSAGES_CONTROLLER}: savedTagsAvailable() does not return true")
+
+
+# --- premium stickers ---------------------------------------------------------
+# Task 058 of the server repository: a premium sticker (a document with a
+# video_thumbs entry of type "f", MessageObject 425) is sent and played by
+# every user, as with Premium in Telegram; Pluma sells no Premium, and the
+# server sends premium_purchase_blocked. The owner reported the gate as a
+# defect. Nothing the server can send opens it: each place asks
+# UserConfig.isPremium(), and premiumFeaturesBlocked() (MessagesController
+# 739) even drops such stickers from every list. premiumStickersAvailable(),
+# true, stands in at these places only; lines are those of upstream 12.9.1:
+# - filterPremiumStickers (MessagesController 969): sets in the panel, the
+#   set's window and the settings keep their premium stickers;
+# - the panel: a tap opens the unlock view instead of sending (EmojiView
+#   2350); favourites and recents drop premium stickers (6179);
+# - the long press: the unlock view instead of the menu with "Send"
+#   (ContentPreviewViewer 714);
+# - stickers suggested for an emoji (MentionsAdapter 273, 298);
+# - the mark on a sticker: the lock in the middle or the Premium star in the
+#   corner (StickerEmojiCell 298-318, StickerCell 212-231);
+# - the sender's effect: only a sender with Premium has it played when the
+#   sticker has just been sent (ChatActivity 25320, forcePlayEffect, which
+#   15985 asks for an outgoing message).
+# The recipient plays the effect from the document alone (ChatActivity 15984,
+# EmojiAnimationsOverlay 682-687, ImageLocation.getForDocument(videoSize,
+# document)), asking no Premium; custom emoji are another matter and stay.
+CONTENT_PREVIEW_VIEWER = "TMessagesProj/src/main/java/org/telegram/ui/ContentPreviewViewer.java"
+MENTIONS_ADAPTER = "TMessagesProj/src/main/java/org/telegram/ui/Adapters/MentionsAdapter.java"
+EMOJI_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Components/EmojiView.java"
+STICKER_CELL = "TMessagesProj/src/main/java/org/telegram/ui/Cells/StickerCell.java"
+STICKER_EMOJI_CELL = "TMessagesProj/src/main/java/org/telegram/ui/Cells/StickerEmojiCell.java"
+PREMIUM_STICKERS_CALL = "premiumStickersAvailable()"
+PREMIUM_STICKERS_COMMENT = "// pluma: premium stickers without Premium."
+_MESSAGES_IMPORT = "import org.telegram.messenger.MessagesController;\n"
+_USER_CONFIG_IMPORT = "import org.telegram.messenger.UserConfig;\n"
+PREMIUM_STICKERS_EDITS = (
+    (MESSAGES_CONTROLLER,
+     "    public TLRPC.TL_messages_stickerSet filterPremiumStickers(TLRPC.TL_messages_stickerSet stickerSet) {\n"
+     "        if (!premiumFeaturesBlocked() || stickerSet == null) {\n",
+     "    // pluma: premium stickers are open to every user; Pluma sells no Premium.\n"
+     "    public boolean premiumStickersAvailable() {\n"
+     "        return true;\n"
+     "    }\n"
+     "\n"
+     "    public TLRPC.TL_messages_stickerSet filterPremiumStickers(TLRPC.TL_messages_stickerSet stickerSet) {\n"
+     f"        {PREMIUM_STICKERS_COMMENT}\n"
+     "        if (premiumStickersAvailable() || !premiumFeaturesBlocked() || stickerSet == null) {\n"),
+    (CONTENT_PREVIEW_VIEWER,
+     "                if (MessageObject.isPremiumSticker(currentDocument) && !AccountInstance.getInstance(currentAccount).getUserConfig().isPremium()) {\n",
+     f"                {PREMIUM_STICKERS_COMMENT}\n"
+     "                if (MessageObject.isPremiumSticker(currentDocument) && !MessagesController.getInstance(currentAccount).premiumStickersAvailable()) {\n"),
+    (MENTIONS_ADAPTER,
+     "        if (!UserConfig.getInstance(currentAccount).isPremium() && MessageObject.isPremiumSticker(document)) {\n"
+     "            return;\n",
+     f"        {PREMIUM_STICKERS_COMMENT}\n"
+     "        if (!MessagesController.getInstance(currentAccount).premiumStickersAvailable() && MessageObject.isPremiumSticker(document)) {\n"
+     "            return;\n"),
+    (MENTIONS_ADAPTER,
+     "            if (!UserConfig.getInstance(currentAccount).isPremium() && MessageObject.isPremiumSticker(document)) {\n"
+     "                continue;\n",
+     f"            {PREMIUM_STICKERS_COMMENT}\n"
+     "            if (!MessagesController.getInstance(currentAccount).premiumStickersAvailable() && MessageObject.isPremiumSticker(document)) {\n"
+     "                continue;\n"),
+    (EMOJI_VIEW,
+     "                if (cell.getSticker() != null && MessageObject.isPremiumSticker(cell.getSticker()) && !AccountInstance.getInstance(currentAccount).getUserConfig().isPremium()) {\n",
+     f"                {PREMIUM_STICKERS_COMMENT}\n"
+     "                if (cell.getSticker() != null && MessageObject.isPremiumSticker(cell.getSticker()) && !MessagesController.getInstance(currentAccount).premiumStickersAvailable()) {\n"),
+    (EMOJI_VIEW,
+     "            if (MessagesController.getInstance(currentAccount).premiumFeaturesBlocked()) {\n"
+     "                for (int a = 0; a < favouriteStickers.size(); a++) {\n",
+     f"            {PREMIUM_STICKERS_COMMENT}\n"
+     "            if (!MessagesController.getInstance(currentAccount).premiumStickersAvailable() && MessagesController.getInstance(currentAccount).premiumFeaturesBlocked()) {\n"
+     "                for (int a = 0; a < favouriteStickers.size(); a++) {\n"),
+    (CHAT_ACTIVITY,
+     "                if (messageObject.wasJustSent && (getUserConfig().isPremium() || messageObject.isAnimatedAnimatedEmoji() || messageObject.getEffect() != null) && ",
+     f"                {PREMIUM_STICKERS_COMMENT}\n"
+     "                if (messageObject.wasJustSent && (getUserConfig().isPremium() || (getMessagesController().premiumStickersAvailable() && messageObject.isPremiumSticker()) || messageObject.isAnimatedAnimatedEmoji() || messageObject.getEffect() != null) && "),
+    (STICKER_CELL, _USER_CONFIG_IMPORT, _MESSAGES_IMPORT + _USER_CONFIG_IMPORT),
+    (STICKER_CELL,
+     "        FrameLayout.LayoutParams layoutParams = (LayoutParams) premiumIconView.getLayoutParams();\n"
+     "        if (!UserConfig.getInstance(UserConfig.selectedAccount).isPremium()) {\n",
+     "        FrameLayout.LayoutParams layoutParams = (LayoutParams) premiumIconView.getLayoutParams();\n"
+     f"        {PREMIUM_STICKERS_COMMENT}\n"
+     "        if (!MessagesController.getInstance(UserConfig.selectedAccount).premiumStickersAvailable()) {\n"),
+    (STICKER_CELL,
+     "        premiumIconView.setLocked(!UserConfig.getInstance(UserConfig.selectedAccount).isPremium());\n",
+     f"        {PREMIUM_STICKERS_COMMENT}\n"
+     "        premiumIconView.setLocked(!MessagesController.getInstance(UserConfig.selectedAccount).premiumStickersAvailable());\n"),
+    (STICKER_EMOJI_CELL, _USER_CONFIG_IMPORT, _MESSAGES_IMPORT + _USER_CONFIG_IMPORT),
+    (STICKER_EMOJI_CELL,
+     "        FrameLayout.LayoutParams layoutParams = (LayoutParams) premiumIconView.getLayoutParams();\n"
+     "        if (!UserConfig.getInstance(currentAccount).isPremium()) {\n",
+     "        FrameLayout.LayoutParams layoutParams = (LayoutParams) premiumIconView.getLayoutParams();\n"
+     f"        {PREMIUM_STICKERS_COMMENT}\n"
+     "        if (!MessagesController.getInstance(currentAccount).premiumStickersAvailable()) {\n"),
+    (STICKER_EMOJI_CELL,
+     "        premiumIconView.setLocked(!UserConfig.getInstance(currentAccount).isPremium());\n",
+     f"        {PREMIUM_STICKERS_COMMENT}\n"
+     "        premiumIconView.setLocked(!MessagesController.getInstance(currentAccount).premiumStickersAvailable());\n"),
+)
+# The places that ask premiumStickersAvailable(), each file with its count;
+# nothing else may ask it.
+PREMIUM_STICKERS_USES = {
+    MESSAGES_CONTROLLER: 2,
+    CONTENT_PREVIEW_VIEWER: 1,
+    CHAT_ACTIVITY: 1,
+    MENTIONS_ADAPTER: 2,
+    EMOJI_VIEW: 2,
+    STICKER_CELL: 2,
+    STICKER_EMOJI_CELL: 2,
+}
+
+
+def premium_stickers(tree):
+    for rel, old, new in PREMIUM_STICKERS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_premium_stickers(tree):
+    for rel, old, new in PREMIUM_STICKERS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            changed = next(line for line in new.splitlines()
+                           if line not in old.splitlines() and "// pluma:" not in line)
+            raise PatchError(f"{rel}: the premium stickers edit {changed.strip()!r} is not there")
+    for rel, count in PREMIUM_STICKERS_USES.items():
+        found = tree.read(rel).count(PREMIUM_STICKERS_CALL)
+        if found != count:
+            raise PatchError(f"{rel}: {found} uses of {PREMIUM_STICKERS_CALL}, expected {count}")
+    definition = re.findall(r"public boolean premiumStickersAvailable\(\) \{\n\s*return (\w+);\n", tree.read(MESSAGES_CONTROLLER))
+    if definition != ["true"]:
+        raise PatchError(f"{MESSAGES_CONTROLLER}: premiumStickersAvailable() does not return true")
 
 
 # --- self-update -------------------------------------------------------------
@@ -3459,6 +3592,7 @@ def verify(tree, c):
     verify_birthdays(tree)
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
+    verify_premium_stickers(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
