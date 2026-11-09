@@ -3845,6 +3845,21 @@ NOT_SERVED_EDITS = (
      "            return true;\n"
      "        }\n",
      "        // pluma: the links of the Help section open Settings: no Help section.\n"),
+    # TON Connect waits for a wallet the server does not provide: the gate of
+    # the other wallet links, and no claim on tc:// links of other apps.
+    (NOT_SERVED_LINK_MANAGER,
+     "    private boolean handleTc(Uri uri) {\n        uri = normalizeTgUri(uri);\n",
+     "    private boolean handleTc(Uri uri) {\n"
+     "        if (!getMessagesController().config.walletAvailable.get()) return false; // pluma: as handleTon\n"
+     "        uri = normalizeTgUri(uri);\n"),
+    ("TMessagesProj/src/main/AndroidManifest.xml",
+     '            <intent-filter android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:priority="1">\n'
+     '                <action android:name="android.intent.action.VIEW" />\n'
+     '                <category android:name="android.intent.category.DEFAULT" />\n'
+     '                <category android:name="android.intent.category.BROWSABLE" />\n'
+     '                <data android:scheme="tc" />\n'
+     "            </intent-filter>\n",
+     "            <!-- pluma: no tc:// links, the wallet is closed -->\n"),
 )
 
 
