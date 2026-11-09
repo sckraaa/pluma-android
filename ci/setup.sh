@@ -41,7 +41,7 @@ sdk_install() {
 case $mode in
 build)
 	apt_install ccache age
-	sdk_install "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" "cmake;$CMAKE_PACKAGE"
+	sdk_install "platforms;$PLATFORM" "build-tools;$BUILD_TOOLS" "build-tools;$MEDIA_BUILD_TOOLS" "ndk;$NDK_VERSION" "cmake;$CMAKE_PACKAGE"
 	test -x "$ANDROID_HOME/ndk/$NDK_VERSION/ndk-build"
 	test -x "$ANDROID_HOME/cmake/$CMAKE_PACKAGE/bin/cmake"
 	# ccache keys on the NDK version instead of hashing the compiler binary
