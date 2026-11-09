@@ -392,6 +392,7 @@ def patch(tree, c):
     sticker_sets(tree)
     saved_tags(tree)
     premium_stickers(tree)
+    premium_for_everyone(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -3593,10 +3594,74 @@ def verify(tree, c):
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
+    verify_premium_for_everyone(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
 
+
+
+# --- Premium for everyone -----------------------------------------------------
+# Task 071 (ADR 0041): every user has Premium and every boost-gated feature is
+# open, so the server sends the Premium flag for everybody. Only what the flag
+# would make wrong is edited: the star by every name, the purchase rows that
+# show for anyone with Premium, and what the server does not serve.
+PREMIUM_FOR_EVERYONE_EDITS = (
+    ("TMessagesProj/src/main/java/org/telegram/messenger/MessagesController.java",
+     "        return currentUser != null && currentUser.premium && !isSupportUser(currentUser);\n",
+     "        // pluma: no star by a name: everybody has Premium (ADR 0041).\n        return false;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/messenger/ImageReceiver.java",
+     "animationEnabled && MessagesController.getInstance(currentAccount).isPremiumUser(user) && user.photo.has_video",
+     "animationEnabled && user.premium && user.photo.has_video"),
+    ("TMessagesProj/src/main/java/org/telegram/messenger/ImageLocation.java",
+     "            if (MessagesController.getInstance(currentAccount).isPremiumUser(user) && user.photo.has_video) {\n",
+     "            if (user.premium && user.photo.has_video) {\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
+     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(11,",
+     "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(11,"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
+     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(15,",
+     "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(15,"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
+     "            } else if (user != null && user.premium) {\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)",
+     "            } else if (false) { // pluma: no star: everybody has Premium\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    premiumRow = rowCount++;\n",
+     "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    premiumRow = rowCount++;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
+     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    businessRow = rowCount++;\n",
+     "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    businessRow = rowCount++;\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java",
+     "UserObject.getUserName(user))), user.scam, user.fake, user.verified, user.premium, user.emoji_status, animated);",
+     "UserObject.getUserName(user))), user.scam, user.fake, user.verified, false, user.emoji_status, animated); // pluma: no star"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java",
+     "            } else if (currentUser.premium) {\n                return ContextCompat.getDrawable(ApplicationLoader.applicationContext, R.drawable.msg_premium_liststar).mutate();",
+     "            } else if (false) { // pluma: no star: everybody has Premium\n                return ContextCompat.getDrawable(ApplicationLoader.applicationContext, R.drawable.msg_premium_liststar).mutate();"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java",
+     "        useTranscribeButton = (\n            currentMessageObject != null &&\n",
+     "        // pluma: the server has no transcription to offer.\n        useTranscribeButton = (\n            false && currentMessageObject != null &&\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/GroupCallUserCell.java",
+     "            } else if (currentUser != null && currentUser.premium) {\n",
+     "            } else if (false) { // pluma: no star: everybody has Premium\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/StatusBadgeComponent.java",
+     "        } else if (user != null && user.premium) {\n",
+     "        } else if (false) { // pluma: no star: everybody has Premium\n"),
+    ("TMessagesProj/src/main/java/org/telegram/ui/Components/TableView.java",
+     "                isPremium = user != null && user.premium;\n",
+     "                isPremium = false; // pluma: no star: everybody has Premium\n"),
+)
+
+
+def premium_for_everyone(tree):
+    for rel, old, new in PREMIUM_FOR_EVERYONE_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_premium_for_everyone(tree):
+    for rel, old, new in PREMIUM_FOR_EVERYONE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 071 is not there")
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
