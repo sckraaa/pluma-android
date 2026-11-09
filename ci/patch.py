@@ -393,6 +393,7 @@ def patch(tree, c):
     saved_tags(tree)
     premium_stickers(tree)
     premium_for_everyone(tree)
+    not_served(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -3308,20 +3309,9 @@ def brand(tree):
 
 
 def brand_entry_points(tree):
-    # Settings: no Help section. Its rows lead only to Telegram's services:
-    # the volunteer support chat, the FAQ, the feature tips channel and the
-    # privacy policy.
+    # Settings: no Help section (NOT_SERVED_EDITS), and with it no shadow left
+    # at the end of the list.
     settings = f"{JAVA}/ui/SettingsActivity.java"
-    tree.replace_body(settings,
-                      "getString(R.string.SendAGift)));\n        }\n",
-                      "            items.add(UItem.asHeader(getString(R.string.SettingsDebug)));\n",
-                      "\n        // pluma: no Help section; it leads to Telegram's support, FAQ, feature tips and\n"
-                      "        // privacy policy only.\n"
-                      "        if (BuildVars.LOGS_ENABLED || BuildVars.DEBUG_PRIVATE_VERSION) {\n"
-                      "            if (items.get(items.size() - 1).viewType != UniversalAdapter.VIEW_TYPE_SHADOW)\n"
-                      "                items.add(UItem.asShadow(null));\n",
-                      must_contain=("R.string.AskAQuestion", "R.string.TelegramFAQ", "R.string.TelegramFeatures",
-                                    "R.string.PrivacyPolicy", "items.add(UItem.asShadow(null));"))
     tree.replace(settings, "        items.add(UItem.asCustomShadow(versionView));\n",
                  "        if (items.get(items.size() - 1).viewType == UniversalAdapter.VIEW_TYPE_SHADOW) {\n"
                  "            items.remove(items.size() - 1);\n"
@@ -3682,6 +3672,7 @@ def verify(tree, c):
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_not_served(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
@@ -3800,6 +3791,76 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+# --- What the server does not serve ------------------------------------------
+# Every way into a service Pluma does not have, not only the visible one. The
+# edits are exact, so a row or a branch upstream adds next to them stops the
+# patch until it is read.
+SETTINGS_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java"
+NOT_SERVED_LINK_MANAGER = "TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java"
+NOT_SERVED_EDITS = (
+    # Help leads to Telegram's support, FAQ, feature tips and privacy policy
+    # only; the experimental section after it stays.
+    (SETTINGS_ACTIVITY,
+     "        items.add(UItem.asHeader(getString(R.string.SettingsHelp)));\n"
+     "        items.add(SettingCell.Factory.of(17, IconBackgroundColors.ORANGE.top, IconBackgroundColors.ORANGE.bottom, R.drawable.settings_ask, getString(R.string.AskAQuestion)));\n"
+     "        items.add(SettingCell.Factory.of(18, IconBackgroundColors.BLUE_LIGHT.top, IconBackgroundColors.BLUE_LIGHT.bottom, R.drawable.settings_faq, getString(R.string.TelegramFAQ)));\n"
+     "        items.add(SettingCell.Factory.of(23, IconBackgroundColors.PURPLE.top, IconBackgroundColors.PURPLE.bottom, R.drawable.settings_features, getString(R.string.TelegramFeatures)));\n"
+     "        items.add(SettingCell.Factory.of(19, IconBackgroundColors.GREEN.top, IconBackgroundColors.GREEN.bottom, R.drawable.settings_policy, getString(R.string.PrivacyPolicy)));\n"
+     "\n"
+     "        if (SharedSettings.experimentalSettingsAllowed.get()) {\n"
+     "            items.add(UItem.asShadow(null));\n",
+     "        // pluma: no Help section; it leads to Telegram's support, FAQ, feature tips and\n"
+     "        // privacy policy only.\n"
+     "\n"
+     "        if (SharedSettings.experimentalSettingsAllowed.get()) {\n"),
+    (SETTINGS_ACTIVITY,
+     "        if (BuildVars.LOGS_ENABLED || BuildVars.DEBUG_PRIVATE_VERSION) {\n"
+     "            items.add(UItem.asShadow(null));\n"
+     "            items.add(UItem.asHeader(getString(R.string.SettingsDebug)));\n",
+     "        if (BuildVars.LOGS_ENABLED || BuildVars.DEBUG_PRIVATE_VERSION) {\n"
+     "            if (items.get(items.size() - 1).viewType != UniversalAdapter.VIEW_TYPE_SHADOW) // pluma: Help no longer ends in a row\n"
+     "                items.add(UItem.asShadow(null));\n"
+     "            items.add(UItem.asHeader(getString(R.string.SettingsDebug)));\n"),
+    # The same support chat from the Log Out screen and the same pages from
+    # links.
+    ("TMessagesProj/src/main/java/org/telegram/ui/LogoutActivity.java",
+     "        supportRow = rowCount++;\n",
+     "        supportRow = -1; // pluma: help.getSupport is not served\n"),
+    (NOT_SERVED_LINK_MANAGER,
+     '        if ("ask-question".equalsIgnoreCase(first) || "ask-a-question".equalsIgnoreCase(first)) {\n'
+     "            AlertsCreator.createSupportAlert(getLastFragment(), null).show();\n"
+     "            return true;\n"
+     "        }\n"
+     '        if ("faq".equalsIgnoreCase(first)) {\n'
+     "            Browser.openUrl(activity, LocaleController.getString(R.string.TelegramFaqUrl));\n"
+     "            return true;\n"
+     "        }\n"
+     '        if ("features".equalsIgnoreCase(first)) {\n'
+     "            Browser.openUrl(activity, LocaleController.getString(R.string.TelegramFeaturesUrl));\n"
+     "            return true;\n"
+     "        }\n"
+     '        if ("privacy-policy".equalsIgnoreCase(first)) {\n'
+     "            Browser.openUrl(activity, LocaleController.getString(R.string.PrivacyPolicyUrl));\n"
+     "            return true;\n"
+     "        }\n",
+     "        // pluma: the links of the Help section open Settings: no Help section.\n"),
+)
+
+
+def not_served(tree):
+    for rel, old, new in NOT_SERVED_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_not_served(tree):
+    for rel, old, new in NOT_SERVED_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text:
+            raise PatchError(f"{rel}: the path to a service that is not served is open again")
+    if tree.read(SETTINGS_ACTIVITY).count("R.string.SettingsExperimental") != 1:
+        raise PatchError(f"{SETTINGS_ACTIVITY}: the experimental section is gone")
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

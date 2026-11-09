@@ -1390,5 +1390,59 @@ class PremiumForEveryoneTest(unittest.TestCase):
             patch.verify_premium_for_everyone(tree)
 
 
+class NotServedTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.NOT_SERVED_EDITS):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        files[patch.SETTINGS_ACTIVITY] += "R.string.SettingsExperimental\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is open again"):
+                patch.verify_not_served(tree)
+            patch.not_served(tree)
+            patch.verify_not_served(tree)
+            with self.assertRaises(patch.PatchError):
+                patch.not_served(tree)
+
+    def test_upstream_changed(self):
+        # A row added inside a block stops the patch: the block is exact.
+        for i, (rel, old, new) in enumerate(patch.NOT_SERVED_EDITS):
+            changed = old[:len(old) // 2] + "        added();\n" + old[len(old) // 2:]
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.NOT_SERVED_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.not_served(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.not_served(tree)
+            for rel, old, new in patch.NOT_SERVED_EDITS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(file=rel), self.assertRaisesRegex(patch.PatchError, "is open again"):
+                    patch.verify_not_served(tree)
+                tree.write(rel, patched)
+            patch.verify_not_served(tree)
+
+    def test_experimental_section_stays(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.not_served(tree)
+            text = tree.read(patch.SETTINGS_ACTIVITY)
+            tree.write(patch.SETTINGS_ACTIVITY, text.replace("R.string.SettingsExperimental", ""))
+            with self.assertRaisesRegex(patch.PatchError, "experimental section is gone"):
+                patch.verify_not_served(tree)
+
+
 if __name__ == "__main__":
     unittest.main()
