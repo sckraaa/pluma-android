@@ -97,7 +97,7 @@ class KeyTest(unittest.TestCase):
 
 
 def config(**over):
-    upstream = {"UPSTREAM_LAYER": "228", "UPSTREAM_VERSION": "12.9.1", "NDK_VERSION": "27.2.12479018", "CMAKE_VERSION": "3.10.2"}
+    upstream = {"UPSTREAM_LAYER": "233", "UPSTREAM_VERSION": "13.2.1", "NDK_VERSION": "27.2.12479018", "CMAKE_VERSION": "3.22.1"}
     app = patch.load_env(ROOT / "config/app.env")
     args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=TELEGRAM_TEST,
                 abis="arm64-v8a", ccache=False, google_services="")
@@ -111,8 +111,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(c.ipv6, "2001:0db8:0000:0000:0000:0000:0000:0001")
         self.assertEqual(c.abis, ["arm64-v8a", "x86_64"])
         self.assertEqual(c.package, "chat.pluma.app")
-        self.assertEqual(c.version_name, "12.9.1.00000")
-        self.assertEqual(config(build=57).version_name, "12.9.1.00057")
+        self.assertEqual(c.version_name, "13.2.1.00000")
+        self.assertEqual(config(build=57).version_name, "13.2.1.00057")
 
     def test_rejects(self):
         for over in (
@@ -502,7 +502,7 @@ class SelfUpdateTest(unittest.TestCase):
             (root / rel).write_text(text + "}\n", encoding="utf-8")
         (root / patch.APP_LOADER_IMPL).parent.mkdir(parents=True, exist_ok=True)
         (root / patch.APP_LOADER_IMPL).write_text(patch.APP_LOADER_IMPL_UPSTREAM, encoding="utf-8")
-        (root / "gradle.properties").write_text("APP_VERSION_CODE=6979\nAPP_VERSION_NAME=12.9.1\n", encoding="utf-8")
+        (root / "gradle.properties").write_text("APP_VERSION_CODE=7291\nAPP_VERSION_NAME=13.2.1\n", encoding="utf-8")
         (root / patch.APP_BUILD_GRADLE).write_text("android {\n" + patch.VERSION_CODE + "    defaultConfig {\n" + patch.VERSION_NAME
                                                    + "    }\n}\ndependencies {\n" + patch.APP_DEPENDENCY + "}\n",
                                                    encoding="utf-8")
@@ -536,8 +536,8 @@ class SelfUpdateTest(unittest.TestCase):
             for name, data in self.COMPONENTS.items():
                 self.assertEqual((tree.root / patch.APP_COMPONENTS / name).read_bytes(), data)
             # The library keeps upstream's version; the app module gets the build.
-            self.assertIn("APP_VERSION_NAME=12.9.1\n", tree.read("gradle.properties"))
-            self.assertIn('        versionName APP_VERSION_NAME + ".00057" // pluma: 12.9.1.00057, the build number\n',
+            self.assertIn("APP_VERSION_NAME=13.2.1\n", tree.read("gradle.properties"))
+            self.assertIn('        versionName APP_VERSION_NAME + ".00057" // pluma: 13.2.1.00057, the build number\n',
                           tree.read(patch.APP_BUILD_GRADLE))
             self.assertIn("Integer.parseInt(APP_VERSION_CODE) * 1000 + 57 ", tree.read(patch.APP_BUILD_GRADLE))
             # A second run finds none of the upstream texts.
@@ -634,6 +634,7 @@ class LinksTest(unittest.TestCase):
                 if "pluma.chat" in block:
                     self.assertIn('android:autoVerify="true"', block)
                     self.assertIn('<data android:pathPrefix="/joinchat/" />', block)
+                    self.assertIn('<data android:pathPrefix="/webproxy" />', block)
                     self.assertIn('<data android:pathAdvancedPattern="/[A-Za-z][A-Za-z0-9_]{4,31}" />', block)
                     self.assertNotIn("android:pathPattern", block)
             self.assertIn('<data android:scheme="https"/>', manifest)
@@ -741,6 +742,36 @@ class LinksTest(unittest.TestCase):
         # those in the browser (Browser.isPlumaSite in LaunchActivity).
         self.assertEqual(sorted(p for p in patch.LINK_SITE_PATHS if matches("/" + p)),
                          ["android", "assets", "collect", "iphone", "linux", "windows"])
+
+
+class SchemeTest(unittest.TestCase):
+    # The files the scheme edits read, with the literals they expect.
+    def tree(self, root):
+        files = {f"{patch.JAVA}/{rel}": '"tg://x";\n' * colon + '"tg";\n' * bare
+                 for rel, (colon, bare) in patch.SCHEME_JAVA.items()}
+        link_manager = f"{patch.JAVA}/{patch.SCHEME_REGEX[0]}"
+        files[link_manager] = files.get(link_manager, "") + patch.SCHEME_REGEX[1] + "\n"
+        files[f"{patch.JAVA}/messenger/AndroidUtilities.java"] += "|ton|tg|tonsite):\n"
+        files[f"{patch.JAVA}/messenger/LinkifyPort.java"] = "|ton|tg|tonsite)://\n"
+        files[f"{patch.MAIN}/AndroidManifest.xml"] = '<data android:scheme="tg" />\n'
+        files[f"{patch.RES}/xml/shortcuts.xml"] = 'android:value="tg://x"\n' * 6
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_scheme_of_the_new_places(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.brand_scheme(tree)
+            for rel in ("utils/proxy/ProxySettings.java", "ui/Cells/ChatMessageBotButtons.java",
+                        "ui/QrShare/QrScanOverlay.java", "messenger/NotificationsController.java"):
+                text = tree.read(f"{patch.JAVA}/{rel}")
+                self.assertIn('"plm:', text, rel)
+                self.assertNotRegex(text, patch.SCHEME_LITERAL)
+            link_manager = tree.read(f"{patch.JAVA}/{patch.SCHEME_REGEX[0]}")
+            self.assertNotIn(patch.SCHEME_REGEX[1], link_manager)
+            self.assertIn(patch.SCHEME_REGEX[2], link_manager)
 
 
 class StickerSetsTest(unittest.TestCase):

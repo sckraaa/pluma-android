@@ -321,7 +321,7 @@ def patch(tree, c):
                       "    public static void onRequestNewServerIpAndPort(final int second, final int currentAccount) {\n",
                       "\n    }\n",
                       "        // pluma: the client knows its server; Telegram's backup addresses do not apply.",
-                      must_contain=("GoogleDnsLoadTask", "FirebaseTask"))
+                      must_contain=("GoogleDnsLoadTask", "MozillaDnsLoadTask"))
 
     # Application identity.
     bv = "TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java"
@@ -366,12 +366,12 @@ def patch(tree, c):
     tree.sub("TMessagesProj_App/build.gradle", r'(        afat \{\n            ndk \{\n                abiFilters )[^\n]+',
              lambda m: m.group(1) + abis)
 
-    # ccache for the native code (CMake 3.10 has no launcher variables in the
-    # environment, so they go to the CMake arguments).
+    # ccache for the native code: the launcher variables go to the CMake
+    # arguments of the module that builds it.
     if c.ccache:
         tree.replace("TMessagesProj/build.gradle",
-                     "arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21'",
-                     "arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21', "
+                     "arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-23'",
+                     "arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-23', "
                      "'-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'")
 
     # Firebase: the real config when given (push, task 009), a placeholder
@@ -1094,7 +1094,8 @@ PEER_STORIES_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Stories/PeerSto
 BLOCKING_UPDATE_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Components/BlockingUpdateView.java"
 SHARED_CONFIG = "TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java"
 PROFILE_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
-SETTINGS_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java"
+DEBUG_SETTINGS_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/DebugSettingsActivity.java"
+ADMIN_LOG_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/ChannelAdminLogActivity.java"
 APPLICATION_LOADER = "TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java"
 APP_LOADER_IMPL = "TMessagesProj_App/src/main/java/org/telegram/messenger/ApplicationLoaderImpl.java"
 APP_BUILD_GRADLE = "TMessagesProj_App/build.gradle"
@@ -1119,8 +1120,30 @@ SELF_UPDATE_EDITS = (
      "                        } else if (ApplicationLoader.isStandaloneBuild() || BuildVars.DEBUG_VERSION) {\n",
      "                        } else if (ApplicationLoader.isSelfUpdatingBuild() || BuildVars.DEBUG_VERSION) {\n"),
     (CHAT_ACTIVITY,
-     "                if (ApplicationLoader.isStandaloneBuild()) {\n",
-     "                if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+     "            if (ApplicationLoader.isStandaloneBuild()) {\n",
+     "            if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+    (ADMIN_LOG_ACTIVITY,
+     "                        return ChatObject.isForum(currentChat);\n"
+     "                    }\n"
+     "\n"
+     "                    @Override\n"
+     "                    public void didPressAppUpdateButton() {\n"
+     "                        if (ApplicationLoader.isStandaloneBuild()) {\n",
+     "                        return ChatObject.isForum(currentChat);\n"
+     "                    }\n"
+     "\n"
+     "                    @Override\n"
+     "                    public void didPressAppUpdateButton() {\n"
+     "                        if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
+    (ADMIN_LOG_ACTIVITY,
+     "                cell.setDelegate(new ChatMessageCell.ChatMessageCellDelegate() {\n"
+     "                    @Override\n"
+     "                    public void didPressAppUpdateButton() {\n"
+     "                        if (ApplicationLoader.isStandaloneBuild()) {\n",
+     "                cell.setDelegate(new ChatMessageCell.ChatMessageCellDelegate() {\n"
+     "                    @Override\n"
+     "                    public void didPressAppUpdateButton() {\n"
+     "                        if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
     (PEER_STORIES_VIEW,
      "            if (ApplicationLoader.isStandaloneBuild()) {\n",
      "            if (ApplicationLoader.isSelfUpdatingBuild()) {\n"),
@@ -1138,16 +1161,16 @@ SELF_UPDATE_EDITS = (
      "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n",
      "                                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isSelfUpdatingBuild() || ApplicationLoader.isBetaBuild() ? "
      "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n"),
-    (SETTINGS_ACTIVITY,
-     "                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isStandaloneBuild() || ApplicationLoader.isBetaBuild() ? "
-     "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n",
-     "                BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isSelfUpdatingBuild() || ApplicationLoader.isBetaBuild() ? "
-     "getString(\"DebugMenuCheckAppUpdate\", R.string.DebugMenuCheckAppUpdate) : null,\n"),
+    (DEBUG_SETTINGS_ACTIVITY,
+     "        if (BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isStandaloneBuild() || ApplicationLoader.isBetaBuild()) {\n"
+     "            items.add(UItem.asButton(ID_CHECK_APP_UPDATE,",
+     "        if (BuildVars.DEBUG_PRIVATE_VERSION || ApplicationLoader.isSelfUpdatingBuild() || ApplicationLoader.isBetaBuild()) {\n"
+     "            items.add(UItem.asButton(ID_CHECK_APP_UPDATE,"),
 )
 # Where the update places ask it, and how often.
 SELF_UPDATE_USES = {
-    LAUNCH_ACTIVITY: 2, CHAT_ACTIVITY: 1, PEER_STORIES_VIEW: 1, BLOCKING_UPDATE_VIEW: 2,
-    SHARED_CONFIG: 1, PROFILE_ACTIVITY: 1, SETTINGS_ACTIVITY: 1,
+    LAUNCH_ACTIVITY: 2, CHAT_ACTIVITY: 1, ADMIN_LOG_ACTIVITY: 2, PEER_STORIES_VIEW: 1, BLOCKING_UPDATE_VIEW: 2,
+    SHARED_CONFIG: 1, PROFILE_ACTIVITY: 1, DEBUG_SETTINGS_ACTIVITY: 1,
 }
 STANDALONE_COMPONENTS = "TMessagesProj_AppStandalone/src/main/java/org/telegram/ui/Components"
 APP_COMPONENTS = "TMessagesProj_App/src/main/java/org/telegram/ui/Components"
@@ -1371,7 +1394,6 @@ BRAND_ASSETS = {
     "mipmap-xxxhdpi/icon_foreground_sa.png": "bf938f915c029b85d75ad9ad2b22868fea31df3348b0529099bedc07a2f0a1c3",
     "raw/plane_logo_plain.json": "35cfefbe333b74e11462fbced88f69c9be6f7727819f1d90bdcbf71e291be73d",
     "raw/qr_code_logo.json": "2a072f8111209cd543929806110c7523082331b6f01ae5ec31c99db41df57b79",
-    "raw/qr_code_logo_2.json": "289a89cd75fe9056fe2f9953291e14252b1d9b5645c316f28eeb0c480dcab64b",
     "raw/qr_logo.svg": "b40b79aba680695563c4e788cf51dc087cdd496faa667a2679b1b4fde49de470",
     "raw/round_blur_overlay_text.png": "8484201589fbb2eaa7efb62f438992814f4e2804f3a5a1660744d9fbbc7365da",
 }
@@ -1413,10 +1435,10 @@ SESSIONS_EDITS = (
     ("import org.telegram.ui.Components.BackupImageView;\n", "", 1),
     ("import org.telegram.ui.Components.RecyclerListView;\n",
      "import org.telegram.ui.Components.RLottieImageView;\nimport org.telegram.ui.Components.RecyclerListView;\n", 1),
-    ("    private class ScanQRCodeView extends FrameLayout implements NotificationCenter.NotificationCenterDelegate {\n"
+    ("    private class ScanQRCodeView extends FrameLayout implements Theme.Colorable, NotificationCenter.NotificationCenterDelegate {\n"
      "\n"
      "        BackupImageView imageView;\n",
-     "    private class ScanQRCodeView extends FrameLayout {\n"
+     "    private class ScanQRCodeView extends FrameLayout implements Theme.Colorable {\n"
      "\n"
      "        RLottieImageView imageView;\n", 1),
     ("            imageView = new BackupImageView(context);\n"
@@ -1440,7 +1462,7 @@ SESSIONS_EDITS = (
      "        protected void onAttachedToWindow() {\n"
      "            super.onAttachedToWindow();\n"
      "            setSticker();\n"
-     "            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.diceStickersDidLoad);\n"
+     "            NotificationCenter.getInstance(currentAccount).addWeakObserver(this, NotificationCenter.diceStickersDidLoad);\n"
      "        }\n"
      "\n"
      "        @Override\n"
@@ -1489,12 +1511,10 @@ SESSIONS_EDITS = (
      "                MediaDataController.getInstance(currentAccount).loadStickersByEmojiOrName(AndroidUtilities.STICKERS_PLACEHOLDER_PACK_NAME, false, set == null);\n"
      "            }\n"
      "        }\n"
-     "    }\n"
+     "    \n"
+     "        private int lastButtonColor, lastButtonPressedColor;\n",
      "\n"
-     "    private void openCameraScanActivity() {\n",
-     "    }\n"
-     "\n"
-     "    private void openCameraScanActivity() {\n", 1),
+     "        private int lastButtonColor, lastButtonPressedColor;\n", 1),
 )
 # What only the sticker used: none of it may be left in the file.
 SESSIONS_GONE = ("BackupImageView", "DocumentObject", "ImageLocation", "MediaDataController", "SvgHelper",
@@ -1844,7 +1864,7 @@ INTRO_MARK = (
 TELEGRAM_WORD = re.compile(r"(?<![A-Za-z0-9@/.])(Telegram|TELEGRAM)(?![A-Za-z0-9]|\.\w)")
 ELEMENT_TEXT = re.compile(r">[^<]*<")
 STRING_RENAMES = {
-    "values": (508, 1),
+    "values": (533, 1),
     "values-ar": (0, 0),
     "values-de": (80, 0),
     "values-es": (95, 0),
@@ -1877,11 +1897,8 @@ JAVA_NAMES = (
     ("messenger/ContactsController.java", '"Telegram Video Call"', '"Pluma Video Call"', 1),
     ("messenger/MessagesController.java", 'user.first_name = "Telegram";', 'user.first_name = "Pluma";', 2),
     ("ui/Components/ChatAttachAlertDocumentLayout.java", 'fs.title = "Telegram";', 'fs.title = "Pluma";', 1),
-    ("ui/Components/MessagePreviewView.java", '"Subscribe to **Telegram Premium** to', '"Subscribe to **Pluma Premium** to', 1),
-    ("ui/Components/PasscodeView.java", '"Unlock to use Telegram"', '"Unlock to use Pluma"', 1),
     ("ui/LoginActivity.java", "But Telegram says it's", "But Pluma says it's", 2),
-    ("ui/NewContactBottomSheet.java", '"This phone number is not on Telegram.', '"This phone number is not on Pluma.', 1),
-    ("ui/NewContactBottomSheet.java", '"This phone number is on Telegram."', '"This phone number is on Pluma."', 1),
+    ("ui/SessionsActivity.java", 'session.app_name = "Telegram Android";', 'session.app_name = "Pluma Android";', 1),
     ("ui/ThemePreviewActivity.java", '"Telegram Beta Chat"', '"Pluma Beta Chat"', 1),
 )
 # The QR login's links to the desktop and web clients, the one exception to
@@ -1912,24 +1929,26 @@ CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 # installed next to Pluma, and the QR login (plm://login?token=...) works
 # between Pluma clients only.
 SCHEME_JAVA = {
-    "messenger/AndroidUtilities.java": (13, 1),
+    "messenger/AndroidUtilities.java": (1, 0),
     "messenger/MusicPlayerService.java": (2, 0),
+    "messenger/NotificationsController.java": (1, 0),
     "messenger/browser/Browser.java": (3, 1),
     "ui/Business/BusinessLinksController.java": (1, 0),
     "ui/CameraScanActivity.java": (1, 0),
-    "ui/Cells/ChatMessageCell.java": (2, 1),
+    "ui/QrShare/QrScanOverlay.java": (1, 0),
+    "ui/Cells/ChatMessageBotButtons.java": (2, 1),
     "ui/ChatActivity.java": (13, 0),
     "ui/Components/Premium/boosts/GiftInfoBottomSheet.java": (2, 1),
     "ui/Components/Premium/boosts/UserSelectorBottomSheet.java": (2, 1),
     "ui/Components/UndoView.java": (3, 0),
-    "ui/LaunchActivity.java": (156, 2),
-    "ui/LinkManager.java": (2, 2),
+    "ui/LaunchActivity.java": (160, 2),
+    "ui/LinkManager.java": (3, 2),
     "ui/LoginActivity.java": (1, 0),
     "ui/PaymentFormActivity.java": (0, 1),
-    "ui/ProfileActivity.java": (76, 0),
-    "ui/ProxySettingsActivity.java": (2, 0),
+    "ui/ProfileActivity.java": (75, 0),
     "ui/SessionsActivity.java": (1, 0),
     "ui/WebviewActivity.java": (2, 1),
+    "utils/proxy/ProxySettings.java": (7, 1),
 }
 # What stays: the tg:// URIs ExoPlayer streams files through (internal, never
 # a link) and the language code of Tajik.
@@ -1944,6 +1963,8 @@ SCHEME_KEEP = {
     "ui/Stories/PeerStoriesView.java": 2,
 }
 SCHEME_LITERAL = re.compile(r'"tg(?::|")')
+# The one regular expression with the scheme, which SCHEME_LITERAL cannot see.
+SCHEME_REGEX = ("ui/LinkManager.java", '"(?i)^tg:(//)?sendgrams&"', '"(?i)^plm:(//)?sendgrams&"')
 
 # Links: pluma.chat is to Pluma what t.me is to Telegram (task 026 of the
 # server repository). The server makes its links with pluma.chat (invites,
@@ -1970,7 +1991,7 @@ LINK_SITE_PATHS = (
 # 5 characters or more, the site's pages among them.
 LINK_PATH_PREFIXES = (
     "/+", "/joinchat/", "/addstickers/", "/addemoji/", "/addlist/", "/folder/", "/c/", "/s/", "/m/", "/call/",
-    "/boost", "/proxy", "/socks", "/setlanguage/", "/addtheme/", "/bg/", "/login/", "/contact/", "/share",
+    "/boost", "/proxy", "/socks", "/webproxy", "/setlanguage/", "/addtheme/", "/bg/", "/login/", "/contact/", "/share",
 )
 LINK_USERNAME_PATTERNS = ("/[A-Za-z][A-Za-z0-9_]{4,31}", "/[A-Za-z][A-Za-z0-9_]{4,31}/.*")
 # Browser.java: the list, the checks the edits below call, and the browser a
@@ -2051,9 +2072,9 @@ LINKS_EDITS = (
     (f"{JAVA}/ui/LinkManager.java",
      '!"telegram.dog".equalsIgnoreCase(host) && !isPrefix',
      '!"telegram.dog".equalsIgnoreCase(host) && !"pluma.chat".equalsIgnoreCase(host) && !isPrefix', 1),
-    (f"{JAVA}/messenger/AndroidUtilities.java",
-     'if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog")) {',
-     'if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog") || host.equals("pluma.chat")) {',
+    (f"{JAVA}/utils/proxy/ProxySettings.java",
+     'if (!host.equals("telegram.me") && !host.equals("t.me") && !host.equals("telegram.dog")) {',
+     'if (!host.equals("telegram.me") && !host.equals("t.me") && !host.equals("telegram.dog") && !host.equals("pluma.chat")) {',
      1),
     # In the app or in the browser: every tapped link asks isInternalUri.
     (f"{JAVA}/messenger/browser/Browser.java",
@@ -2154,7 +2175,7 @@ LINKS_EDITS = (
      '            <data android:scheme="https"/>\n'
      '        </intent>\n', 1),
     # A bot's "add to group" button.
-    (f"{JAVA}/ui/Cells/ChatMessageCell.java",
+    (f"{JAVA}/ui/Cells/ChatMessageBotButtons.java",
      '|| "telegram.dog".equals(host)) ||',
      '|| "telegram.dog".equals(host) || "pluma.chat".equals(host)) ||', 1),
     # An embedded post a mini app opens stays in its web view.
@@ -2177,9 +2198,6 @@ LINKS_EDITS = (
     (f"{JAVA}/ui/ChatActivity.java",
      'Pattern.compile("(https://)?t.me/c/([0-9]+)/([0-9]+)/?([0-9]+)?");',
      r'Pattern.compile("(https://)?(?:t.me|pluma\\.chat)/c/([0-9]+)/([0-9]+)/?([0-9]+)?");', 1),
-    # A proxy link pasted into the proxy settings.
-    (f"{JAVA}/ui/ProxySettingsActivity.java", '{"t.me/socks?", ', '{"t.me/socks?", "pluma.chat/socks?", ', 1),
-    (f"{JAVA}/ui/ProxySettingsActivity.java", '{"t.me/proxy?", ', '{"t.me/proxy?", "pluma.chat/proxy?", ', 1),
     # A link of the account's own business chat (links the server makes).
     (f"{JAVA}/ui/Business/BusinessLinksController.java",
      '                    TextUtils.equals(chatLink.link, "https://t.me/m/" + slug) ||\n',
@@ -2226,7 +2244,6 @@ LINKS_EDITS = (
 # before a sticker set's or a bot's name. Per file under JAVA, the number of
 # "https://t.me/ and of "t.me/ literals, which become pluma.chat.
 LINKS_OUT = {
-    "messenger/SharedConfig.java": (2, 0),
     "messenger/voip/VoIPService.java": (1, 0),
     "ui/Cells/StickerSetCell.java": (0, 2),
     "ui/ChatActivity.java": (4, 0),
@@ -2242,6 +2259,7 @@ LINKS_OUT = {
     "ui/SessionsActivity.java": (1, 0),
     "ui/Stories/ChannelBoostUtilities.java": (2, 0),
     "ui/Stories/PeerStoriesView.java": (4, 0),
+    "utils/proxy/ProxySettings.java": (3, 0),
 }
 # The t.me literals that stay, per file under JAVA:
 # - links the app turns back into t.me to open them itself (x.t.me, @username,
@@ -2273,7 +2291,6 @@ LINKS_KEEP = {
     "ui/LaunchActivity.java": 1,
     "ui/LinkManager.java": 1,
     "ui/PremiumPreviewFragment.java": 2,
-    "ui/ProxySettingsActivity.java": 2,
     "ui/SecretMediaViewer.java": 2,
     "ui/Stars/ProfileGiftsView.java": 1,
     "ui/Stars/StarsIntroActivity.java": 1,
@@ -2282,7 +2299,8 @@ LINKS_KEEP = {
 LINK_LITERAL = re.compile(r'"(?:https?://)?t\.me/')
 # Lines that name t.me, telegram.me or telegram.dog as a host and not
 # pluma.chat, per file under JAVA: the telegram.dog branch of isInternalUri
-# (Telegram's blog and FAQ) and the gift code and payment checks.
+# (Telegram's blog and FAQ), the gift code and payment checks and the links
+# of the wallet (closed by wallet_available, which the server does not send).
 HOSTS_KEEP = {
     "messenger/browser/Browser.java": 1,
     "ui/Components/Premium/GiftPremiumBottomSheet.java": 1,
@@ -2291,6 +2309,7 @@ HOSTS_KEEP = {
     "ui/Gifts/SendGiftSheet.java": 1,
     "ui/PaymentFormActivity.java": 2,
     "ui/PremiumPreviewFragment.java": 1,
+    "ui/Wallet/WalletActivity.java": 1,
 }
 HOST_LITERAL = re.compile(r'"(?:t\.me|telegram\.me|telegram\.dog)"')
 # Built-in texts with a t.me address: the one about public links of the empty
@@ -3309,6 +3328,7 @@ def brand_scheme(tree):
     for rel, (colon, bare) in SCHEME_JAVA.items():
         tree.replace(f"{JAVA}/{rel}", '"tg:', '"plm:', colon)
         tree.replace(f"{JAVA}/{rel}", '"tg"', '"plm"', bare)
+    tree.replace(f"{JAVA}/{SCHEME_REGEX[0]}", SCHEME_REGEX[1], SCHEME_REGEX[2])
     # Links in message text.
     tree.replace(f"{JAVA}/messenger/AndroidUtilities.java", "|ton|tg|tonsite):", "|ton|plm|tonsite):")
     tree.replace(f"{JAVA}/messenger/LinkifyPort.java", "|ton|tg|tonsite)://", "|ton|plm|tonsite)://")
@@ -3530,6 +3550,8 @@ def verify_brand(tree):
             found[p.relative_to(tree.root / JAVA).as_posix()] = n
     if found != SCHEME_KEEP:
         raise PatchError(f"tg: literals left in {found}, expected only the internal ones {SCHEME_KEEP}")
+    if SCHEME_REGEX[1] in tree.read(f"{JAVA}/{SCHEME_REGEX[0]}"):
+        raise PatchError(f"{SCHEME_REGEX[0]}: the sendgrams link still has the tg: scheme")
     if 'android:scheme="tg"' in tree.read(f"{MAIN}/AndroidManifest.xml"):
         raise PatchError("AndroidManifest.xml: the app still takes tg:// links")
     for name, _, layer, index, src in BRAND_LAYERS:
