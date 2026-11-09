@@ -3703,6 +3703,11 @@ PREMIUM_FOR_EVERYONE_EDITS = (
      '                                            fragment.presentFragment(new PremiumPreviewFragment(uri.getQueryParameter("ref")));\n'
      '                                        }});\n',
      '                                        // pluma: the link opens the app and no offer: everybody has Premium (ADR 0041).\n'),
+    # The store behind the empty gifts layer of the QR screen; the layer
+    # still shows the gifts a user owns.
+    ("TMessagesProj/src/main/java/org/telegram/ui/QrShare/QrShareView.java",
+     "    private boolean canBuyGifts() {return giftsOwner > 0;}\n",
+     "    private boolean canBuyGifts() {return giftsOwner > 0 && !org.telegram.messenger.MessagesController.getInstance(currentAccount).premiumPurchaseBlocked();} // pluma: Pluma sells no gifts\n"),
     ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
      '            if (MessagesController.getInstance(currentAccount).premiumFeaturesBlocked() && !UserConfig.getInstance(currentAccount).isPremium())\n',
      '            if (MessagesController.getInstance(currentAccount).premiumPurchaseBlocked()) // pluma: the search results are the purchase screen\n'),
