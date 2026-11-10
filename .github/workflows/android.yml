@@ -1,12 +1,14 @@
 # Builds the Pluma Android client from the upstream release upstream.env pins.
 #
-#   check  the patch script's tests and the shell scripts' lint;
+#   check  the patch script's tests and the shell scripts' lint, next to
+#          the build, which does not wait for them; signing does;
 #   build  fetch (the upstream commit and the submodules it records), patch,
 #          compile (native code through ccache, Java through the Gradle
 #          build cache), APK with the upstream's test signature;
 #   sign   the release key, in the protected "release" environment, for
 #          builds for a real server only; the signed APK goes to the site
-#          and to the installed apps (the releases service of the server).
+#          and to the installed apps (the releases service of the server);
+#   prune-caches  keeps the newest ccache of the branch.
 #
 # APKs for a real server leave a job only encrypted for the owner (age):
 # artifacts of a public repository are readable by anyone (ADR 0010 of the
@@ -57,7 +59,6 @@ jobs:
         run: shellcheck -x ci/*.sh
 
   build:
-    needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     outputs:
@@ -114,7 +115,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-${{ hashFiles('upstream.env') }}-
             ccache-
@@ -130,11 +131,11 @@ jobs:
         if: always()
         run: ccache --show-stats || true
       - name: Save ccache
-        if: always() && github.event_name != 'pull_request'
+        if: always() && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Encrypt APK
         if: steps.configure.outputs.target == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
@@ -150,7 +151,7 @@ jobs:
           if-no-files-found: error
 
   sign:
-    needs: build
+    needs: [check, build]
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.outputs.target == 'server'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -217,3 +218,21 @@ jobs:
           path: signed/
           retention-days: 30
           if-no-files-found: error
+
+  prune-caches:
+    needs: build
+    # The token of a fork or of Dependabot cannot delete entries.
+    if: always() && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Older ccache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/prune-caches.sh ccache-

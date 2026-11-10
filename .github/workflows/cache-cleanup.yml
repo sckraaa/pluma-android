@@ -1,0 +1,33 @@
+# Deletes the cache entries of a pull request when it closes: nothing reads
+# them any more, and they would take room from those of main until they
+# expire.
+name: cache-cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    # The token of a fork or of Dependabot cannot delete entries.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Entries of the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          ids=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref "$REF" --limit 100 --json id --jq '.[].id')
+          n=0
+          for id in $ids; do
+            gh cache delete --repo "$GITHUB_REPOSITORY" "$id"
+            n=$((n + 1))
+          done
+          echo "cache-cleanup: $REF: $n entries deleted"
