@@ -397,6 +397,7 @@ def patch(tree, c):
     self_update(tree, c)
     links(tree)
     brand(tree)
+    login_screens(tree)
 
 
 # --- birthdays ---------------------------------------------------------------
@@ -1934,7 +1935,7 @@ TELEGRAM_SITE_KEEP = {
     "ui/Components/PhotoViewerWebView.java": 2,
     "ui/IdenticonActivity.java": 1,
     "ui/LaunchActivity.java": 18,
-    "ui/LoginActivity.java": 3,
+    "ui/LoginActivity.java": 2,
     "ui/PassportActivity.java": 2,
     "ui/ReportBottomSheet.java": 9,
     "ui/ThemePreviewActivity.java": 1,
@@ -3576,7 +3577,9 @@ def verify_brand(tree):
         if (tree.root / RES / rel).read_bytes() != (BRAND / "res" / rel).read_bytes():
             raise PatchError(f"{RES}/{rel}: not the brand asset")
     for p in sorted((tree.root / RES).glob("values*/strings.xml")):
-        for m in ELEMENT_TEXT.finditer(p.read_text(encoding="utf-8")):
+        # The strings of task 076 name the real Telegram (verify_login_screens).
+        xml = LOGIN_STRING_LINE.sub("", p.read_text(encoding="utf-8"))
+        for m in ELEMENT_TEXT.finditer(xml):
             left = (TELEGRAM_WORD.search(m.group(0)) or re.search("|".join(LOCAL_NAMES), m.group(0))
                     or CLIENT_SITES.search(m.group(0)))
             if left:
@@ -3589,6 +3592,9 @@ def verify_brand(tree):
     for p in sorted((tree.root / JAVA).rglob("*.java")):
         text = p.read_text(encoding="utf-8")
         rel = p.relative_to(tree.root / JAVA).as_posix()
+        if rel == LOGIN_JAVA:
+            # The link of task 076 to the real Telegram (verify_login_screens).
+            text = text.replace(LOGIN_TELEGRAM_SETTINGS, "", 1)
         n = len(SCHEME_LITERAL.findall(text))
         if n:
             found[rel] = n
@@ -3607,7 +3613,7 @@ def verify_brand(tree):
         raise PatchError(f"Java literals with telegram.org in {sites}, expected only {TELEGRAM_SITE_KEEP}")
     if SCHEME_REGEX[1] in tree.read(f"{JAVA}/{SCHEME_REGEX[0]}"):
         raise PatchError(f"{SCHEME_REGEX[0]}: the sendgrams link still has the tg: scheme")
-    if 'android:scheme="tg"' in tree.read(f"{MAIN}/AndroidManifest.xml"):
+    if 'android:scheme="tg"' in tree.read(f"{MAIN}/AndroidManifest.xml").replace(LOGIN_QUERIES[1], ""):
         raise PatchError("AndroidManifest.xml: the app still takes tg:// links")
     for name, _, layer, index, src in BRAND_LAYERS:
         rel = f"{RES}/{name}"
@@ -3676,6 +3682,7 @@ def verify(tree, c):
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
+    verify_login_screens(tree)
 
 
 
@@ -3811,6 +3818,451 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+# --- Login codes through Telegram ---------------------------------------------
+# Task 076 of the server repository. Pluma's login codes are written by a
+# Telegram account to the person's own Telegram. The server answers
+# auth.sentCodeTypeFragmentSms (url: the chat with that account) when the
+# code went there, and auth.sentCodeTypeSms when it did not: the person's
+# Telegram does not let others find them by number, or they did not get it.
+# Pluma never sends an SMS. The code page of the app (LoginActivitySmsView)
+# shows both: the in-app code page says "Check Telegram", the SMS page says
+# that the code did not reach Telegram and how to let Telegram find you. Each
+# gets a filled button in the look of the Fragment code's: to the chat, or to
+# the "Who can find me by my number?" setting of Telegram (Telegram's
+# LaunchActivity opens tg://settings/phone_privacy there). The button shows
+# only when Telegram is installed. Telegram's support (sms@telegram.org,
+# auth.reportMissingCode) is no longer offered: the administrator issues the
+# code.
+LOGIN_JAVA = "ui/LoginActivity.java"
+LOGIN = f"TMessagesProj/src/main/java/org/telegram/{LOGIN_JAVA}"
+LOGIN_TELEGRAM_SETTINGS = '"tg://settings/phone_privacy"'
+LOGIN_VIEW = "    public class LoginActivitySmsView "
+LOGIN_EDITS = (
+    # A code in Telegram: the in-app code page, with the link of the button.
+    ("            } else if (res.type instanceof TLRPC.TL_auth_sentCodeTypeFragmentSms) {\n"
+     "                params.putInt(\"type\", AUTH_TYPE_FRAGMENT_SMS);\n"
+     "                params.putString(\"url\", res.type.url);\n"
+     "                params.putInt(\"length\", res.type.length);\n"
+     "                setPage(VIEW_CODE_FRAGMENT_SMS, animate, params, false);\n",
+     "            } else if (res.type instanceof TLRPC.TL_auth_sentCodeTypeFragmentSms) {\n"
+     "                // pluma: a code in the person's own Telegram (task 076): the in-app code page,\n"
+     "                // its button opens the chat with the account that wrote it.\n"
+     "                params.putInt(\"type\", AUTH_TYPE_MESSAGE);\n"
+     "                params.putBoolean(\"plumaTelegram\", true);\n"
+     "                params.putString(\"url\", res.type.url);\n"
+     "                params.putInt(\"length\", res.type.length);\n"
+     "                setPage(VIEW_CODE_MESSAGE, animate, params, false);\n"),
+)
+# Edits inside LoginActivitySmsView: the same lines are in other views of the
+# file.
+LOGIN_VIEW_EDITS = (
+    ("        private LinearLayout openFragmentButton;\n",
+     "        private LinearLayout openFragmentButton;\n"
+     "        private TextView plumaTelegramButton; // pluma: task 076\n"
+     "        private boolean plumaTelegram;\n"),
+    # The button over the "Didn't get the code?" link, above the bottom.
+    ("                bottomContainer.addView(errorViewSwitcher, LayoutHelper.createFrame(currentType == VIEW_CODE_FRAGMENT_SMS ? LayoutHelper.MATCH_PARENT : LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM, 0, 0, 0, 32));\n",
+     "                if (currentType == AUTH_TYPE_MESSAGE || currentType == AUTH_TYPE_SMS) {\n"
+     "                    // pluma: the code goes through Telegram: a button to it, in the look of the\n"
+     "                    // Fragment code's (task 076).\n"
+     "                    LinearLayout plumaColumn = new LinearLayout(context);\n"
+     "                    plumaColumn.setOrientation(VERTICAL);\n"
+     "                    plumaColumn.setGravity(Gravity.CENTER_HORIZONTAL);\n"
+     "                    plumaTelegramButton = new TextView(context);\n"
+     "                    plumaTelegramButton.setTextColor(Color.WHITE);\n"
+     "                    plumaTelegramButton.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);\n"
+     "                    plumaTelegramButton.setTypeface(AndroidUtilities.bold());\n"
+     "                    plumaTelegramButton.setGravity(Gravity.CENTER);\n"
+     "                    plumaTelegramButton.setSingleLine(true);\n"
+     "                    plumaTelegramButton.setEllipsize(TextUtils.TruncateAt.END);\n"
+     "                    plumaTelegramButton.setPadding(AndroidUtilities.dp(34), 0, AndroidUtilities.dp(34), 0);\n"
+     "                    ThemeBind.selectorBackground(plumaTelegramButton, Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(6), Theme.getColor(Theme.key_changephoneinfo_image2), Theme.getColor(Theme.key_chats_actionPressedBackground)), ThemeBind.of(Theme.key_changephoneinfo_image2), ThemeBind.of(Theme.key_chats_actionPressedBackground));\n"
+     "                    plumaTelegramButton.setOnClickListener(v -> {\n"
+     "                        Intent intent = plumaTelegramIntent();\n"
+     "                        if (intent == null) {\n"
+     "                            return;\n"
+     "                        }\n"
+     "                        try {\n"
+     "                            getContext().startActivity(intent);\n"
+     "                        } catch (Exception e) {\n"
+     "                            FileLog.e(e);\n"
+     "                        }\n"
+     "                    });\n"
+     "                    plumaTelegramButton.setVisibility(GONE);\n"
+     "                    plumaColumn.addView(plumaTelegramButton, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 52, 0, 0, 0, 12));\n"
+     "                    plumaColumn.addView(errorViewSwitcher, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL));\n"
+     "                    bottomContainer.addView(plumaColumn, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM, 0, 0, 0, 32));\n"
+     "                } else\n"
+     "                bottomContainer.addView(errorViewSwitcher, LayoutHelper.createFrame(currentType == VIEW_CODE_FRAGMENT_SMS ? LayoutHelper.MATCH_PARENT : LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM, 0, 0, 0, 32));\n"),
+    # The page of each show: title, button and its text.
+    ("            url = params.getString(\"url\");\n",
+     "            url = params.getString(\"url\");\n"
+     "            // pluma: task 076.\n"
+     "            plumaTelegram = params.getBoolean(\"plumaTelegram\", false);\n"
+     "            if (!isInCancelAccountDeletionMode()) {\n"
+     "                if (currentType == AUTH_TYPE_SMS) {\n"
+     "                    titleTextView.setText(getString(R.string.PlumaLoginFallbackTitle));\n"
+     "                } else if (currentType == AUTH_TYPE_MESSAGE) {\n"
+     "                    titleTextView.setText(getString(plumaTelegram ? R.string.PlumaLoginTelegramTitle : R.string.SentAppCodeTitle));\n"
+     "                }\n"
+     "            }\n"
+     "            if (plumaTelegramButton != null) {\n"
+     "                plumaTelegramButton.setText(getString(currentType == AUTH_TYPE_SMS ? R.string.PlumaLoginOpenTelegramSettings : R.string.PlumaLoginOpenTelegram));\n"
+     "                Intent intent = plumaTelegramIntent();\n"
+     "                plumaTelegramButton.setVisibility(intent != null && !isInCancelAccountDeletionMode() && intent.resolveActivity(getContext().getPackageManager()) != null ? VISIBLE : GONE);\n"
+     "            }\n"),
+    ("                if (currentType == AUTH_TYPE_MESSAGE) {\n"
+     "                    str = AndroidUtilities.replaceTags(LocaleController.formatString(\"SentAppCodeWithPhone\", R.string.SentAppCodeWithPhone, LocaleController.addNbsp(number)));\n"
+     "                } else if (currentType == AUTH_TYPE_SMS) {\n"
+     "                    str = AndroidUtilities.replaceTags(LocaleController.formatString(\"SentSmsCode\", R.string.SentSmsCode, LocaleController.addNbsp(number)));\n",
+     "                if (currentType == AUTH_TYPE_MESSAGE) {\n"
+     "                    str = AndroidUtilities.replaceTags(plumaTelegram\n"
+     "                        ? LocaleController.formatString(R.string.PlumaLoginTelegramText, LocaleController.addNbsp(number))\n"
+     "                        : LocaleController.formatString(\"SentAppCodeWithPhone\", R.string.SentAppCodeWithPhone, LocaleController.addNbsp(number)));\n"
+     "                } else if (currentType == AUTH_TYPE_SMS) {\n"
+     "                    // pluma: Pluma sends no SMS: this is the code that did not reach Telegram.\n"
+     "                    str = AndroidUtilities.replaceTags(LocaleController.formatString(R.string.PlumaLoginFallbackText, LocaleController.addNbsp(number)));\n"),
+    # "Didn't get the code?" leads to the page of a code that did not reach
+    # Telegram, not to an SMS.
+    ("                        problemText.setText(getString(R.string.DidNotGetTheCodeSms));\n",
+     "                        problemText.setText(getString(R.string.PlumaLoginDidNotGetCode)); // pluma: task 076\n"),
+    # "Send again", after a countdown.
+    ("            } else if (currentType == AUTH_TYPE_SMS && (nextType == AUTH_TYPE_SMS || nextType == AUTH_TYPE_PHRASE || nextType == AUTH_TYPE_WORD || nextType == AUTH_TYPE_CALL || nextType == AUTH_TYPE_FLASH_CALL)) {\n"
+     "                if (nextType == AUTH_TYPE_SMS || nextType == AUTH_TYPE_PHRASE || nextType == AUTH_TYPE_WORD) {\n"
+     "                    timeText.setText(LocaleController.formatString(\"SmsAvailableIn\", R.string.SmsAvailableIn, 1, 0));\n",
+     "            } else if (currentType == AUTH_TYPE_SMS && (nextType == AUTH_TYPE_SMS || nextType == AUTH_TYPE_PHRASE || nextType == AUTH_TYPE_WORD || nextType == AUTH_TYPE_CALL || nextType == AUTH_TYPE_FLASH_CALL)) {\n"
+     "                if (nextType == AUTH_TYPE_SMS || nextType == AUTH_TYPE_PHRASE || nextType == AUTH_TYPE_WORD) {\n"
+     "                    timeText.setText(LocaleController.formatString(R.string.PlumaLoginSendAgainIn, time / 1000 / 60, time / 1000 % 60)); // pluma: task 076\n"),
+    ("                                timeText.setText(LocaleController.formatString(\"ResendSmsAvailableIn\", R.string.ResendSmsAvailableIn, minutes, seconds));\n",
+     "                                timeText.setText(LocaleController.formatString(R.string.PlumaLoginSendAgainIn, minutes, seconds)); // pluma: task 076\n"),
+    ("                                    timeText.setText(getString(\"RequestSmsButton\", R.string.RequestSmsButton));\n",
+     "                                    timeText.setText(getString(currentType == AUTH_TYPE_SMS ? R.string.PlumaLoginSendAgain : R.string.RequestSmsButton)); // pluma: task 076\n"),
+    ("                    } else {\n"
+     "                        timeText.setText(getString(R.string.SendingSms));\n"
+     "                    }\n"
+     "                    Bundle params = new Bundle();\n",
+     "                    } else {\n"
+     "                        timeText.setText(getString(R.string.PlumaLoginSending)); // pluma: task 076, no SMS\n"
+     "                    }\n"
+     "                    Bundle params = new Bundle();\n"),
+    # Back: only the phrase and word codes return to an earlier page. A resend
+    # between the pages of task 076 keeps prevType too (AUTH_TYPE_* and VIEW_*
+    # share values), and Back would land on the same page or swing between two.
+    ("            if (prevType != 0) {\n"
+     "                setPage(prevType, true, null, true);\n"
+     "                return false;\n"
+     "            }\n",
+     "            if (prevType == AUTH_TYPE_PHRASE || prevType == AUTH_TYPE_WORD) { // pluma: task 076\n"
+     "                setPage(prevType, true, null, true);\n"
+     "                return false;\n"
+     "            }\n"),
+    # "Send again": one request at a time, and a failure is said and leaves the
+    # link working.
+    ("                if (time > 0 && timeTimer != null) {\n"
+     "                    return;\n"
+     "                }\n"
+     "                isResendingCode = true;\n",
+     "                if (time > 0 && timeTimer != null || isResendingCode) { // pluma: one resend at a time (task 076)\n"
+     "                    return;\n"
+     "                }\n"
+     "                isResendingCode = true;\n"),
+    ("                        } else if (error != null && error.text != null) {\n"
+     "                            AndroidUtilities.runOnUIThread(() -> lastError = error.text);\n"
+     "                        }\n",
+     "                        } else if (error != null && error.text != null) {\n"
+     "                            AndroidUtilities.runOnUIThread(() -> {\n"
+     "                                lastError = error.text;\n"
+     "                                plumaResendFailed(error); // pluma: task 076\n"
+     "                            });\n"
+     "                        }\n"),
+    # Nothing more can be sent: the administrator gives the code.
+    ("                } else {\n"
+     "                    if (error.text != null) {\n"
+     "                        if (error.text.contains(\"PHONE_NUMBER_INVALID\")) {\n",
+     "                } else {\n"
+     "                    if (error.text != null && error.text.contains(\"SEND_CODE_UNAVAILABLE\")) {\n"
+     "                        plumaAskAdministrator(); // pluma: task 076\n"
+     "                    } else if (error.text != null) {\n"
+     "                        if (error.text.contains(\"PHONE_NUMBER_INVALID\")) {\n"),
+    # Where the link to the chat or to the setting goes.
+    ("        private void createCodeTimer() {\n",
+     "        // pluma: the chat with the account that wrote the code, or the \"Who can find me by\n"
+     "        // my number?\" setting of Telegram; null without a link (task 076).\n"
+     "        private Intent plumaTelegramIntent() {\n"
+     f"            String link = currentType == AUTH_TYPE_SMS ? {LOGIN_TELEGRAM_SETTINGS} : plumaTelegram ? url : null;\n"
+     "            if (TextUtils.isEmpty(link)) {\n"
+     "                return null;\n"
+     "            }\n"
+     "            return new Intent(Intent.ACTION_VIEW, Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);\n"
+     "        }\n"
+     "\n"
+     "        // pluma: a \"Send again\" that failed: the link works again and the error is said (task 076).\n"
+     "        private void plumaResendFailed(TLRPC.TL_error error) {\n"
+     "            isResendingCode = false;\n"
+     "            destroyCodeTimer();\n"
+     "            timeText.setText(getString(currentType == AUTH_TYPE_SMS ? R.string.PlumaLoginSendAgain : R.string.RequestSmsButton));\n"
+     "            ThemeBind.textColor(timeText, Theme.key_chats_actionBackground);\n"
+     "            timeText.setTag(R.id.color_key_tag, Theme.key_chats_actionBackground);\n"
+     "            timeText.invalidate();\n"
+     "            if (error.text.contains(\"PHONE_CODE_EXPIRED\")) {\n"
+     "                onBackPressed(true);\n"
+     "                setPage(VIEW_PHONE_INPUT, true, null, true);\n"
+     "                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString(R.string.CodeExpired));\n"
+     "            } else if (error.text.contains(\"SEND_CODE_UNAVAILABLE\")) {\n"
+     "                plumaAskAdministrator();\n"
+     "            } else if (error.text.startsWith(\"FLOOD_WAIT\")) {\n"
+     "                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString(R.string.FloodWait));\n"
+     "            } else if (error.code != -1000) {\n"
+     "                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString(R.string.ErrorOccurred) + \"\\n\" + error.text);\n"
+     "            }\n"
+     "        }\n"
+     "\n"
+     "        // pluma: nothing more can be sent: the administrator issues the code, Telegram's\n"
+     "        // support has nothing to do with it (task 076).\n"
+     "        private void plumaAskAdministrator() {\n"
+     "            new AlertDialog.Builder(getContext())\n"
+     "                    .setTitle(getString(R.string.PlumaLoginAdminTitle))\n"
+     "                    .setMessage(getString(R.string.PlumaLoginAdminText))\n"
+     "                    .setPositiveButton(getString(R.string.OK), null)\n"
+     "                    .setNegativeButton(getString(R.string.DidNotGetTheCodeEditNumberButton), (dialog, which) -> setPage(VIEW_PHONE_INPUT, true, null, true))\n"
+     "                    .show();\n"
+     "        }\n"
+     "\n"
+     "        private void createCodeTimer() {\n"),
+)
+# "Didn't get the code?" with nothing more to send: the administrator, not a
+# letter to Telegram's support and auth.reportMissingCode.
+LOGIN_MISSING_HEAD = ("                    } else {\n"
+                      "                        TLRPC.TL_auth_reportMissingCode req = new TLRPC.TL_auth_reportMissingCode();\n")
+LOGIN_MISSING_TAIL = ("                    }\n"
+                      "                });\n"
+                      "            }\n")
+LOGIN_MISSING_BODY = "                        plumaAskAdministrator(); // pluma: not Telegram's support (task 076)\n"
+LOGIN_QUERIES = ('    </queries>\n',
+                 '        <!-- pluma: the login code page opens Telegram (task 076) -->\n'
+                 '        <intent>\n            <action android:name="android.intent.action.VIEW"/>\n'
+                 '            <data android:scheme="tg"/>\n        </intent>\n    </queries>\n')
+
+
+# The texts, in every language the app bundles; the other languages come from
+# the server's language pack (task 076). The path in Telegram's settings is
+# Telegram's own words in each language (translations.telegram.org, android:
+# Settings, PrivacySettings, PrivacyPhone, PrivacyPhoneTitle2, LastSeenEverybody).
+LOGIN_STRINGS = {
+    'PlumaLoginTelegramTitle': {
+        'values': 'Check Telegram',
+        'values-ar': 'تحقق من تيليجرام',
+        'values-de': 'Schau in Telegram nach',
+        'values-es': 'Revisa Telegram',
+        'values-it': 'Controlla Telegram',
+        'values-ko': '텔레그램을 확인하세요',
+        'values-nl': 'Kijk in Telegram',
+        'values-pt-rBR': 'Verifique o Telegram',
+        'values-ru': 'Проверьте Telegram',
+        'values-uk': 'Перевірте Telegram',
+    },
+    'PlumaLoginTelegramText': {
+        'values': "We\\'ve sent the code for **%1$s** to your Telegram, in a message from the Pluma account.",
+        'values-ar': 'أرسلنا رمز **%1$s** إلى تيليجرام الخاص بك في رسالة من حساب Pluma.',
+        'values-de': 'Wir haben den Code für **%1$s** an dein Telegram gesendet, als Nachricht vom Pluma-Konto.',
+        'values-es': 'Enviamos el código para **%1$s** a tu Telegram, en un mensaje de la cuenta Pluma.',
+        'values-it': "Abbiamo inviato il codice per **%1$s** al tuo Telegram, in un messaggio dell\\'account Pluma.",
+        'values-ko': '**%1$s** 번호의 코드를 Pluma 계정의 메시지로 텔레그램에 보냈습니다.',
+        'values-nl': 'We hebben de code voor **%1$s** naar je Telegram gestuurd, in een bericht van het Pluma-account.',
+        'values-pt-rBR': 'Enviamos o código para **%1$s** ao seu Telegram, em uma mensagem da conta Pluma.',
+        'values-ru': 'Код для **%1$s** отправлен вам в Telegram сообщением от аккаунта Pluma.',
+        'values-uk': 'Код для **%1$s** надіслано вам у Telegram повідомленням від акаунта Pluma.',
+    },
+    'PlumaLoginOpenTelegram': {
+        'values': 'Open Telegram',
+        'values-ar': 'فتح تيليجرام',
+        'values-de': 'Telegram öffnen',
+        'values-es': 'Abrir Telegram',
+        'values-it': 'Apri Telegram',
+        'values-ko': '텔레그램 열기',
+        'values-nl': 'Telegram openen',
+        'values-pt-rBR': 'Abrir o Telegram',
+        'values-ru': 'Открыть Telegram',
+        'values-uk': 'Відкрити Telegram',
+    },
+    'PlumaLoginDidNotGetCode': {
+        'values': "Didn\\'t get the code?",
+        'values-ar': 'لم يصلك الرمز؟',
+        'values-de': 'Keinen Code erhalten?',
+        'values-es': '¿No recibiste el código?',
+        'values-it': 'Non hai ricevuto il codice?',
+        'values-ko': '코드를 받지 못하셨나요?',
+        'values-nl': 'Geen code ontvangen?',
+        'values-pt-rBR': 'Não recebeu o código?',
+        'values-ru': 'Не пришёл код?',
+        'values-uk': 'Не надійшов код?',
+    },
+    'PlumaLoginFallbackTitle': {
+        'values': "Code didn\\'t reach Telegram",
+        'values-ar': 'لم يصل الرمز إلى تيليجرام',
+        'values-de': 'Der Code kam nicht in Telegram an',
+        'values-es': 'El código no llegó a Telegram',
+        'values-it': 'Il codice non è arrivato su Telegram',
+        'values-ko': '코드가 텔레그램에 전달되지 않았습니다',
+        'values-nl': 'De code kwam niet aan in Telegram',
+        'values-pt-rBR': 'O código não chegou ao Telegram',
+        'values-ru': 'Код не дошёл до Telegram',
+        'values-uk': 'Код не дійшов до Telegram',
+    },
+    'PlumaLoginFallbackText': {
+        'values': "The code for **%1$s** didn\\'t reach your Telegram. Let Telegram find you by your number: **Settings → Privacy and Security → Phone Number → Who can find me by my number? → Everybody**.\\n\\nNo Telegram? Ask the administrator for the code and enter it here.",
+        'values-ar': 'لم يصل رمز **%1$s** إلى تيليجرام الخاص بك. اسمح لتيليجرام بالعثور عليك برقمك: **الإعدادات ← الخصوصية والأمان ← رقم الهاتف ← من يمكنهم إيجادي برقم هاتفي؟ ← الجميع**.\\n\\nليس لديك تيليجرام؟ اطلب الرمز من المسؤول وأدخله هنا.',
+        'values-de': 'Der Code für **%1$s** kam nicht in deinem Telegram an. Erlaube Telegram, dich über deine Nummer zu finden: **Einstellungen → Privatsphäre und Sicherheit → Telefonnummer → Wer darf mich unter meiner Nummer finden? → Jeder**.\\n\\nKein Telegram? Bitte den Administrator um den Code und gib ihn hier ein.',
+        'values-es': 'El código para **%1$s** no llegó a tu Telegram. Permite que Telegram te encuentre por tu número: **Ajustes → Privacidad y seguridad → Número de teléfono → ¿Quién puede encontrarme por mi número? → Todos**.\\n\\n¿No tienes Telegram? Pide el código al administrador e introdúcelo aquí.',
+        'values-it': "Il codice per **%1$s** non è arrivato sul tuo Telegram. Consenti a Telegram di trovarti tramite il tuo numero: **Impostazioni → Privacy e sicurezza → Numero di telefono → Chi può trovarmi con il mio numero → Tutti**.\\n\\nNon hai Telegram? Chiedi il codice all\\'amministratore e inseriscilo qui.",
+        'values-ko': '**%1$s** 번호의 코드가 텔레그램에 전달되지 않았습니다. 텔레그램에서 번호로 나를 찾을 수 있도록 허용하세요: **설정 → 개인 정보 및 보안 → 전화번호 → 내 번호로 나를 찾을 수 있는 사람 → 모두**.\\n\\n텔레그램이 없으신가요? 관리자에게 코드를 요청해 여기에 입력하세요.',
+        'values-nl': 'De code voor **%1$s** is niet aangekomen in je Telegram. Laat Telegram je vinden via je nummer: **Instellingen → Privacy en veiligheid → Telefoonnummer → Wie kan me vinden via mijn nummer? → Iedereen**.\\n\\nGeen Telegram? Vraag de beheerder om de code en voer die hier in.',
+        'values-pt-rBR': 'O código para **%1$s** não chegou ao seu Telegram. Permita que o Telegram encontre você pelo número: **Configurações → Privacidade e Segurança → Número de Telefone → Quem pode me encontrar pelo meu número? → Todos**.\\n\\nNão tem Telegram? Peça o código ao administrador e digite-o aqui.',
+        'values-ru': 'Код для **%1$s** не дошёл до вашего Telegram. Разрешите Telegram находить вас по номеру: **Настройки → Конфиденциальность → Номер телефона → Кто может найти меня по номеру? → Все**.\\n\\nНет Telegram? Попросите код у администратора и введите его здесь.',
+        'values-uk': 'Код для **%1$s** не дійшов до вашого Telegram. Дозвольте Telegram знаходити вас за номером: **Налаштування → Приватність і безпека → Номер телефону → Хто може знайти мене за номером? → Усі**.\\n\\nНемає Telegram? Попросіть код в адміністратора й введіть його тут.',
+    },
+    'PlumaLoginOpenTelegramSettings': {
+        'values': 'Open Telegram settings',
+        'values-ar': 'فتح إعدادات تيليجرام',
+        'values-de': 'Telegram-Einstellungen öffnen',
+        'values-es': 'Abrir ajustes de Telegram',
+        'values-it': 'Apri le impostazioni di Telegram',
+        'values-ko': '텔레그램 설정 열기',
+        'values-nl': 'Telegram-instellingen openen',
+        'values-pt-rBR': 'Abrir configurações do Telegram',
+        'values-ru': 'Открыть настройки Telegram',
+        'values-uk': 'Відкрити налаштування Telegram',
+    },
+    'PlumaLoginSendAgainIn': {
+        'values': 'Send again in %1$d:%2$02d',
+        'values-ar': 'إعادة الإرسال خلال %1$d:%2$02d',
+        'values-de': 'Erneut senden in %1$d:%2$02d',
+        'values-es': 'Volver a enviar en %1$d:%2$02d',
+        'values-it': 'Invia di nuovo tra %1$d:%2$02d',
+        'values-ko': '%1$d:%2$02d 후 다시 보내기',
+        'values-nl': 'Opnieuw versturen over %1$d:%2$02d',
+        'values-pt-rBR': 'Reenviar em %1$d:%2$02d',
+        'values-ru': 'Отправить ещё раз через %1$d:%2$02d',
+        'values-uk': 'Надіслати ще раз через %1$d:%2$02d',
+    },
+    'PlumaLoginSendAgain': {
+        'values': 'Send again',
+        'values-ar': 'إعادة الإرسال',
+        'values-de': 'Erneut senden',
+        'values-es': 'Volver a enviar',
+        'values-it': 'Invia di nuovo',
+        'values-ko': '다시 보내기',
+        'values-nl': 'Opnieuw versturen',
+        'values-pt-rBR': 'Reenviar',
+        'values-ru': 'Отправить ещё раз',
+        'values-uk': 'Надіслати ще раз',
+    },
+    'PlumaLoginSending': {
+        'values': 'Sending…',
+        'values-ar': 'جارٍ الإرسال…',
+        'values-de': 'Wird gesendet…',
+        'values-es': 'Enviando…',
+        'values-it': 'Invio in corso…',
+        'values-ko': '보내는 중…',
+        'values-nl': 'Versturen…',
+        'values-pt-rBR': 'Enviando…',
+        'values-ru': 'Отправляем…',
+        'values-uk': 'Надсилаємо…',
+    },
+    'PlumaLoginAdminTitle': {
+        'values': 'Ask the administrator',
+        'values-ar': 'اسأل المسؤول',
+        'values-de': 'Frag den Administrator',
+        'values-es': 'Pregunta al administrador',
+        'values-it': "Chiedi all\\'amministratore",
+        'values-ko': '관리자에게 문의하세요',
+        'values-nl': 'Vraag de beheerder',
+        'values-pt-rBR': 'Fale com o administrador',
+        'values-ru': 'Код у администратора',
+        'values-uk': 'Код в адміністратора',
+    },
+    'PlumaLoginAdminText': {
+        'values': 'Ask the Pluma administrator for your code and enter it here.',
+        'values-ar': 'اطلب رمزك من مسؤول Pluma وأدخله هنا.',
+        'values-de': 'Bitte den Pluma-Administrator um deinen Code und gib ihn hier ein.',
+        'values-es': 'Pide tu código al administrador de Pluma e introdúcelo aquí.',
+        'values-it': "Chiedi il tuo codice all\\'amministratore di Pluma e inseriscilo qui.",
+        'values-ko': 'Pluma 관리자에게 코드를 요청해 여기에 입력하세요.',
+        'values-nl': 'Vraag de beheerder van Pluma om je code en voer die hier in.',
+        'values-pt-rBR': 'Peça seu código ao administrador do Pluma e digite-o aqui.',
+        'values-ru': 'Попросите код у администратора Pluma и введите его здесь.',
+        'values-uk': 'Попросіть код в адміністратора Pluma й введіть його тут.',
+    },
+}
+LOGIN_STRING_LINE = re.compile(r'    <string name="(?:' + "|".join(LOGIN_STRINGS) + r')">[^<]*</string>\n')
+
+def _login_view_span(text):
+    start = text.index(LOGIN_VIEW)
+    end = text.index("\n    public class ", start + len(LOGIN_VIEW))
+    return start, end
+
+
+def login_screens(tree):
+    """Runs after brand(): the strings keep the name of the real Telegram, and
+    the link to Telegram's settings keeps its tg: scheme."""
+    for old, new in LOGIN_EDITS:
+        tree.replace(LOGIN, old, new)
+    text = tree.read(LOGIN)
+    start, end = _login_view_span(text)
+    view = text[start:end]
+    for old, new in LOGIN_VIEW_EDITS:
+        if view.count(old) != 1:
+            raise PatchError(f"{LOGIN}: {view.count(old)} occurrences of {old[:80]!r} in LoginActivitySmsView, expected 1")
+        view = view.replace(old, new)
+    if view.count(LOGIN_MISSING_HEAD) != 1:
+        raise PatchError(f"{LOGIN}: the missing-code branch of LoginActivitySmsView changed")
+    head = view.index(LOGIN_MISSING_HEAD) + len(LOGIN_MISSING_HEAD)
+    tail = view.index(LOGIN_MISSING_TAIL, head)
+    if "sms@telegram.org" not in view[head:tail]:
+        raise PatchError(f"{LOGIN}: the missing-code branch no longer writes to Telegram's support")
+    view = (view[:head - len("                        TLRPC.TL_auth_reportMissingCode req = new TLRPC.TL_auth_reportMissingCode();\n")]
+            + LOGIN_MISSING_BODY + view[tail:])
+    tree.write(LOGIN, text[:start] + view + text[end:])
+    tree.replace(f"{MAIN}/AndroidManifest.xml", LOGIN_QUERIES[0], LOGIN_QUERIES[1])
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    if set(files) != set(STRING_RENAMES):
+        raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, expected {', '.join(sorted(STRING_RENAMES))}")
+    for lang, rel in files.items():
+        text = tree.read(rel)
+        lines = []
+        for key, texts in LOGIN_STRINGS.items():
+            if f'<string name="{key}">' in text:
+                raise PatchError(f"{rel}: upstream has a string {key}")
+            lines.append(f'    <string name="{key}">{texts[lang]}</string>\n')
+        tree.replace(rel, "</resources>", "".join(lines) + "</resources>")
+
+
+def verify_login_screens(tree):
+    text = tree.read(LOGIN)
+    for _, new in LOGIN_EDITS:
+        if text.count(new) != 1:
+            raise PatchError(f"{LOGIN}: the routing of a code in Telegram (task 076) is not there")
+    start, end = _login_view_span(text)
+    view = text[start:end]
+    for _, new in LOGIN_VIEW_EDITS:
+        if view.count(new) != 1:
+            raise PatchError(f"{LOGIN}: an edit of the login code page (task 076) is not there")
+    if text.count(LOGIN_TELEGRAM_SETTINGS) != 1:
+        raise PatchError(f"{LOGIN}: the link to Telegram's setting is not there once")
+    if view.count(LOGIN_MISSING_BODY) != 1 or "sms@telegram.org" in view or "TL_auth_reportMissingCode" in view:
+        raise PatchError(f"{LOGIN}: the login code page still leads to Telegram's support")
+    manifest = tree.read(f"{MAIN}/AndroidManifest.xml")
+    if manifest.count(LOGIN_QUERIES[1]) != 1:
+        raise PatchError("AndroidManifest.xml: the app cannot see whether Telegram is installed")
+    used = set(re.findall(r"R\.string\.(PlumaLogin\w+)", text))
+    if used != set(LOGIN_STRINGS):
+        raise PatchError(f"{LOGIN}: strings used {sorted(used)}, defined {sorted(LOGIN_STRINGS)}")
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        xml = p.read_text(encoding="utf-8")
+        for key, texts in LOGIN_STRINGS.items():
+            if xml.count(f'    <string name="{key}">{texts[p.parent.name]}</string>\n') != 1:
+                raise PatchError(f"{p.relative_to(tree.root)}: {key} is not the text of task 076")
 
 # --- What the server does not serve ------------------------------------------
 # Every way into a service Pluma does not have, not only the visible one. The

@@ -1444,5 +1444,80 @@ class NotServedTest(unittest.TestCase):
                 patch.verify_not_served(tree)
 
 
+class LoginScreensTest(unittest.TestCase):
+    # LoginActivity made of the texts the edits expect, the end of the view
+    # class, the manifest and every strings.xml.
+    def tree(self, root, missing=patch.LOGIN_MISSING_HEAD + "        mail(\"sms@telegram.org\");\n"):
+        java = "".join(old for old, _ in patch.LOGIN_EDITS)
+        java += patch.LOGIN_VIEW + "{\n" + "".join(old for old, _ in patch.LOGIN_VIEW_EDITS)
+        java += missing + patch.LOGIN_MISSING_TAIL + "\n    public class LoginActivityRecoverView {\n"
+        files = {patch.LOGIN: java, f"{patch.MAIN}/AndroidManifest.xml": "    <queries>\n    </queries>\n"}
+        for folder in patch.STRING_RENAMES:
+            files[f"{patch.RES}/{folder}/strings.xml"] = "<resources>\n</resources>\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_login_screens(tree)
+            patch.login_screens(tree)
+            patch.verify_login_screens(tree)
+            text = tree.read(patch.LOGIN)
+            self.assertNotIn("sms@telegram.org", text)
+            self.assertIn('"tg://settings/phone_privacy"', text)
+            ru = tree.read(f"{patch.RES}/values-ru/strings.xml")
+            self.assertIn("Кто может найти меня по номеру? → Все", ru)
+            with self.assertRaises(patch.PatchError):
+                patch.login_screens(tree)
+
+    def test_every_language_has_every_text(self):
+        for key, texts in patch.LOGIN_STRINGS.items():
+            with self.subTest(key=key):
+                self.assertEqual(set(texts), set(patch.STRING_RENAMES))
+        for folder in patch.STRING_RENAMES:
+            with self.subTest(folder=folder):
+                self.assertIn("%1$s", patch.LOGIN_STRINGS["PlumaLoginFallbackText"][folder])
+                self.assertIn("%1$d:%2$02d", patch.LOGIN_STRINGS["PlumaLoginSendAgainIn"][folder])
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.login_screens(tree)
+            text = tree.read(patch.LOGIN)
+            for old, new in patch.LOGIN_EDITS + patch.LOGIN_VIEW_EDITS:
+                tree.write(patch.LOGIN, text.replace(new, old))
+                with self.subTest(edit=new[:60]), self.assertRaises(patch.PatchError):
+                    patch.verify_login_screens(tree)
+            tree.write(patch.LOGIN, text.replace(patch.LOGIN_MISSING_BODY, "mail(\"sms@telegram.org\");\n"))
+            with self.assertRaisesRegex(patch.PatchError, "Telegram's support"):
+                patch.verify_login_screens(tree)
+            tree.write(patch.LOGIN, text)
+            ru = f"{patch.RES}/values-ru/strings.xml"
+            xml = tree.read(ru)
+            tree.write(ru, xml.replace("→ Все", "→ Мои контакты"))
+            with self.assertRaisesRegex(patch.PatchError, "not the text of task 076"):
+                patch.verify_login_screens(tree)
+            tree.write(ru, xml)
+            patch.verify_login_screens(tree)
+
+    def test_upstream_string_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values/strings.xml"
+            tree.write(rel, '<resources>\n    <string name="PlumaLoginSendAgain">x</string>\n</resources>\n')
+            with self.assertRaisesRegex(patch.PatchError, "upstream has a string"):
+                patch.login_screens(tree)
+
+    def test_support_branch_changed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), missing=patch.LOGIN_MISSING_HEAD + "        report();\n")
+            with self.assertRaisesRegex(patch.PatchError, "no longer writes"):
+                patch.login_screens(tree)
+
+
 if __name__ == "__main__":
     unittest.main()
