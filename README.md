@@ -162,7 +162,7 @@ A bad release is withdrawn on the server (`pluma-admin release withdraw android 
 | Pull request | yes | no |
 | Weekly canary | the pinned upstream on a fresh runner image | no |
 
-Native code is compiled through ccache and Java through the Gradle build cache, both kept in the GitHub Actions cache. A repeat build therefore spends most of its time on R8 and packaging. A pull request saves its own ccache entry, so its next push finds what the last one compiled; older entries of a branch are deleted after the run. The repository's cache limit is 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository).
+Native code is compiled through ccache and Java through the Gradle build cache, both kept in the GitHub Actions cache. A repeat build therefore spends most of its time on R8 and packaging. A pull request saves its own ccache entry (not one of a fork or Dependabot), so its next push finds what the last one compiled; older entries of a branch are deleted after the run, and `cache-cleanup` deletes those of a pull request when it closes. The repository's cache limit is 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository).
 
 Since the repository is public, set *Settings → Actions → General → Fork pull request workflows* to require approval for all outside collaborators.
 

@@ -115,7 +115,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-${{ hashFiles('upstream.env') }}-
             ccache-
@@ -131,11 +131,11 @@ jobs:
         if: always()
         run: ccache --show-stats || true
       - name: Save ccache
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}
+          key: ccache-${{ hashFiles('upstream.env') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Encrypt APK
         if: steps.configure.outputs.target == 'server' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
@@ -221,8 +221,8 @@ jobs:
 
   prune-caches:
     needs: build
-    # A fork's token cannot delete entries.
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # The token of a fork or of Dependabot cannot delete entries.
+    if: always() && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
