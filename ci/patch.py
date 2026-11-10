@@ -3910,7 +3910,7 @@ LOGIN_VIEW_EDITS = (
      "            if (plumaTelegramButton != null) {\n"
      "                plumaTelegramButton.setText(getString(currentType == AUTH_TYPE_SMS ? R.string.PlumaLoginOpenTelegramSettings : R.string.PlumaLoginOpenTelegram));\n"
      "                Intent intent = plumaTelegramIntent();\n"
-     "                plumaTelegramButton.setVisibility(intent != null && intent.resolveActivity(getContext().getPackageManager()) != null ? VISIBLE : GONE);\n"
+     "                plumaTelegramButton.setVisibility(intent != null && !isInCancelAccountDeletionMode() && intent.resolveActivity(getContext().getPackageManager()) != null ? VISIBLE : GONE);\n"
      "            }\n"),
     ("                if (currentType == AUTH_TYPE_MESSAGE) {\n"
      "                    str = AndroidUtilities.replaceTags(LocaleController.formatString(\"SentAppCodeWithPhone\", R.string.SentAppCodeWithPhone, LocaleController.addNbsp(number)));\n"
@@ -3946,6 +3946,45 @@ LOGIN_VIEW_EDITS = (
      "                        timeText.setText(getString(R.string.PlumaLoginSending)); // pluma: task 076, no SMS\n"
      "                    }\n"
      "                    Bundle params = new Bundle();\n"),
+    # Back: only the phrase and word codes return to an earlier page. A resend
+    # between the pages of task 076 keeps prevType too (AUTH_TYPE_* and VIEW_*
+    # share values), and Back would land on the same page or swing between two.
+    ("            if (prevType != 0) {\n"
+     "                setPage(prevType, true, null, true);\n"
+     "                return false;\n"
+     "            }\n",
+     "            if (prevType == AUTH_TYPE_PHRASE || prevType == AUTH_TYPE_WORD) { // pluma: task 076\n"
+     "                setPage(prevType, true, null, true);\n"
+     "                return false;\n"
+     "            }\n"),
+    # "Send again": one request at a time, and a failure is said and leaves the
+    # link working.
+    ("                if (time > 0 && timeTimer != null) {\n"
+     "                    return;\n"
+     "                }\n"
+     "                isResendingCode = true;\n",
+     "                if (time > 0 && timeTimer != null || isResendingCode) { // pluma: one resend at a time (task 076)\n"
+     "                    return;\n"
+     "                }\n"
+     "                isResendingCode = true;\n"),
+    ("                        } else if (error != null && error.text != null) {\n"
+     "                            AndroidUtilities.runOnUIThread(() -> lastError = error.text);\n"
+     "                        }\n",
+     "                        } else if (error != null && error.text != null) {\n"
+     "                            AndroidUtilities.runOnUIThread(() -> {\n"
+     "                                lastError = error.text;\n"
+     "                                plumaResendFailed(error); // pluma: task 076\n"
+     "                            });\n"
+     "                        }\n"),
+    # Nothing more can be sent: the administrator gives the code.
+    ("                } else {\n"
+     "                    if (error.text != null) {\n"
+     "                        if (error.text.contains(\"PHONE_NUMBER_INVALID\")) {\n",
+     "                } else {\n"
+     "                    if (error.text != null && error.text.contains(\"SEND_CODE_UNAVAILABLE\")) {\n"
+     "                        plumaAskAdministrator(); // pluma: task 076\n"
+     "                    } else if (error.text != null) {\n"
+     "                        if (error.text.contains(\"PHONE_NUMBER_INVALID\")) {\n"),
     # Where the link to the chat or to the setting goes.
     ("        private void createCodeTimer() {\n",
      "        // pluma: the chat with the account that wrote the code, or the \"Who can find me by\n"
@@ -3958,6 +3997,38 @@ LOGIN_VIEW_EDITS = (
      "            return new Intent(Intent.ACTION_VIEW, Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);\n"
      "        }\n"
      "\n"
+     "        // pluma: a \"Send again\" that failed: the link works again and the error is said (task 076).\n"
+     "        private void plumaResendFailed(TLRPC.TL_error error) {\n"
+     "            isResendingCode = false;\n"
+     "            destroyCodeTimer();\n"
+     "            timeText.setText(getString(currentType == AUTH_TYPE_SMS ? R.string.PlumaLoginSendAgain : R.string.RequestSmsButton));\n"
+     "            ThemeBind.textColor(timeText, Theme.key_chats_actionBackground);\n"
+     "            timeText.setTag(R.id.color_key_tag, Theme.key_chats_actionBackground);\n"
+     "            timeText.invalidate();\n"
+     "            if (error.text.contains(\"PHONE_CODE_EXPIRED\")) {\n"
+     "                onBackPressed(true);\n"
+     "                setPage(VIEW_PHONE_INPUT, true, null, true);\n"
+     "                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString(R.string.CodeExpired));\n"
+     "            } else if (error.text.contains(\"SEND_CODE_UNAVAILABLE\")) {\n"
+     "                plumaAskAdministrator();\n"
+     "            } else if (error.text.startsWith(\"FLOOD_WAIT\")) {\n"
+     "                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString(R.string.FloodWait));\n"
+     "            } else if (error.code != -1000) {\n"
+     "                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString(R.string.ErrorOccurred) + \"\\n\" + error.text);\n"
+     "            }\n"
+     "        }\n"
+     "\n"
+     "        // pluma: nothing more can be sent: the administrator issues the code, Telegram's\n"
+     "        // support has nothing to do with it (task 076).\n"
+     "        private void plumaAskAdministrator() {\n"
+     "            new AlertDialog.Builder(getContext())\n"
+     "                    .setTitle(getString(R.string.PlumaLoginAdminTitle))\n"
+     "                    .setMessage(getString(R.string.PlumaLoginAdminText))\n"
+     "                    .setPositiveButton(getString(R.string.OK), null)\n"
+     "                    .setNegativeButton(getString(R.string.DidNotGetTheCodeEditNumberButton), (dialog, which) -> setPage(VIEW_PHONE_INPUT, true, null, true))\n"
+     "                    .show();\n"
+     "        }\n"
+     "\n"
      "        private void createCodeTimer() {\n"),
 )
 # "Didn't get the code?" with nothing more to send: the administrator, not a
@@ -3967,14 +4038,7 @@ LOGIN_MISSING_HEAD = ("                    } else {\n"
 LOGIN_MISSING_TAIL = ("                    }\n"
                       "                });\n"
                       "            }\n")
-LOGIN_MISSING_BODY = ("                        // pluma: the administrator issues the code, Telegram's support has nothing\n"
-                      "                        // to do with it (task 076).\n"
-                      "                        new AlertDialog.Builder(context)\n"
-                      "                                .setTitle(getString(R.string.PlumaLoginAdminTitle))\n"
-                      "                                .setMessage(getString(R.string.PlumaLoginAdminText))\n"
-                      "                                .setPositiveButton(getString(R.string.OK), null)\n"
-                      "                                .setNegativeButton(getString(R.string.DidNotGetTheCodeEditNumberButton), (dialog, which) -> setPage(VIEW_PHONE_INPUT, true, null, true))\n"
-                      "                                .show();\n")
+LOGIN_MISSING_BODY = "                        plumaAskAdministrator(); // pluma: not Telegram's support (task 076)\n"
 LOGIN_QUERIES = ('    </queries>\n',
                  '        <!-- pluma: the login code page opens Telegram (task 076) -->\n'
                  '        <intent>\n            <action android:name="android.intent.action.VIEW"/>\n'
@@ -4131,7 +4195,7 @@ LOGIN_STRINGS = {
         'values-uk': 'Попросіть код в адміністратора Pluma й введіть його тут.',
     },
 }
-LOGIN_STRING_LINE = re.compile(r'    <string name="PlumaLogin\w+">[^<]*</string>\n')
+LOGIN_STRING_LINE = re.compile(r'    <string name="(?:' + "|".join(LOGIN_STRINGS) + r')">[^<]*</string>\n')
 
 def _login_view_span(text):
     start = text.index(LOGIN_VIEW)
