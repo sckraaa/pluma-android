@@ -389,6 +389,7 @@ def patch(tree, c):
                json.dumps(placeholder_google_services(["org.telegram.messenger"]), indent=2) + "\n")
 
     video_quality(tree)
+    call_parameters(tree)
     birthdays(tree)
     sticker_sets(tree)
     saved_tags(tree)
@@ -729,6 +730,385 @@ def verify_video_quality(tree):
             changed = next(line for line in new.splitlines()
                            if line not in old.splitlines() and "// pluma:" not in line.split(";")[0])
             raise PatchError(f"{rel}: the video quality edit {changed.strip()!r} is not there")
+
+
+# --- call quality parameters ---------------------------------------------------
+# Task 077 of the server repository (stage 2, ADR 0004): the quality values of
+# a private call come from phoneCall.custom_parameters, the JSON the server sets
+# per call. VoIPService already passes it to tgcalls (Instance.Config
+# customParameters, VoIPService.java 3529 at 13.2.1), and InstanceV2Impl, the
+# engine of library 9.0.0 the server negotiates between native clients, parses
+# it into _customParameters but reads only network_* keys from it. The patch
+# reads the keys below at the places tgcalls sets the value today (tgcalls
+# 545f5ae, the submodule TMessagesProj/jni/tgcalls of 13.2.1). An absent key,
+# a value that is not a number or one out of range keeps upstream's value, so a
+# call without custom_parameters is Telegram's call and the server can compare
+# both by switching keys (the stock values are in docs/ops/calls.md of the
+# server repository). The keys, their units and ranges are the server's
+# (pkg/phonecalls/parameters.go): a rate in kbit/s counts 1000 bit/s there,
+# while upstream writes its own rates as kbit * 1024 (32 * 1024), so a rate
+# member holds bit/s and an absent key keeps upstream's number of bit/s.
+# - audio_ptime_ms: Opus packet duration of the sender, upstream 60
+#   (OutgoingAudioChannel, kCodecParamPTime). At 60 ms Opus sends three 20 ms
+#   frames and in-band FEC repairs only the last of a lost packet (research
+#   audio.md, "In-band FEC").
+# - audio_max_bitrate_kbps: the audio cap, upstream 32 (adjustBitratePreferences).
+# - audio_min_bitrate_kbps: no upstream value. With it the field trial
+#   WebRTC-Audio-Allocation/min,max lets the bandwidth estimate move Opus between
+#   the two; without it the send stream holds Opus at the cap (min = max,
+#   WebRtcAudioSendStream::UpdateAllowedBitrateRange). Field trials are global
+#   and webrtc keeps the pointer, so each distinct string is kept for the life
+#   of the process (persistentFieldTrials).
+# - audio_jitter_min_ms: the receiver's jitter buffer floor, upstream 50
+#   (IncomingV2AudioChannel, audio_jitter_buffer_min_delay_ms).
+# - audio_rnnoise: RNNoise on the captured voice, the capture post-processor of
+#   group calls (GroupAudioCapturePostProcessor, already built on Android);
+#   upstream has none in private calls.
+# - video_max_bitrate_kbps: the camera cap, upstream 1000.
+# - screen_max_bitrate_kbps: the screen cap; upstream sets none, WebRTC's
+#   default by frame size applies (research video.md, "Screen-share send cap").
+# - start_bitrate_kbps: the start of the bandwidth estimate (CallConfig
+#   bitrate_config); upstream sets none, WebRTC starts at 300 kbit/s.
+# - screen_max_size_px (Java): the long side of the screen capture,
+#   upstream about 1000 px (VideoCapturerDevice.getScreenCaptureSize). The call
+#   sets it in NativeInstance.make and clears it in stop(); group calls keep
+#   upstream's limit.
+# The server's video_fps and screen_fps are not read: Android captures both at
+# 30 (VideoCapturerDevice.CAPTURE_FPS), the value the server sends.
+TGCALLS = "TMessagesProj/jni/tgcalls/tgcalls"
+TGCALLS_V2 = f"{TGCALLS}/v2/InstanceV2Impl.cpp"
+TGCALLS_CUSTOM_PARAMETERS = f"{TGCALLS}/v2/CustomParameters.h"
+VOIP = "TMessagesProj/src/main/java/org/telegram/messenger/voip"
+VIDEO_CAPTURER_DEVICE = f"{VOIP}/VideoCapturerDevice.java"
+NATIVE_INSTANCE = f"{VOIP}/NativeInstance.java"
+
+# Key, the C++ member it sets, upstream's value as upstream writes it ("0":
+# upstream sets none), the range the server accepts. A *_kbps key is read in
+# kbit/s of 1000 bit/s into a member of bit/s. The Java key is apart
+# (SCREEN_CAPTURE_KEY).
+CALL_PARAMETERS = (
+    ("audio_ptime_ms", "_audioPtimeMs", "60", 10, 120),
+    ("audio_max_bitrate_kbps", "_audioMaxBitrateBps", "32 * 1024", 6, 128),
+    ("audio_min_bitrate_kbps", "audioMinBitrateBps", "0", 6, 128),
+    ("audio_jitter_min_ms", "_audioJitterBufferMinDelayMs", "50", 1, 500),
+    ("video_max_bitrate_kbps", "_videoMaxBitrateBps", "1000 * 1024", 100, 20000),
+    ("screen_max_bitrate_kbps", "_screencastMaxBitrateBps", "0", 100, 20000),
+    ("start_bitrate_kbps", "_startBitrateBps", "0", 30, 20000),
+)
+CALL_RNNOISE_KEY = "audio_rnnoise"
+SCREEN_CAPTURE_KEY = "screen_max_size_px"
+SCREEN_CAPTURE_RANGE = (320, 3840)
+UPSTREAM_FIELD_TRIALS = (
+    '            "WebRTC-DataChannel-Dcsctp/Enabled/"\n'
+    '            "WebRTC-Audio-MinimizeResamplingOnMobile/Enabled/"\n'
+    '            "WebRTC-Audio-iOS-Holding/Enabled/"\n'
+    '            "WebRTC-IceFieldTrials/skip_relay_to_non_relay_connections:true/"')
+
+
+def _call_parameter_reads():
+    lines = []
+    for key, member, default, low, high in CALL_PARAMETERS:
+        target = f"const int {member}" if not member.startswith("_") else member
+        read = "getCustomParameterKbpsAsBps" if key.endswith("_kbps") else "getCustomParameterIntOr"
+        lines.append(f'        {target} = {read}(_customParameters, "{key}", {default}, {low}, {high});\n')
+    lines.append(f'        _audioNoiseSuppression = getCustomParameterBool(_customParameters, "{CALL_RNNOISE_KEY}");\n')
+    return "".join(lines)
+
+
+CALL_PARAMETERS_EDITS = (
+    (TGCALLS_CUSTOM_PARAMETERS,
+     "} // namespace tgcalls\n\n#endif\n",
+     "// pluma: an integer key read against upstream's own value. An absent key, a\n"
+     "// value that is not a number or one outside [minValue, maxValue] reads as\n"
+     "// defaultValue, so a server value of 0 differs from an absent key and a value\n"
+     "// out of range keeps upstream's behaviour. A fraction is truncated.\n"
+     "inline int getCustomParameterIntOr(std::map<std::string, json11::Json> const &parameters, std::string const &name, "
+     "int defaultValue, int minValue, int maxValue) {\n"
+     "    const auto value = parameters.find(name);\n"
+     "    if (value != parameters.end() && value->second.is_number()) {\n"
+     "        const double number = value->second.number_value();\n"
+     "        if (number >= minValue && number <= maxValue) {\n"
+     "            return static_cast<int>(number);\n"
+     "        }\n"
+     "    }\n"
+     "    return defaultValue;\n"
+     "}\n"
+     "\n"
+     "// pluma: a rate key in kbit/s of the server, which counts 1000 bit/s, as\n"
+     "// bit/s; defaultBps (upstream's own value, which counts a kbit as 1024 bit)\n"
+     "// when the key is absent, not a number or outside [minKbps, maxKbps].\n"
+     "// minKbps is above 0.\n"
+     "inline int getCustomParameterKbpsAsBps(std::map<std::string, json11::Json> const &parameters, std::string const &name, "
+     "int defaultBps, int minKbps, int maxKbps) {\n"
+     "    const int kbps = getCustomParameterIntOr(parameters, name, 0, minKbps, maxKbps);\n"
+     "    return kbps > 0 ? kbps * 1000 : defaultBps;\n"
+     "}\n"
+     "\n"
+     "} // namespace tgcalls\n\n#endif\n"),
+    (TGCALLS_V2,
+     '#include "v2/CustomParameters.h"\n',
+     '#include "v2/CustomParameters.h"\n'
+     "// pluma: RNNoise in private calls and the field trials of a call.\n"
+     '#include "group/GroupAudioCapturePostProcessor.h"\n'
+     "\n"
+     "#include <mutex>\n"
+     "#include <set>\n"),
+    (TGCALLS_V2,
+     "namespace {\n\nenum class SignalingProtocolVersion {\n",
+     "namespace {\n"
+     "\n"
+     "// pluma: webrtc::field_trial keeps the pointer it is given\n"
+     "// (InitFieldTrialsFromString), so the trial string of a call must outlive the\n"
+     "// call. Each distinct string is kept once for the life of the process; the\n"
+     "// server sends a few distinct values at most.\n"
+     "const char *persistentFieldTrials(std::string const &fieldTrials) {\n"
+     "    static std::mutex mutex;\n"
+     "    static std::set<std::string> *strings = new std::set<std::string>();\n"
+     "    std::lock_guard<std::mutex> lock(mutex);\n"
+     "    return strings->insert(fieldTrials).first->c_str();\n"
+     "}\n"
+     "\n"
+     "enum class SignalingProtocolVersion {\n"),
+    (TGCALLS_V2,
+     "        signaling::MediaContent const &mediaContent,\n"
+     "        std::shared_ptr<Threads> threads\n"
+     "    ) :\n"
+     "    _threads(threads),\n"
+     "    _ssrc(mediaContent.ssrc),\n"
+     "    _call(call),\n"
+     "    _channelManager(channelManager),\n"
+     "    _audioSource(audioSource) {\n",
+     "        signaling::MediaContent const &mediaContent,\n"
+     "        std::shared_ptr<Threads> threads,\n"
+     "        int ptimeMs // pluma: the Opus packet duration, upstream 60 ms\n"
+     "    ) :\n"
+     "    _threads(threads),\n"
+     "    _ssrc(mediaContent.ssrc),\n"
+     "    _call(call),\n"
+     "    _channelManager(channelManager),\n"
+     "    _audioSource(audioSource) {\n"),
+    (TGCALLS_V2,
+     "                codec.SetParam(cricket::kCodecParamPTime, 60);\n",
+     "                codec.SetParam(cricket::kCodecParamPTime, ptimeMs); // pluma: upstream 60\n"),
+    (TGCALLS_V2,
+     "        std::function<void(float, float)> onAudioLevelsUpdated,\n"
+     "        std::shared_ptr<Threads> threads) :\n",
+     "        std::function<void(float, float)> onAudioLevelsUpdated,\n"
+     "        std::shared_ptr<Threads> threads,\n"
+     "        int jitterBufferMinDelayMs) : // pluma: the jitter buffer floor, upstream 50 ms\n"),
+    (TGCALLS_V2,
+     "        audioOptions.audio_jitter_buffer_min_delay_ms = 50;\n",
+     "        audioOptions.audio_jitter_buffer_min_delay_ms = jitterBufferMinDelayMs; // pluma: upstream 50\n"),
+    (TGCALLS_V2,
+     "                            outgoingAudioContent.value(),\n"
+     "                            _threads\n"
+     "                        ));\n",
+     "                            outgoingAudioContent.value(),\n"
+     "                            _threads,\n"
+     "                            _audioPtimeMs\n"
+     "                        ));\n"),
+    (TGCALLS_V2,
+     "                            content,\n"
+     "                            _audioLevelsUpdated,\n"
+     "                            _threads\n"
+     "                        ));\n",
+     "                            content,\n"
+     "                            _audioLevelsUpdated,\n"
+     "                            _threads,\n"
+     "                            _audioJitterBufferMinDelayMs\n"
+     "                        ));\n"),
+    (TGCALLS_V2,
+     f"        webrtc::field_trial::InitFieldTrialsFromString(\n{UPSTREAM_FIELD_TRIALS}\n        );\n",
+     "        // pluma: the field trials are set below, once the custom parameters are read.\n"),
+    (TGCALLS_V2,
+     "            if (customParametersJson.is_object()) {\n"
+     "                _customParameters = customParametersJson.object_items();\n"
+     "            }\n"
+     "        }\n",
+     "            if (customParametersJson.is_object()) {\n"
+     "                _customParameters = customParametersJson.object_items();\n"
+     "            }\n"
+     "        }\n"
+     "\n"
+     "        // pluma: the quality of the call from the server's custom parameters\n"
+     "        // (task 077 of the server repository). An absent key keeps upstream's\n"
+     "        // value; the server's kbit/s count 1000 bit/s, the members hold bit/s.\n"
+     + _call_parameter_reads() +
+     "\n"
+     f"        std::string fieldTrials =\n{UPSTREAM_FIELD_TRIALS};\n"
+     "        // Without a range the send stream holds Opus at its target (min = max,\n"
+     "        // WebRtcAudioSendStream::UpdateAllowedBitrateRange); the trial lets the\n"
+     "        // bandwidth estimate move it between the two\n"
+     "        // (AudioSendStream::GetMinMaxBitrateConstraints).\n"
+     "        if (audioMinBitrateBps != 0 && audioMinBitrateBps <= _audioMaxBitrateBps) {\n"
+     '            fieldTrials += "WebRTC-Audio-Allocation/min:" + std::to_string(audioMinBitrateBps) + "bps,max:" + '
+     'std::to_string(_audioMaxBitrateBps) + "bps/";\n'
+     "        }\n"
+     "        webrtc::field_trial::InitFieldTrialsFromString(persistentFieldTrials(fieldTrials));\n"
+     '        RTC_LOG(LS_INFO) << "Call quality: ptime " << _audioPtimeMs << " ms, audio " << audioMinBitrateBps << "-" '
+     '<< _audioMaxBitrateBps << " bps, jitter floor " << _audioJitterBufferMinDelayMs << " ms, rnnoise " '
+     '<< _audioNoiseSuppression << ", video " << _videoMaxBitrateBps << ", screen " << _screencastMaxBitrateBps '
+     '<< ", start " << _startBitrateBps << " bps";\n'),
+    (TGCALLS_V2,
+     "            callConfig.audio_state = _channelManager->media_engine()->voice().GetAudioState();\n",
+     "            callConfig.audio_state = _channelManager->media_engine()->voice().GetAudioState();\n"
+     "            // pluma: the start of the bandwidth estimate; upstream keeps WebRTC's 300 kbit/s.\n"
+     "            if (_startBitrateBps != 0) {\n"
+     "                callConfig.bitrate_config.start_bitrate_bps = _startBitrateBps;\n"
+     "            }\n"),
+    (TGCALLS_V2,
+     "        webrtc::AudioProcessingBuilder builder;\n"
+     "        peerConnectionFactoryDependencies.audio_processing = builder.Create();\n",
+     "        webrtc::AudioProcessingBuilder builder;\n"
+     "#if USE_RNNOISE\n"
+     "        // pluma: RNNoise on the captured voice, the capture post-processor of\n"
+     "        // group calls (GroupInstanceCustomImpl), when the server switches it on.\n"
+     "        if (_audioNoiseSuppression) {\n"
+     "            builder.SetCapturePostProcessing(std::make_unique<AudioCapturePostProcessor>(\n"
+     "                [](GroupLevelValue const &) {},\n"
+     "                std::make_shared<NoiseSuppressionConfiguration>(true),\n"
+     "                nullptr,\n"
+     "                nullptr\n"
+     "            ));\n"
+     "        }\n"
+     "#endif\n"
+     "        peerConnectionFactoryDependencies.audio_processing = builder.Create();\n"),
+    (TGCALLS_V2,
+     "        if (_outgoingAudioChannel) {\n"
+     "            _outgoingAudioChannel->setMaxBitrate(32 * 1024);\n"
+     "        }\n"
+     "        if (_outgoingVideoChannel) {\n"
+     "            _outgoingVideoChannel->setMaxBitrate(1000 * 1024);\n"
+     "        }\n",
+     "        // pluma: the caps of the custom parameters; upstream's are 32 and 1000 kbit, the screen has none.\n"
+     "        if (_outgoingAudioChannel) {\n"
+     "            _outgoingAudioChannel->setMaxBitrate(_audioMaxBitrateBps);\n"
+     "        }\n"
+     "        if (_outgoingVideoChannel) {\n"
+     "            _outgoingVideoChannel->setMaxBitrate(_videoMaxBitrateBps);\n"
+     "        }\n"
+     "        if (_outgoingScreencastChannel && _screencastMaxBitrateBps != 0) {\n"
+     "            _outgoingScreencastChannel->setMaxBitrate(_screencastMaxBitrateBps);\n"
+     "        }\n"),
+    (TGCALLS_V2,
+     "    std::map<std::string, json11::Json> _customParameters;\n",
+     "    std::map<std::string, json11::Json> _customParameters;\n"
+     "    // pluma: the quality of the call, read from _customParameters in the constructor.\n"
+     "    int _audioPtimeMs = 60;\n"
+     "    int _audioMaxBitrateBps = 32 * 1024;\n"
+     "    int _audioJitterBufferMinDelayMs = 50;\n"
+     "    bool _audioNoiseSuppression = false;\n"
+     "    int _videoMaxBitrateBps = 1000 * 1024;\n"
+     "    int _screencastMaxBitrateBps = 0;\n"
+     "    int _startBitrateBps = 0;\n"),
+    (VIDEO_CAPTURER_DEVICE,
+     "    private static final int CAPTURE_FPS = 30;\n",
+     "    private static final int CAPTURE_FPS = 30;\n"
+     "\n"
+     "    // pluma: the long side of a screen capture in a private call, from the\n"
+     "    // call's custom_parameters (NativeInstance.make); 0 keeps upstream's limit\n"
+     "    // of about 1000 px. The call writes it, the capture reads it on the UI thread.\n"
+     "    public static volatile int screenCaptureMaxSide;\n"),
+    (VIDEO_CAPTURER_DEVICE,
+     "        if (dx != -1 && aspect != 1) {\n"
+     "            while (size.x > 1000 || size.y > 1000 || size.x % roundBy != 0 || size.y % roundBy != 0) {\n"
+     "                size.x -= dx;\n"
+     "                size.y -= dy;\n"
+     "                if (size.x < 800 && size.y < 800) {\n"
+     "                    dx = -1;\n"
+     "                    break;\n"
+     "                }\n"
+     "            }\n"
+     "        }\n"
+     "        if (dx == -1 || aspect == 1) {\n"
+     "            float scale = Math.max(size.x / 970.0f, size.y / 970.0f);\n",
+     "        // pluma: upstream's 1000, 800 and 970 px, or the call's limit in the same proportions.\n"
+     "        final int maxSide = screenCaptureMaxSide;\n"
+     "        final int limit = maxSide > 0 ? maxSide : 1000;\n"
+     "        final int floor = maxSide > 0 ? maxSide * 4 / 5 : 800;\n"
+     "        final float fallback = maxSide > 0 ? maxSide * 0.97f : 970.0f;\n"
+     "        if (dx != -1 && aspect != 1) {\n"
+     "            while (size.x > limit || size.y > limit || size.x % roundBy != 0 || size.y % roundBy != 0) {\n"
+     "                size.x -= dx;\n"
+     "                size.y -= dy;\n"
+     "                if (size.x < floor && size.y < floor) {\n"
+     "                    dx = -1;\n"
+     "                    break;\n"
+     "                }\n"
+     "            }\n"
+     "        }\n"
+     "        if (dx == -1 || aspect == 1) {\n"
+     "            float scale = Math.max(size.x / fallback, size.y / fallback);\n"
+     "            if (maxSide > 0) {\n"
+     "                scale = Math.max(1.0f, scale); // pluma: a screen under the limit is not enlarged\n"
+     "            }\n"),
+    (NATIVE_INSTANCE,
+     "import org.telegram.messenger.AndroidUtilities;\n",
+     "import org.json.JSONException;\n"
+     "import org.json.JSONObject;\n"
+     "import org.telegram.messenger.AndroidUtilities;\n"),
+    (NATIVE_INSTANCE,
+     "        instance.nativePtr = makeNativeInstance(version, instance, config, path, endpoints, proxy, networkType, "
+     "encryptionKey, remoteSink, videoCapturer, aspectRatio);\n",
+     "        // pluma: the screen capture limit of this call (task 077 of the server repository).\n"
+     "        VideoCapturerDevice.screenCaptureMaxSide = screenCaptureMaxSide(config.customParameters);\n"
+     "        instance.nativePtr = makeNativeInstance(version, instance, config, path, endpoints, proxy, networkType, "
+     "encryptionKey, remoteSink, videoCapturer, aspectRatio);\n"),
+    (NATIVE_INSTANCE,
+     "    public Instance.FinalState stop() {\n"
+     "        stopBarrier = new CountDownLatch(1);\n",
+     f'    // pluma: "{SCREEN_CAPTURE_KEY}" of the call\'s custom_parameters, 0 when\n'
+     f"    // it is absent or outside {SCREEN_CAPTURE_RANGE[0]}-{SCREEN_CAPTURE_RANGE[1]} px.\n"
+     "    private static int screenCaptureMaxSide(String customParameters) {\n"
+     "        if (customParameters == null || customParameters.isEmpty()) {\n"
+     "            return 0;\n"
+     "        }\n"
+     "        try {\n"
+     f'            final Object value = new JSONObject(customParameters).opt("{SCREEN_CAPTURE_KEY}");\n'
+     "            if (value instanceof Number) {\n"
+     "                final double side = ((Number) value).doubleValue();\n"
+     f"                if (side >= {SCREEN_CAPTURE_RANGE[0]} && side <= {SCREEN_CAPTURE_RANGE[1]}) {{\n"
+     "                    return (int) side;\n"
+     "                }\n"
+     "            }\n"
+     "        } catch (JSONException e) {\n"
+     "            FileLog.e(e);\n"
+     "        }\n"
+     "        return 0;\n"
+     "    }\n"
+     "\n"
+     "    public Instance.FinalState stop() {\n"
+     "        VideoCapturerDevice.screenCaptureMaxSide = 0; // pluma: upstream's limit outside a private call\n"
+     "        stopBarrier = new CountDownLatch(1);\n"),
+)
+
+
+def call_parameters(tree):
+    # Every anchor first: several edits keep their anchor in the new text, and a
+    # tree that is already patched must fail before anything is written twice.
+    for rel, old, _ in CALL_PARAMETERS_EDITS:
+        tree.expect(rel, old)
+    for rel, old, new in CALL_PARAMETERS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_call_parameters(tree):
+    for rel, old, new in CALL_PARAMETERS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or text.count(old) != new.count(old):
+            changed = next(line for line in new.splitlines() if line not in old.splitlines())
+            raise PatchError(f"{rel}: the call quality edit {changed.strip()!r} is not there")
+    engine = tree.read(TGCALLS_V2)
+    # Upstream's fixed values must be gone, and nothing may set the field trials but the call's string.
+    for fixed in ("kCodecParamPTime, 60)", "audio_jitter_buffer_min_delay_ms = 50;", "setMaxBitrate(32 * 1024)",
+                  "setMaxBitrate(1000 * 1024)"):
+        if fixed in engine:
+            raise PatchError(f"{TGCALLS_V2}: upstream's {fixed!r} is still there")
+    if engine.count("InitFieldTrialsFromString(") != 1:
+        raise PatchError(f"{TGCALLS_V2}: the field trials are set {engine.count('InitFieldTrialsFromString(')} times")
+    for key, *_ in CALL_PARAMETERS:
+        if engine.count(f'"{key}"') != 1:
+            raise PatchError(f"{TGCALLS_V2}: the key {key!r} is read {engine.count(chr(34) + key + chr(34))} times")
 
 
 # --- saved message tags ------------------------------------------------------
@@ -3754,6 +4134,7 @@ def verify(tree, c):
         if "org.telegram.messenger" in tree.read(rel):
             raise PatchError(f"{rel}: Telegram's account type is still there")
     verify_video_quality(tree)
+    verify_call_parameters(tree)
     verify_birthdays(tree)
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
