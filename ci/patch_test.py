@@ -1290,6 +1290,37 @@ class ThemeTest(unittest.TestCase):
             sage = {k: v + f"h={patch.argb('#7FA082')}\n" for k, v in files.items()}
             self.assertEqual(patch.default_theme_blues(theme_java(), COLORS_JAVA, sage), dict.fromkeys(files, []))
 
+    def test_verified_badge(self):
+        # The fixture's badge: the rosette a, the accent f; the check g, the
+        # text on the accent i. The accent engine moves the blue rosette near
+        # the accent but not onto it, and the check stays as it is.
+        badge = (("a", "f"), ("g", "i"))
+        with unittest.mock.patch.object(patch, "VERIFIED_BADGE", badge):
+            self.assertEqual(patch.default_theme_badges(theme_java(), COLORS_JAVA, self.FILES),
+                             dict.fromkeys(self.FILES, ["a", "g"]))
+            # The theme files give both parts the accent and the text on it.
+            files = {asset: text + f"a={patch.argb('#9DBB9F' if dark else '#5B7A5E')}\n"
+                     f"g={patch.argb('#131513' if dark else '#FFFFFF')}\n"
+                     f"i={patch.argb('#131513' if dark else '#FFFFFF')}\n"
+                     for (asset, _, dark), text in zip(patch.DEFAULT_THEMES.values(), self.FILES.values())}
+            self.assertEqual(patch.default_theme_badges(theme_java(), COLORS_JAVA, files), dict.fromkeys(files, []))
+            # A check left white on the light sage of a dark theme.
+            night = dict(files, **{"night.attheme": files["night.attheme"] + "g=-1\n"})
+            self.assertEqual(patch.default_theme_badges(theme_java(), COLORS_JAVA, night)["night.attheme"], ["g"])
+        # A key upstream renamed stops the check instead of passing it.
+        with unittest.mock.patch.object(patch, "VERIFIED_BADGE", (("x", "f"),)):
+            with self.assertRaisesRegex(patch.PatchError, "no colour key x"):
+                patch.default_theme_badges(theme_java(), COLORS_JAVA, self.FILES)
+
+    def test_verified_badge_tables(self):
+        # Each theme table gives the badge the accent and the text on it of
+        # the same table, and every part of the badge is in every table.
+        for name, table in patch.THEME_FILES.items():
+            colours = {k: c for k, _, c in table}
+            for key, like in patch.VERIFIED_BADGE:
+                with self.subTest(theme=name, key=key):
+                    self.assertEqual(colours[key], colours[like])
+
     def test_default_accent_shortcuts(self):
         # Upstream's Theme.getColor answers Telegram's colours for the home
         # accent of the day theme, whatever the theme file says.

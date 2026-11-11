@@ -2430,6 +2430,12 @@ PALETTE_LIGHT = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -13458971, "#5B7A5E"),
+    ("chats_verifiedCheck", None, "#FFFFFF"),
+    ("profile_verifiedBackground", None, "#5B7A5E"),
+    ("profile_verifiedCheck", None, "#FFFFFF"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -2551,6 +2557,12 @@ PALETTE_DARK = (
     ("chats_unreadCounterText", None, "#131513"),
     ("chats_actionIcon", None, "#131513"),
     ("featuredStickers_buttonText", None, "#131513"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -10177041, "#9DBB9F"),
+    ("chats_verifiedCheck", None, "#131513"),
+    ("profile_verifiedBackground", -10177027, "#9DBB9F"),
+    ("profile_verifiedCheck", -1, "#131513"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -2645,6 +2657,12 @@ PALETTE_DAY = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -11358728, "#5B7A5E"),
+    ("chats_verifiedCheck", None, "#FFFFFF"),
+    ("profile_verifiedBackground", -11296533, "#5B7A5E"),
+    ("profile_verifiedCheck", -1, "#FFFFFF"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", -11491866, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -2735,6 +2753,12 @@ PALETTE_ARCTIC = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -12998152, "#5B7A5E"),
+    ("chats_verifiedCheck", None, "#FFFFFF"),
+    ("profile_verifiedBackground", -12211980, "#5B7A5E"),
+    ("profile_verifiedCheck", -1, "#FFFFFF"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", -11491866, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -2830,6 +2854,12 @@ PALETTE_NIGHT = (
     ("chats_unreadCounterText", None, "#131513"),
     ("chats_actionIcon", None, "#131513"),
     ("featuredStickers_buttonText", None, "#131513"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -12145929, "#9DBB9F"),
+    ("chats_verifiedCheck", None, "#131513"),
+    ("profile_verifiedBackground", -10636552, "#9DBB9F"),
+    ("profile_verifiedCheck", -1, "#131513"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -2922,6 +2952,18 @@ BRAND_COLOURS = (
     (f"{JAVA}/messenger/voip/VoIPGroupNotification.java", "0xff2ca5e0", "0xff5b7a5e", 1),
     (f"{JAVA}/messenger/voip/VoIPPreNotificationService.java", "0xff2ca5e0", "0xff5b7a5e", 1),
     (f"{RES}/drawable/call_custom_notification_icon.xml", "#2ca5e0", "#5b7a5e", 1),
+    # The verified badge in the participant list of a voice chat, which is
+    # always dark and takes no theme colour: Telegram's light blue rosette with
+    # a white check becomes the badge of the dark themes, the dark accent with
+    # the text on it.
+    (f"{JAVA}/ui/Cells/GroupCallUserCell.java",
+     "            drawables[0].setColorFilter(new PorterDuffColorFilter(0xff75B3EE, PorterDuff.Mode.MULTIPLY));\n"
+     "            drawables[1] = context.getResources().getDrawable(R.drawable.verified_check).mutate();\n",
+     "            // pluma: the verified badge of the dark themes, the sage accent with the text on it.\n"
+     "            drawables[0].setColorFilter(new PorterDuffColorFilter(0xff9DBB9F, PorterDuff.Mode.MULTIPLY));\n"
+     "            drawables[1] = context.getResources().getDrawable(R.drawable.verified_check).mutate();\n"
+     "            drawables[1].setColorFilter(new PorterDuffColorFilter(0xff131513, PorterDuff.Mode.MULTIPLY));\n",
+     1),
     (f"{RES}/values/styles.xml", "#ff527da3", "#ff5b7a5e", 1),
     (f"{RES}/values-v21/styles.xml", "#527da3", "#5b7a5e", 6),
     (f"{RES}/values-v21/styles.xml", "#ff527da3", "#ff5b7a5e", 1),
@@ -3190,6 +3232,40 @@ def default_theme_blues(theme_java, colors_java, theme_files):
             blue.update(names.get(k, k) for k, c in colours.items()
                         if (k not in excluded or names.get(k, k) in ALSO_CHECKED) and telegram_blue(c))
         out[asset] = sorted(blue)
+    return out
+
+
+# The verified badge (Theme.dialogs_verifiedDrawable and
+# profile_verifiedDrawable, the drawables verified_area and verified_check
+# that every place tints by these keys) and the colour each part must match in
+# every default theme: the rosette the accent of the unread counter, the check
+# the text on it. The accent engine alone moves the blue rosette only near the
+# accent, a different shade in each theme, and leaves the check white on the
+# light sage of the dark themes.
+VERIFIED_BADGE = (("chats_verifiedBackground", "chats_unreadCounter"),
+                  ("chats_verifiedCheck", "chats_unreadCounterText"),
+                  ("profile_verifiedBackground", "chats_unreadCounter"),
+                  ("profile_verifiedCheck", "chats_unreadCounterText"))
+
+
+def default_theme_badges(theme_java, colors_java, theme_files):
+    """{theme file: the parts of the verified badge not in the colour they
+    must match} for the accents of the default themes, modelled as
+    default_theme_blues does."""
+    names, defaults = theme_defaults(colors_java)
+    fallback, excluded = theme_engine(theme_java)
+    by_name = {n: k for k, n in names.items()}
+    for key, like in VERIFIED_BADGE:
+        if key not in by_name or like not in by_name:
+            raise PatchError(f"ThemeColors.java: no colour key {key} or {like}; upstream changed it")
+    out = {}
+    for theme, (asset, accent_ids, dark) in DEFAULT_THEMES.items():
+        wrong = set()
+        for accent_id in accent_ids:
+            base, accent = theme_accent(theme_java, theme, accent_id)
+            colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
+            wrong.update(key for key, like in VERIFIED_BADGE if colours[by_name[key]] != colours[by_name[like]])
+        out[asset] = sorted(wrong)
     return out
 
 
@@ -3637,7 +3713,7 @@ def verify_intro(tree):
 
 def verify_theme(tree):
     """No Telegram blue in the default themes, the colour literals of
-    BRAND_COLOURS included."""
+    BRAND_COLOURS included, and the verified badge in their accent."""
     for rel, old, _, _ in BRAND_COLOURS:
         if old in tree.read(rel):
             raise PatchError(f"{rel}: Telegram's colour {old!r} is still there")
@@ -3652,6 +3728,9 @@ def verify_theme(tree):
     for asset, left in default_theme_blues(theme_java, colors_java, themes).items():
         if left:
             raise PatchError(f"{asset}: Telegram's blue is left in {', '.join(left)}")
+    for asset, wrong in default_theme_badges(theme_java, colors_java, themes).items():
+        if wrong:
+            raise PatchError(f"{asset}: the verified badge is not the accent with the text on it: {', '.join(wrong)}")
 
 
 def verify(tree, c):
