@@ -1519,5 +1519,94 @@ class LoginScreensTest(unittest.TestCase):
                 patch.login_screens(tree)
 
 
+class NoAiEditorTest(unittest.TestCase):
+    # The edited places, the ways into the editor and the lines that show the
+    # caption buttons, as upstream has them.
+    EXTRA = {
+        patch.AI_ENTER_VIEW: "new AIEditorAlert(\nnew AIEditorAlert(\naiButton.setVisibility(View.VISIBLE);\n",
+        patch.AI_ATTACH_ALERT: ("new AIEditorAlert(\nnew AIEditorAlert(\naiButton.setVisibility(View.VISIBLE);\n"
+                                "topAiButton.setVisibility(View.VISIBLE);\n"),
+        patch.AI_CAPTION_VIEWER: "new AIEditorAlert(\naiButton.setVisibility(View.VISIBLE);\n",
+        patch.AI_RICH_EDITOR: "new AIEditorAlert(\nnew RichAIComposeSheet(\n",
+        patch.AI_RICH_LAYOUT: "new AIEditorAlert(\nnew RichAIComposeSheet(\n",
+    }
+
+    def tree(self, root, edits=patch.AI_EDITOR_EDITS, extra=None):
+        files = dict(extra if extra is not None else self.EXTRA)
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "offered again"):
+                patch.verify_no_ai_editor(tree)
+            patch.no_ai_editor(tree)
+            patch.verify_no_ai_editor(tree)
+            with self.assertRaises(patch.PatchError):
+                patch.no_ai_editor(tree)
+
+    def test_buttons_never_show(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.no_ai_editor(tree)
+            for rel in (patch.AI_ENTER_VIEW, patch.AI_ATTACH_ALERT, patch.AI_CAPTION_VIEWER):
+                self.assertIn("        final boolean show = false;", tree.read(rel))
+            for rel in (patch.AI_RICH_EDITOR, patch.AI_RICH_TOOLBAR):
+                text = tree.read(rel)
+                self.assertIn(patch.AI_BOTTOM_BUTTON + "        aiButton.setVisibility(View.GONE);", text)
+                self.assertIn(patch.AI_STYLE_GROUP + "        formattingLayout1.setVisibility(View.GONE);", text)
+                self.assertIn("formattingLayout1 != null && formattingLayout1.getVisibility() != View.GONE", text)
+
+    def test_upstream_changed(self):
+        # A line added inside an anchor stops the patch: the anchor is exact.
+        for i, (rel, old, new) in enumerate(patch.AI_EDITOR_EDITS):
+            changed = old.replace("\n", "\n        added();\n", 1) if old.count("\n") > 1 else old.replace("(", "(added, ", 1)
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.AI_EDITOR_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.no_ai_editor(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.no_ai_editor(tree)
+            for i, (rel, old, new) in enumerate(patch.AI_EDITOR_EDITS):
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=i), self.assertRaisesRegex(patch.PatchError, "offered again"):
+                    patch.verify_no_ai_editor(tree)
+                tree.write(rel, patched)
+            patch.verify_no_ai_editor(tree)
+
+    def test_new_way_in(self):
+        # Another call of the editor or another place that shows a button is
+        # read before the build goes on.
+        cases = (
+            (patch.AI_ENTER_VIEW, "new AIEditorAlert(\n", "ways into the AI editor"),
+            (patch.AI_RICH_EDITOR, "new AIEditorAlert(\n", "ways into the AI editor"),
+            (patch.AI_RICH_LAYOUT, "new AIEditorAlert(\n", "ways into the AI editor"),
+            (patch.AI_RICH_LAYOUT, "new RichAIComposeSheet(\n", "ways into the AI editor"),
+            (patch.AI_CAPTION_VIEWER, "aiButton.setVisibility(View.VISIBLE);\n", "outside showAiButton"),
+            (patch.AI_ATTACH_ALERT, "topAiButton.setVisibility(View.VISIBLE);\n", "outside showAiButton"),
+            (patch.AI_RICH_TOOLBAR, "aiButton.setVisibility(View.VISIBLE);\n", "shown again"),
+            (patch.AI_RICH_TOOLBAR, "formattingLayout1.setVisibility(View.VISIBLE);\n", "shown again"),
+            (patch.AI_RICH_EDITOR, "formattingLayout1.setVisibility(View.VISIBLE);\n", "shown again"),
+            (patch.AI_RICH_EDITOR, "addView(aiStyleButton\n", "shown again"),
+        )
+        for rel, added, message in cases:
+            with self.subTest(file=rel, added=added), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.no_ai_editor(tree)
+                tree.write(rel, tree.read(rel) + added)
+                with self.assertRaisesRegex(patch.PatchError, message):
+                    patch.verify_no_ai_editor(tree)
+
+
 if __name__ == "__main__":
     unittest.main()
