@@ -13,7 +13,8 @@ and web clients in the built-in strings, no tg:// link scheme, no t.me link
 the app makes itself and pluma.chat taken wherever t.me is, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
 the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
-Messages that ask for no Premium, premium stickers sent without Premium).
+Messages that ask for no Premium, premium stickers sent without Premium,
+no way into the AI message editor).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -394,6 +395,7 @@ def patch(tree, c):
     premium_stickers(tree)
     premium_for_everyone(tree)
     not_served(tree)
+    no_ai_editor(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -3679,6 +3681,7 @@ def verify(tree, c):
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
     verify_not_served(tree)
+    verify_no_ai_editor(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
@@ -4348,6 +4351,94 @@ def verify_not_served(tree):
     if tree.read(SETTINGS_ACTIVITY).count("R.string.SettingsExperimental") != 1:
         raise PatchError(f"{SETTINGS_ACTIVITY}: the experimental section is gone")
 
+
+# --- No AI message editor (task 079) ----------------------------------------
+# The AI editor rewrites, proofreads, restyles and translates a typed message
+# through messages.composeMessageWithAI, messages.composeRichMessageWithAI and
+# the aicompose.* tones; Pluma runs no language model to answer them (the
+# owner's decision, 2026-11-11). Upstream offers it from the AI button of the
+# message field (ChatActivityEnterView), of the attachment caption
+# (ChatAttachAlert, both of its fields), of the media caption
+# (CaptionPhotoViewer) and from the rich editor, both the full-screen one
+# (RichEditor) and the attachment layout's toolbar (RichEditorToolbar): the
+# bottom AI button and the AI style button of the formatting panel. The three
+# caption buttons show only through showAiButton, which never shows them now;
+# the rich editors' buttons are hidden where they are made, and the formatting
+# panels no longer reserve room for the group that holds only the style
+# button. AIEditorAlert, RichAIComposeSheet and the tones controller stay in
+# the source unreached.
+AI_ENTER_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java"
+AI_ATTACH_ALERT = "TMessagesProj/src/main/java/org/telegram/ui/Components/ChatAttachAlert.java"
+AI_CAPTION_VIEWER = "TMessagesProj/src/main/java/org/telegram/ui/Components/CaptionPhotoViewer.java"
+AI_RICH_EDITOR = "TMessagesProj/src/main/java/org/telegram/ui/iv/RichEditor.java"
+AI_RICH_TOOLBAR = "TMessagesProj/src/main/java/org/telegram/ui/iv/RichEditorToolbar.java"
+AI_RICH_LAYOUT = "TMessagesProj/src/main/java/org/telegram/ui/iv/ChatAttachAlertRichLayout.java"
+AI_STYLE_GROUP = "        formattingLayout1.addView(aiStyleButton, LayoutHelper.createLinear(38, 38, Gravity.CENTER_VERTICAL));\n"
+AI_STYLE_MEASURE = "                if (formattingLayout1 != null) {\n                    formattingLayout1.measure(\n"
+AI_BOTTOM_BUTTON = "        bottomPanel.addView(aiButton, LayoutHelper.createLinear(44, 44, 0, Gravity.LEFT | Gravity.CENTER_VERTICAL, 0, 0, 8, 0));\n"
+AI_EDITOR_EDITS = (
+    (AI_ENTER_VIEW,
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = (show_ || richDraftActive) && parentFragment != null && !parentFragment.isSecretChat();\n",
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = false; // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_ATTACH_ALERT,
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = show_ && (baseFragment instanceof ChatActivity && !((ChatActivity) baseFragment).isSecretChat());\n",
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = false; // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_CAPTION_VIEWER,
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = show_;\n",
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = false; // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_RICH_EDITOR,
+     AI_BOTTOM_BUTTON,
+     AI_BOTTOM_BUTTON + "        aiButton.setVisibility(View.GONE); // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_RICH_TOOLBAR,
+     AI_BOTTOM_BUTTON,
+     AI_BOTTOM_BUTTON + "        aiButton.setVisibility(View.GONE); // pluma: no AI editor, Pluma runs no language model\n"),
+) + tuple(
+    edit for rel in (AI_RICH_EDITOR, AI_RICH_TOOLBAR) for edit in (
+        (rel, AI_STYLE_GROUP, AI_STYLE_GROUP + "        formattingLayout1.setVisibility(View.GONE); // pluma: holds only the AI editor button\n"),
+        (rel, AI_STYLE_MEASURE,
+         "                if (formattingLayout1 != null && formattingLayout1.getVisibility() != View.GONE) { // pluma: hidden, no AI editor\n"
+         "                    formattingLayout1.measure(\n"),
+    )
+)
+
+
+def no_ai_editor(tree):
+    for rel, old, new in AI_EDITOR_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_no_ai_editor(tree):
+    for rel, old, new in AI_EDITOR_EDITS:
+        text = tree.read(rel)
+        # An edit that only adds a line keeps the line it follows.
+        if text.count(new) != 1 or text.count(old) != (1 if old in new else 0):
+            raise PatchError(f"{rel}: the AI editor is offered again")
+    # Every other way to make a button visible or to open the editor would
+    # bypass the edits above; upstream adding one stops the patch here.
+    for rel, sheet, opens in ((AI_ENTER_VIEW, "new AIEditorAlert(", 2), (AI_ATTACH_ALERT, "new AIEditorAlert(", 2),
+                              (AI_CAPTION_VIEWER, "new AIEditorAlert(", 1), (AI_RICH_EDITOR, "new AIEditorAlert(", 1),
+                              (AI_RICH_LAYOUT, "new AIEditorAlert(", 1), (AI_RICH_EDITOR, "new RichAIComposeSheet(", 1),
+                              (AI_RICH_LAYOUT, "new RichAIComposeSheet(", 1)):
+        found = tree.read(rel).count(sheet)
+        if found != opens:
+            raise PatchError(f"{rel}: {found} ways into the AI editor, expected {opens}; upstream changed them")
+    for rel, buttons in ((AI_ENTER_VIEW, ("aiButton",)), (AI_ATTACH_ALERT, ("aiButton", "topAiButton")),
+                         (AI_CAPTION_VIEWER, ("aiButton",))):
+        text = tree.read(rel)
+        for b in buttons:
+            if text.count(f"{b}.setVisibility(View.VISIBLE);") != 1:
+                raise PatchError(f"{rel}: {b} is shown outside showAiButton; upstream changed it")
+    for rel in (AI_RICH_EDITOR, AI_RICH_TOOLBAR):
+        text = tree.read(rel)
+        if ("aiButton.setVisibility(View.VISIBLE)" in text or "formattingLayout1.setVisibility(View.VISIBLE)" in text
+                or text.count("addView(aiStyleButton") != 1):
+            raise PatchError(f"{rel}: an AI button of the rich editor is shown again")
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
