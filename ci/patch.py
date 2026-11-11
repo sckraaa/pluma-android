@@ -13,7 +13,8 @@ and web clients in the built-in strings, no tg:// link scheme, no t.me link
 the app makes itself and pluma.chat taken wherever t.me is, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
 the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
-Messages that ask for no Premium, premium stickers sent without Premium).
+Messages that ask for no Premium, premium stickers sent without Premium,
+no way into the AI message editor).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -395,6 +396,7 @@ def patch(tree, c):
     premium_stickers(tree)
     premium_for_everyone(tree)
     not_served(tree)
+    no_ai_editor(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -2808,6 +2810,12 @@ PALETTE_LIGHT = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -13458971, "#5B7A5E"),
+    ("chats_verifiedCheck", None, "#FFFFFF"),
+    ("profile_verifiedBackground", None, "#5B7A5E"),
+    ("profile_verifiedCheck", None, "#FFFFFF"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -2929,6 +2937,12 @@ PALETTE_DARK = (
     ("chats_unreadCounterText", None, "#131513"),
     ("chats_actionIcon", None, "#131513"),
     ("featuredStickers_buttonText", None, "#131513"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -10177041, "#9DBB9F"),
+    ("chats_verifiedCheck", None, "#131513"),
+    ("profile_verifiedBackground", -10177027, "#9DBB9F"),
+    ("profile_verifiedCheck", -1, "#131513"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -3023,6 +3037,12 @@ PALETTE_DAY = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -11358728, "#5B7A5E"),
+    ("chats_verifiedCheck", None, "#FFFFFF"),
+    ("profile_verifiedBackground", -11296533, "#5B7A5E"),
+    ("profile_verifiedCheck", -1, "#FFFFFF"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", -11491866, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -3113,6 +3133,12 @@ PALETTE_ARCTIC = (
     ("chats_unreadCounterText", None, "#FFFFFF"),
     ("chats_actionIcon", None, "#FFFFFF"),
     ("featuredStickers_buttonText", None, "#FFFFFF"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -12998152, "#5B7A5E"),
+    ("chats_verifiedCheck", None, "#FFFFFF"),
+    ("profile_verifiedBackground", -12211980, "#5B7A5E"),
+    ("profile_verifiedCheck", -1, "#FFFFFF"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", -11491866, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -3208,6 +3234,12 @@ PALETTE_NIGHT = (
     ("chats_unreadCounterText", None, "#131513"),
     ("chats_actionIcon", None, "#131513"),
     ("featuredStickers_buttonText", None, "#131513"),
+    # the verified badge, Telegram's blue rosette with a white check: the accent with the
+    # text on the accent
+    ("chats_verifiedBackground", -12145929, "#9DBB9F"),
+    ("chats_verifiedCheck", None, "#131513"),
+    ("profile_verifiedBackground", -10636552, "#9DBB9F"),
+    ("profile_verifiedCheck", -1, "#131513"),
     # the blue identity colour of people (Theme.keys_avatar_*[5]): sage
     ("avatar_backgroundBlue", None, "#7FA082"),
     ("avatar_background2Blue", None, "#5B7A5E"),
@@ -3300,6 +3332,18 @@ BRAND_COLOURS = (
     (f"{JAVA}/messenger/voip/VoIPGroupNotification.java", "0xff2ca5e0", "0xff5b7a5e", 1),
     (f"{JAVA}/messenger/voip/VoIPPreNotificationService.java", "0xff2ca5e0", "0xff5b7a5e", 1),
     (f"{RES}/drawable/call_custom_notification_icon.xml", "#2ca5e0", "#5b7a5e", 1),
+    # The verified badge in the participant list of a voice chat, which is
+    # always dark and takes no theme colour: Telegram's light blue rosette with
+    # a white check becomes the badge of the dark themes, the dark accent with
+    # the text on it.
+    (f"{JAVA}/ui/Cells/GroupCallUserCell.java",
+     "            drawables[0].setColorFilter(new PorterDuffColorFilter(0xff75B3EE, PorterDuff.Mode.MULTIPLY));\n"
+     "            drawables[1] = context.getResources().getDrawable(R.drawable.verified_check).mutate();\n",
+     "            // pluma: the verified badge of the dark themes, the sage accent with the text on it.\n"
+     "            drawables[0].setColorFilter(new PorterDuffColorFilter(0xff9DBB9F, PorterDuff.Mode.MULTIPLY));\n"
+     "            drawables[1] = context.getResources().getDrawable(R.drawable.verified_check).mutate();\n"
+     "            drawables[1].setColorFilter(new PorterDuffColorFilter(0xff131513, PorterDuff.Mode.MULTIPLY));\n",
+     1),
     (f"{RES}/values/styles.xml", "#ff527da3", "#ff5b7a5e", 1),
     (f"{RES}/values-v21/styles.xml", "#527da3", "#5b7a5e", 6),
     (f"{RES}/values-v21/styles.xml", "#ff527da3", "#ff5b7a5e", 1),
@@ -3568,6 +3612,40 @@ def default_theme_blues(theme_java, colors_java, theme_files):
             blue.update(names.get(k, k) for k, c in colours.items()
                         if (k not in excluded or names.get(k, k) in ALSO_CHECKED) and telegram_blue(c))
         out[asset] = sorted(blue)
+    return out
+
+
+# The verified badge (Theme.dialogs_verifiedDrawable and
+# profile_verifiedDrawable, the drawables verified_area and verified_check
+# that every place tints by these keys) and the colour each part must match in
+# every default theme: the rosette the accent of the unread counter, the check
+# the text on it. The accent engine alone moves the blue rosette only near the
+# accent, a different shade in each theme, and leaves the check white on the
+# light sage of the dark themes.
+VERIFIED_BADGE = (("chats_verifiedBackground", "chats_unreadCounter"),
+                  ("chats_verifiedCheck", "chats_unreadCounterText"),
+                  ("profile_verifiedBackground", "chats_unreadCounter"),
+                  ("profile_verifiedCheck", "chats_unreadCounterText"))
+
+
+def default_theme_badges(theme_java, colors_java, theme_files):
+    """{theme file: the parts of the verified badge not in the colour they
+    must match} for the accents of the default themes, modelled as
+    default_theme_blues does."""
+    names, defaults = theme_defaults(colors_java)
+    fallback, excluded = theme_engine(theme_java)
+    by_name = {n: k for k, n in names.items()}
+    for key, like in VERIFIED_BADGE:
+        if key not in by_name or like not in by_name:
+            raise PatchError(f"ThemeColors.java: no colour key {key} or {like}; upstream changed it")
+    out = {}
+    for theme, (asset, accent_ids, dark) in DEFAULT_THEMES.items():
+        wrong = set()
+        for accent_id in accent_ids:
+            base, accent = theme_accent(theme_java, theme, accent_id)
+            colours = theme_colours(theme_files[asset], names, defaults, fallback, excluded, base, accent, dark)
+            wrong.update(key for key, like in VERIFIED_BADGE if colours[by_name[key]] != colours[by_name[like]])
+        out[asset] = sorted(wrong)
     return out
 
 
@@ -4015,7 +4093,7 @@ def verify_intro(tree):
 
 def verify_theme(tree):
     """No Telegram blue in the default themes, the colour literals of
-    BRAND_COLOURS included."""
+    BRAND_COLOURS included, and the verified badge in their accent."""
     for rel, old, _, _ in BRAND_COLOURS:
         if old in tree.read(rel):
             raise PatchError(f"{rel}: Telegram's colour {old!r} is still there")
@@ -4030,6 +4108,9 @@ def verify_theme(tree):
     for asset, left in default_theme_blues(theme_java, colors_java, themes).items():
         if left:
             raise PatchError(f"{asset}: Telegram's blue is left in {', '.join(left)}")
+    for asset, wrong in default_theme_badges(theme_java, colors_java, themes).items():
+        if wrong:
+            raise PatchError(f"{asset}: the verified badge is not the accent with the text on it: {', '.join(wrong)}")
 
 
 def verify(tree, c):
@@ -4060,6 +4141,7 @@ def verify(tree, c):
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
     verify_not_served(tree)
+    verify_no_ai_editor(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
@@ -4729,6 +4811,94 @@ def verify_not_served(tree):
     if tree.read(SETTINGS_ACTIVITY).count("R.string.SettingsExperimental") != 1:
         raise PatchError(f"{SETTINGS_ACTIVITY}: the experimental section is gone")
 
+
+# --- No AI message editor (task 079) ----------------------------------------
+# The AI editor rewrites, proofreads, restyles and translates a typed message
+# through messages.composeMessageWithAI, messages.composeRichMessageWithAI and
+# the aicompose.* tones; Pluma runs no language model to answer them (the
+# owner's decision, 2026-11-11). Upstream offers it from the AI button of the
+# message field (ChatActivityEnterView), of the attachment caption
+# (ChatAttachAlert, both of its fields), of the media caption
+# (CaptionPhotoViewer) and from the rich editor, both the full-screen one
+# (RichEditor) and the attachment layout's toolbar (RichEditorToolbar): the
+# bottom AI button and the AI style button of the formatting panel. The three
+# caption buttons show only through showAiButton, which never shows them now;
+# the rich editors' buttons are hidden where they are made, and the formatting
+# panels no longer reserve room for the group that holds only the style
+# button. AIEditorAlert, RichAIComposeSheet and the tones controller stay in
+# the source unreached.
+AI_ENTER_VIEW = "TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java"
+AI_ATTACH_ALERT = "TMessagesProj/src/main/java/org/telegram/ui/Components/ChatAttachAlert.java"
+AI_CAPTION_VIEWER = "TMessagesProj/src/main/java/org/telegram/ui/Components/CaptionPhotoViewer.java"
+AI_RICH_EDITOR = "TMessagesProj/src/main/java/org/telegram/ui/iv/RichEditor.java"
+AI_RICH_TOOLBAR = "TMessagesProj/src/main/java/org/telegram/ui/iv/RichEditorToolbar.java"
+AI_RICH_LAYOUT = "TMessagesProj/src/main/java/org/telegram/ui/iv/ChatAttachAlertRichLayout.java"
+AI_STYLE_GROUP = "        formattingLayout1.addView(aiStyleButton, LayoutHelper.createLinear(38, 38, Gravity.CENTER_VERTICAL));\n"
+AI_STYLE_MEASURE = "                if (formattingLayout1 != null) {\n                    formattingLayout1.measure(\n"
+AI_BOTTOM_BUTTON = "        bottomPanel.addView(aiButton, LayoutHelper.createLinear(44, 44, 0, Gravity.LEFT | Gravity.CENTER_VERTICAL, 0, 0, 8, 0));\n"
+AI_EDITOR_EDITS = (
+    (AI_ENTER_VIEW,
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = (show_ || richDraftActive) && parentFragment != null && !parentFragment.isSecretChat();\n",
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = false; // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_ATTACH_ALERT,
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = show_ && (baseFragment instanceof ChatActivity && !((ChatActivity) baseFragment).isSecretChat());\n",
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = false; // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_CAPTION_VIEWER,
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = show_;\n",
+     "    private void showAiButton(boolean show_) {\n"
+     "        final boolean show = false; // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_RICH_EDITOR,
+     AI_BOTTOM_BUTTON,
+     AI_BOTTOM_BUTTON + "        aiButton.setVisibility(View.GONE); // pluma: no AI editor, Pluma runs no language model\n"),
+    (AI_RICH_TOOLBAR,
+     AI_BOTTOM_BUTTON,
+     AI_BOTTOM_BUTTON + "        aiButton.setVisibility(View.GONE); // pluma: no AI editor, Pluma runs no language model\n"),
+) + tuple(
+    edit for rel in (AI_RICH_EDITOR, AI_RICH_TOOLBAR) for edit in (
+        (rel, AI_STYLE_GROUP, AI_STYLE_GROUP + "        formattingLayout1.setVisibility(View.GONE); // pluma: holds only the AI editor button\n"),
+        (rel, AI_STYLE_MEASURE,
+         "                if (formattingLayout1 != null && formattingLayout1.getVisibility() != View.GONE) { // pluma: hidden, no AI editor\n"
+         "                    formattingLayout1.measure(\n"),
+    )
+)
+
+
+def no_ai_editor(tree):
+    for rel, old, new in AI_EDITOR_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_no_ai_editor(tree):
+    for rel, old, new in AI_EDITOR_EDITS:
+        text = tree.read(rel)
+        # An edit that only adds a line keeps the line it follows.
+        if text.count(new) != 1 or text.count(old) != (1 if old in new else 0):
+            raise PatchError(f"{rel}: the AI editor is offered again")
+    # Every other way to make a button visible or to open the editor would
+    # bypass the edits above; upstream adding one stops the patch here.
+    for rel, sheet, opens in ((AI_ENTER_VIEW, "new AIEditorAlert(", 2), (AI_ATTACH_ALERT, "new AIEditorAlert(", 2),
+                              (AI_CAPTION_VIEWER, "new AIEditorAlert(", 1), (AI_RICH_EDITOR, "new AIEditorAlert(", 1),
+                              (AI_RICH_LAYOUT, "new AIEditorAlert(", 1), (AI_RICH_EDITOR, "new RichAIComposeSheet(", 1),
+                              (AI_RICH_LAYOUT, "new RichAIComposeSheet(", 1)):
+        found = tree.read(rel).count(sheet)
+        if found != opens:
+            raise PatchError(f"{rel}: {found} ways into the AI editor, expected {opens}; upstream changed them")
+    for rel, buttons in ((AI_ENTER_VIEW, ("aiButton",)), (AI_ATTACH_ALERT, ("aiButton", "topAiButton")),
+                         (AI_CAPTION_VIEWER, ("aiButton",))):
+        text = tree.read(rel)
+        for b in buttons:
+            if text.count(f"{b}.setVisibility(View.VISIBLE);") != 1:
+                raise PatchError(f"{rel}: {b} is shown outside showAiButton; upstream changed it")
+    for rel in (AI_RICH_EDITOR, AI_RICH_TOOLBAR):
+        text = tree.read(rel)
+        if ("aiButton.setVisibility(View.VISIBLE)" in text or "formattingLayout1.setVisibility(View.VISIBLE)" in text
+                or text.count("addView(aiStyleButton") != 1):
+            raise PatchError(f"{rel}: an AI button of the rich editor is shown again")
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
