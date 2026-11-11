@@ -26,8 +26,23 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 - **Self-update** (task 054 of the server repository). The APK from the site updates itself, as Telegram's APK from its site does: the app asks the server (`help.getAppUpdate`), shows the update sheet and the side menu panel, downloads the APK over MTProto and opens the system installer.
   - Only the update places of upstream's standalone build are turned on (`ApplicationLoader.isSelfUpdatingBuild()`); the rest of the standalone build (its package, SMS jobs, the TON row) stays off. The sheet and the panel are the standalone module's files, copied as they are.
   - The version is `<upstream version>.<build>`, e.g. `12.9.1.57`, the build being the run number: Android compares versions part by part, so each build is newer than the one before. `versionCode` rises with it.
+- **Call quality** (task 077 of the server repository). The quality values of a private call come from the call's `custom_parameters`, the JSON the server sends with `phoneCall`; the app already passes it to tgcalls. A key that is absent, not a number or out of range keeps Telegram's value, so a call without them is Telegram's call (`CALL_PARAMETERS_EDITS` in `ci/patch.py`). Keys, units and ranges are the server's (`pkg/phonecalls/parameters.go`): its kbit/s count 1000 bit/s, while Telegram's own values below count a kbit as 1024 bit, as tgcalls writes them.
 
-After the edits, the result is checked again: no Telegram datacenter address or server key may remain, no "Telegram" and no link to Telegram's desktop or web client in the text of the built-in strings, no `tg:` link scheme, no `t.me` link the app makes itself and `pluma.chat` wherever the app takes `t.me`, nothing in the birthday notice that leads to Premium or gifts, and no Telegram blue in the built-in themes. For that last check the patch works out the colour the theme engine gives each key of the five themes, with every accent a theme shows before the user picks a colour, and fails on any blue outside the keys the engine leaves alone (user colours, calls, statistics, Premium, stories).
+  | Key | Telegram | Range |
+  |---|---|---|
+  | `audio_ptime_ms`: Opus packet duration | 60 | 10–120 |
+  | `audio_max_bitrate_kbps`: audio cap | 32 | 6–128 |
+  | `audio_min_bitrate_kbps`: with it, the bandwidth estimate moves Opus between this and the cap | none (fixed at the cap) | 6–128 |
+  | `audio_jitter_min_ms`: the receiver's jitter buffer floor | 50 | 1–500 |
+  | `audio_rnnoise`: RNNoise on the microphone, as in group calls | off | `true`/`false` |
+  | `video_max_bitrate_kbps`: camera cap | 1000 | 100–20000 |
+  | `screen_max_bitrate_kbps`: screen cap | none (WebRTC's default by frame size) | 100–20000 |
+  | `start_bitrate_kbps`: start of the bandwidth estimate | none (WebRTC's 300 kbit/s) | 30–20000 |
+  | `screen_max_size_px`: long side of the screen capture | about 1000 | 320–3840 |
+
+  The server's `video_fps` and `screen_fps` are not read: Android captures the camera and the screen at 30 frames per second, the value the server sends today.
+
+After the edits, the result is checked again: no Telegram datacenter address or server key may remain, no fixed call quality value of Telegram where a call parameter replaces it, no "Telegram" and no link to Telegram's desktop or web client in the text of the built-in strings, no `tg:` link scheme, no `t.me` link the app makes itself and `pluma.chat` wherever the app takes `t.me`, nothing in the birthday notice that leads to Premium or gifts, and no Telegram blue in the built-in themes. For that last check the patch works out the colour the theme engine gives each key of the five themes, with every accent a theme shows before the user picks a colour, and fails on any blue outside the keys the engine leaves alone (user colours, calls, statistics, Premium, stories).
 
 ## Branding
 

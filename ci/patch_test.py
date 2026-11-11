@@ -313,6 +313,167 @@ class VideoQualityTest(unittest.TestCase):
                 tree.write(rel, patched)
             patch.verify_video_quality(tree)
 
+class CallParametersTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, root, edits=patch.CALL_PARAMETERS_EDITS):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "class X {\n") + old + "        x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text + "}\n", encoding="utf-8")
+        (root / "TMessagesProj").mkdir(exist_ok=True)
+        return patch.Tree(root)
+
+    @staticmethod
+    def upstream(rel):
+        return "".join(old for r, old, _ in patch.CALL_PARAMETERS_EDITS if r == rel)
+
+    def test_defaults_are_upstreams(self):
+        # Each key's default is the value upstream sets at the place the key replaces.
+        engine = self.upstream(patch.TGCALLS_V2)
+        found = {
+            "audio_ptime_ms": re.findall(r"kCodecParamPTime, (\d+)\);", engine),
+            "audio_max_bitrate_kbps": re.findall(r"_outgoingAudioChannel->setMaxBitrate\((\d+ \* 1024)\);", engine),
+            "audio_jitter_min_ms": re.findall(r"audio_jitter_buffer_min_delay_ms = (\d+);", engine),
+            "video_max_bitrate_kbps": re.findall(r"_outgoingVideoChannel->setMaxBitrate\((\d+ \* 1024)\);", engine),
+        }
+        for key, member, default, low, high in patch.CALL_PARAMETERS:
+            with self.subTest(key=key):
+                self.assertLessEqual(low, high)
+                self.assertGreater(low, 0)
+                if key in found:
+                    self.assertEqual(found[key], [default])
+                    # Upstream's number lies in the range the server may send (a kbit of 1024 bit counted here).
+                    self.assertTrue(low <= int(default.split(" * ")[0]) <= high)
+                else:
+                    # Upstream sets no value: "0" means "leave it", below the range a server may send.
+                    self.assertEqual(default, "0")
+        # Upstream never sets a screen cap, a start bitrate or an audio range.
+        self.assertNotIn("_outgoingScreencastChannel->setMaxBitrate", engine)
+        self.assertNotIn("bitrate_config", engine)
+        self.assertNotIn("WebRTC-Audio-Allocation", engine)
+        # The members start at the same values before the constructor reads the keys.
+        members = next(new for rel, old, new in patch.CALL_PARAMETERS_EDITS if "_customParameters;\n" in old)
+        for key, member, default, *_ in patch.CALL_PARAMETERS:
+            if member.startswith("_"):
+                with self.subTest(member=member):
+                    self.assertEqual(re.findall(rf"    int {member} = (.+);\n", members), [default])
+        self.assertIn("    bool _audioNoiseSuppression = false;\n", members)
+        # The screen capture keeps upstream's numbers when the call sets no limit.
+        capture = patch.CALL_PARAMETERS_EDITS
+        old, new = next((o, n) for r, o, n in capture if r == patch.VIDEO_CAPTURER_DEVICE and "while (" in o)
+        self.assertEqual(re.findall(r"size\.x > (\d+)", old), ["1000"])
+        self.assertEqual(re.findall(r"size\.x < (\d+)", old), ["800"])
+        self.assertEqual(re.findall(r"size\.x / (\d+)\.0f", old), ["970"])
+        self.assertIn("final int limit = maxSide > 0 ? maxSide : 1000;\n", new)
+        self.assertIn("final int floor = maxSide > 0 ? maxSide * 4 / 5 : 800;\n", new)
+        self.assertIn("final float fallback = maxSide > 0 ? maxSide * 0.97f : 970.0f;\n", new)
+
+    def test_edits(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_call_parameters(tree)
+            patch.call_parameters(tree)
+            patch.verify_call_parameters(tree)
+            engine = tree.read(patch.TGCALLS_V2)
+            for key, member, default, low, high in patch.CALL_PARAMETERS:
+                read = "getCustomParameterKbpsAsBps" if key.endswith("_kbps") else "getCustomParameterIntOr"
+                self.assertIn(f'{read}(_customParameters, "{key}", {default}, {low}, {high});', engine)
+            # The rates of the server count 1000 bit/s; upstream's own stay as upstream writes them.
+            self.assertIn('_audioMaxBitrateBps = getCustomParameterKbpsAsBps(_customParameters, "audio_max_bitrate_kbps", 32 * 1024, 6, 128);', engine)
+            self.assertIn('_audioPtimeMs = getCustomParameterIntOr(_customParameters, "audio_ptime_ms", 60, 10, 120);', engine)
+            self.assertIn('getCustomParameterBool(_customParameters, "audio_rnnoise");', engine)
+            # The values reach the places upstream fixed.
+            self.assertIn("codec.SetParam(cricket::kCodecParamPTime, ptimeMs);", engine)
+            self.assertIn("audioOptions.audio_jitter_buffer_min_delay_ms = jitterBufferMinDelayMs;", engine)
+            self.assertIn("_outgoingAudioChannel->setMaxBitrate(_audioMaxBitrateBps);", engine)
+            self.assertIn("_outgoingVideoChannel->setMaxBitrate(_videoMaxBitrateBps);", engine)
+            self.assertIn("_outgoingScreencastChannel->setMaxBitrate(_screencastMaxBitrateBps);", engine)
+            self.assertIn("callConfig.bitrate_config.start_bitrate_bps = _startBitrateBps;", engine)
+            self.assertIn('"WebRTC-Audio-Allocation/min:" + std::to_string(audioMinBitrateBps) + "bps,max:" + '
+                          'std::to_string(_audioMaxBitrateBps) + "bps/";', engine)
+            self.assertIn("                            _threads,\n                            _audioPtimeMs\n", engine)
+            self.assertIn("                            _threads,\n                            _audioJitterBufferMinDelayMs\n", engine)
+            self.assertIn("builder.SetCapturePostProcessing(std::make_unique<AudioCapturePostProcessor>(", engine)
+            # Upstream's field trials stay, set once, after the keys are read, from storage that outlives the call.
+            self.assertEqual(engine.count("InitFieldTrialsFromString("), 1)
+            self.assertIn(f"std::string fieldTrials =\n{patch.UPSTREAM_FIELD_TRIALS};\n", engine)
+            self.assertLess(engine.index("_customParameters = customParametersJson.object_items();"),
+                            engine.index("InitFieldTrialsFromString(persistentFieldTrials(fieldTrials));"))
+            self.assertLess(engine.index('"audio_min_bitrate_kbps"'), engine.index("fieldTrials +="))
+            self.assertIn("audio_rnnoise", engine)
+            helper = tree.read(patch.TGCALLS_CUSTOM_PARAMETERS)
+            self.assertIn("inline int getCustomParameterIntOr(", helper)
+            self.assertIn("return defaultValue;", helper)
+            self.assertIn("inline int getCustomParameterKbpsAsBps(", helper)
+            self.assertIn("return kbps > 0 ? kbps * 1000 : defaultBps;", helper)
+            native = tree.read(patch.NATIVE_INSTANCE)
+            self.assertIn('new JSONObject(customParameters).opt("screen_max_size_px")', native)
+            self.assertLess(native.index("VideoCapturerDevice.screenCaptureMaxSide = screenCaptureMaxSide("),
+                            native.index("instance.nativePtr = makeNativeInstance("))
+            self.assertIn("    public Instance.FinalState stop() {\n        VideoCapturerDevice.screenCaptureMaxSide = 0;", native)
+
+    def test_second_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_parameters(tree)
+            patched = {rel: tree.read(rel) for rel, _, _ in patch.CALL_PARAMETERS_EDITS}
+            with self.assertRaises(patch.PatchError):
+                patch.call_parameters(tree)
+            # Several edits keep their anchor; a second run writes nothing.
+            for rel, text in patched.items():
+                self.assertEqual(tree.read(rel), text)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.CALL_PARAMETERS_EDITS):
+            self.assertTrue(old.endswith("\n"))
+            changed = old[:-1] + " \n"
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.CALL_PARAMETERS_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = {r: tree.read(r) for r, _, _ in edits}
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.call_parameters(tree)
+                for r, text in before.items():
+                    self.assertEqual(tree.read(r), text)
+        # An anchor upstream uses twice.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), patch.CALL_PARAMETERS_EDITS + patch.CALL_PARAMETERS_EDITS[4:5])
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.call_parameters(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_parameters(tree)
+            for rel, old, new in patch.CALL_PARAMETERS_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old), patched.replace(new, ""), patched + new):
+                    with self.subTest(file=rel, edit=new.splitlines()[0]):
+                        self.assertNotEqual(text, patched)
+                        tree.write(rel, text)
+                        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                            patch.verify_call_parameters(tree)
+                tree.write(rel, patched)
+            patch.verify_call_parameters(tree)
+            # Upstream's fixed values coming back elsewhere, a second field trial string, a key read twice.
+            engine = tree.read(patch.TGCALLS_V2)
+            for extra, error in (
+                ("    x->setMaxBitrate(32 * 1024);\n", "still there"),
+                ("    codec.SetParam(cricket::kCodecParamPTime, 60);\n", "still there"),
+                ("    webrtc::field_trial::InitFieldTrialsFromString(\"\");\n", "set 2 times"),
+                ('    int y = getCustomParameterInt(_customParameters, "audio_ptime_ms");\n', "read 2 times"),
+            ):
+                with self.subTest(extra=extra):
+                    tree.write(patch.TGCALLS_V2, engine + extra)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_call_parameters(tree)
+            tree.write(patch.TGCALLS_V2, engine)
+            patch.verify_call_parameters(tree)
+
+
 class SavedTagsTest(unittest.TestCase):
     # Premium checks of upstream that are not about tags; they must stay.
     OTHER_PREMIUM = {
