@@ -397,6 +397,7 @@ def patch(tree, c):
     premium_for_everyone(tree)
     not_served(tree)
     no_ai_editor(tree)
+    service_account(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
@@ -4142,6 +4143,7 @@ def verify(tree, c):
     verify_premium_for_everyone(tree)
     verify_not_served(tree)
     verify_no_ai_editor(tree)
+    verify_service_account(tree)
     verify_self_update(tree, c)
     verify_links(tree)
     verify_brand(tree)
@@ -4154,6 +4156,8 @@ def verify(tree, c):
 # open, so the server sends the Premium flag for everybody. Only what the flag
 # would make wrong is edited: the star by every name, the purchase rows that
 # show for anyone with Premium, and what the server does not serve.
+# Voice and round messages keep upstream's transcribe button: the server
+# serves messages.transcribeAudio to everyone with Premium (owner, 2026-11-12).
 PREMIUM_FOR_EVERYONE_EDITS = (
     ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
      '        if ("getpremium".equalsIgnoreCase(first))\n            return handleGetPremium(uri.getQueryParameter("ref"));\n',
@@ -4211,9 +4215,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java",
      "            } else if (currentUser.premium) {\n                return ContextCompat.getDrawable(ApplicationLoader.applicationContext, R.drawable.msg_premium_liststar).mutate();",
      "            } else if (false) { // pluma: no star: everybody has Premium\n                return ContextCompat.getDrawable(ApplicationLoader.applicationContext, R.drawable.msg_premium_liststar).mutate();"),
-    ("TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java",
-     "        useTranscribeButton = (\n            currentMessageObject != null &&\n",
-     "        // pluma: the server has no transcription to offer.\n        useTranscribeButton = (\n            false && currentMessageObject != null &&\n"),
     ("TMessagesProj/src/main/java/org/telegram/ui/Cells/GroupCallUserCell.java",
      "            } else if (currentUser != null && currentUser.premium) {\n",
      "            } else if (false) { // pluma: no star: everybody has Premium\n"),
@@ -4281,6 +4282,33 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+    verify_transcribe_button(tree)
+
+
+# The transcribe button of a voice or round message is upstream's, untouched:
+# Premium shows it, and its condition leaves it off a view-once message
+# (media.ttl_seconds, set on such a message, is not 0). The view-once player
+# (SecretVoicePlayer) draws the same MessageObject in a ChatMessageCell. The
+# server refuses to transcribe view-once media, so the button must not show
+# there; a build whose condition lost either part stops here.
+TRANSCRIBE_CELL = f"{JAVA}/ui/Cells/ChatMessageCell.java"
+TRANSCRIBE_START = "        useTranscribeButton = (\n            currentMessageObject != null &&\n"
+TRANSCRIBE_PREMIUM = "                UserConfig.getInstance(currentAccount).isPremium()\n                ||\n"
+TRANSCRIBE_VIEW_ONCE = ("            (currentMessageObject.messageOwner.media == null"
+                        " || currentMessageObject.messageOwner.media.ttl_seconds == 0)\n        );\n")
+
+
+def verify_transcribe_button(tree):
+    text = tree.read(TRANSCRIBE_CELL)
+    start = text.find(TRANSCRIBE_START)
+    end = text.find(TRANSCRIBE_VIEW_ONCE, start)
+    # The view-once part must close the same statement, not a later one.
+    if (text.count(TRANSCRIBE_START) != 1 or text.count("useTranscribeButton = (") != 1
+            or start < 0 or end < 0 or ";" in text[start:end]):
+        raise PatchError(f"{TRANSCRIBE_CELL}: the transcribe button's condition is not upstream's; read it")
+    condition = text[start:end + len(TRANSCRIBE_VIEW_ONCE)]
+    if condition.count(TRANSCRIBE_PREMIUM) != 1 or "false &&" in condition or "pluma" in condition:
+        raise PatchError(f"{TRANSCRIBE_CELL}: the transcribe button is not upstream's for Premium; read its condition")
 
 # --- Login codes through Telegram ---------------------------------------------
 # Task 076 of the server repository. Pluma's login codes are written by a
@@ -4899,6 +4927,96 @@ def verify_no_ai_editor(tree):
         if ("aiButton.setVisibility(View.VISIBLE)" in text or "formattingLayout1.setVisibility(View.VISIBLE)" in text
                 or text.count("addView(aiStyleButton") != 1):
             raise PatchError(f"{rel}: an AI button of the rich editor is shown again")
+
+# --- Service account (task 080) ----------------------------------------------
+# The support account (user.support, which the server sends with no last
+# seen) is Pluma's service account and says so where a last seen goes (the
+# owner's decision, 2026-11-11). Upstream writes SupportStatus, "support", in
+# the chat header (ChatAvatarContainer), both profiles (ProfileActivity,
+# ProfileActivity2) and the search row (ProfileSearchCell). The key keeps its
+# name and gets the new text in every language the app bundles; upstream has
+# it in English only. Every other list (contacts, members, pickers) writes
+# LocaleController.formatUserStatus, which says "last seen a long time ago"
+# of an account with no status: it answers the same text for a support
+# account. A language pack from the server comes before the bundled texts
+# (LocaleController.getStringV2), so the server serves these words under
+# SupportStatus of the android pack.
+SERVICE_ACCOUNT_KEY = "SupportStatus"
+SERVICE_ACCOUNT_UPSTREAM = '    <string name="SupportStatus">support</string>\n'
+# Lower case where the language writes "online" and "bot" so.
+SERVICE_ACCOUNT_STATUS = {
+    "values": "service account",
+    "values-ar": "حساب خدمة",
+    "values-de": "Dienstkonto",
+    "values-es": "cuenta de servicio",
+    "values-it": "account di servizio",
+    "values-ko": "서비스 계정",
+    "values-nl": "serviceaccount",
+    "values-pt-rBR": "conta de serviço",
+    "values-ru": "сервисный аккаунт",
+    "values-uk": "сервісний акаунт",
+}
+# Where upstream writes the key, per file under JAVA. A new place stops the
+# patch until it is read: the text no longer says "support".
+SERVICE_ACCOUNT_USES = {
+    "ui/Cells/ProfileSearchCell.java": 1,
+    "ui/Components/ChatAvatarContainer.java": 1,
+    "ui/ProfileActivity.java": 1,
+    "ui/ProfileActivity2.java": 1,
+}
+SERVICE_ACCOUNT_LOCALE = f"{JAVA}/messenger/LocaleController.java"
+SERVICE_ACCOUNT_FORMAT = (
+    "    public static String formatUserStatus(int currentAccount, TLRPC.User user, boolean[] isOnline, boolean[] madeShorter) {\n",
+    "    public static String formatUserStatus(int currentAccount, TLRPC.User user, boolean[] isOnline, boolean[] madeShorter) {\n"
+    "        if (user != null && user.support) { // pluma: the service account has no last seen\n"
+    "            return getString(R.string.SupportStatus);\n"
+    "        }\n",
+)
+
+
+def _service_account_line(folder):
+    return f'    <string name="{SERVICE_ACCOUNT_KEY}">{SERVICE_ACCOUNT_STATUS[folder]}</string>\n'
+
+
+def _service_account_uses(tree):
+    uses = {}
+    for p in sorted((tree.root / JAVA).rglob("*.java")):
+        found = p.read_text(encoding="utf-8").count(f"R.string.{SERVICE_ACCOUNT_KEY}")
+        if found:
+            uses[p.relative_to(tree.root / JAVA).as_posix()] = found
+    return uses
+
+
+def service_account(tree):
+    uses = _service_account_uses(tree)
+    if uses != SERVICE_ACCOUNT_USES:
+        raise PatchError(f"{JAVA}: {SERVICE_ACCOUNT_KEY} is written in {uses}, expected {SERVICE_ACCOUNT_USES}; upstream changed it")
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    if set(files) != set(SERVICE_ACCOUNT_STATUS):
+        raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, expected {', '.join(sorted(SERVICE_ACCOUNT_STATUS))}")
+    for folder, rel in files.items():
+        if folder == "values":
+            tree.replace(rel, SERVICE_ACCOUNT_UPSTREAM, _service_account_line(folder))
+        elif f'<string name="{SERVICE_ACCOUNT_KEY}">' in tree.read(rel):
+            raise PatchError(f"{rel}: upstream has a string {SERVICE_ACCOUNT_KEY}; read its text")
+        else:
+            tree.replace(rel, "</resources>", _service_account_line(folder) + "</resources>")
+    tree.replace(SERVICE_ACCOUNT_LOCALE, *SERVICE_ACCOUNT_FORMAT)
+
+
+def verify_service_account(tree):
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        xml = p.read_text(encoding="utf-8")
+        folder = p.parent.name
+        if (folder not in SERVICE_ACCOUNT_STATUS or xml.count(_service_account_line(folder)) != 1
+                or xml.count(f'<string name="{SERVICE_ACCOUNT_KEY}">') != 1):
+            raise PatchError(f"{p.relative_to(tree.root)}: {SERVICE_ACCOUNT_KEY} is not the service account's text")
+    if tree.read(SERVICE_ACCOUNT_LOCALE).count(SERVICE_ACCOUNT_FORMAT[1]) != 1:
+        raise PatchError(f"{SERVICE_ACCOUNT_LOCALE}: formatUserStatus does not name the service account")
+    uses = _service_account_uses(tree)
+    if uses != {**SERVICE_ACCOUNT_USES, "messenger/LocaleController.java": 1}:
+        raise PatchError(f"{JAVA}: {SERVICE_ACCOUNT_KEY} is written in {uses}; a place upstream added is not read")
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
