@@ -1543,6 +1543,7 @@ class PremiumForEveryoneTest(unittest.TestCase):
             rel, old = edit[0], edit[1]
             count = edit[3] if len(edit) > 3 else 1
             files[rel] = files.get(rel, "") + (old + "x\n") * count
+        files[patch.TRANSCRIBE_CELL] = files.get(patch.TRANSCRIBE_CELL, "") + TranscribeButtonTest.UPSTREAM
         for rel, text in files.items():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(text, encoding="utf-8")
@@ -1555,6 +1556,8 @@ class PremiumForEveryoneTest(unittest.TestCase):
                 patch.verify_premium_for_everyone(tree)
             patch.premium_for_everyone(tree)
             patch.verify_premium_for_everyone(tree)
+            # The transcribe button keeps upstream's condition.
+            self.assertIn(TranscribeButtonTest.UPSTREAM, tree.read(patch.TRANSCRIBE_CELL))
             # A second run is refused: nothing is left to edit.
             with self.assertRaises(patch.PatchError):
                 patch.premium_for_everyone(tree)
@@ -1580,6 +1583,62 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+
+class TranscribeButtonTest(unittest.TestCase):
+    # ChatMessageCell.updateWaveform as upstream writes it, shortened between
+    # the parts the check reads.
+    UPSTREAM = (patch.TRANSCRIBE_START
+                + "            !currentMessageObject.isQuickReply() &&\n            (\n"
+                + patch.TRANSCRIBE_PREMIUM
+                + "                TranscribeButton.isFreeTranscribeInChat(currentMessageObject)\n            ) && (\n"
+                + "                currentMessageObject.isVoice() && useSeekBarWaveform ||\n"
+                + "                currentMessageObject.isRoundVideo()\n            ) &&\n"
+                + patch.TRANSCRIBE_VIEW_ONCE)
+
+    def tree(self, root, text):
+        (root / patch.TRANSCRIBE_CELL).parent.mkdir(parents=True)
+        (root / patch.TRANSCRIBE_CELL).write_text("class X {\n" + text + "}\n", encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_no_edit_hides_it(self):
+        # Task 071 hid the button; the server now transcribes for everyone.
+        for edits in (patch.PREMIUM_FOR_EVERYONE_EDITS, patch.NOT_SERVED_EDITS):
+            for rel, old, new, *_ in edits:
+                self.assertNotIn("useTranscribeButton", old + new)
+
+    def test_upstream(self):
+        with tempfile.TemporaryDirectory() as d:
+            patch.verify_transcribe_button(self.tree(pathlib.Path(d), self.UPSTREAM))
+
+    def test_hidden(self):
+        hidden = self.UPSTREAM.replace("            currentMessageObject != null &&\n",
+                                       "            false && currentMessageObject != null &&\n", 1)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(patch.PatchError, "condition is not upstream's"):
+                patch.verify_transcribe_button(self.tree(pathlib.Path(d), hidden))
+
+    def test_premium_gone(self):
+        with tempfile.TemporaryDirectory() as d:
+            text = self.UPSTREAM.replace(patch.TRANSCRIBE_PREMIUM, "")
+            with self.assertRaisesRegex(patch.PatchError, "not upstream's for Premium"):
+                patch.verify_transcribe_button(self.tree(pathlib.Path(d), text))
+
+    def test_view_once_gone(self):
+        # Without the check the button would show on a view-once message,
+        # which the server refuses to transcribe.
+        with tempfile.TemporaryDirectory() as d:
+            text = self.UPSTREAM.replace(patch.TRANSCRIBE_VIEW_ONCE,
+                                         "            currentMessageObject.messageOwner.media != null\n        );\n")
+            with self.assertRaisesRegex(patch.PatchError, "condition is not upstream's"):
+                patch.verify_transcribe_button(self.tree(pathlib.Path(d), text))
+        # Nor does the same text closing a later statement stand for it.
+        with tempfile.TemporaryDirectory() as d:
+            text = self.UPSTREAM.replace(patch.TRANSCRIBE_VIEW_ONCE,
+                                         "            currentMessageObject.messageOwner.media != null\n        );\n"
+                                         "        boolean once = (\n" + patch.TRANSCRIBE_VIEW_ONCE)
+            with self.assertRaisesRegex(patch.PatchError, "condition is not upstream's"):
+                patch.verify_transcribe_button(self.tree(pathlib.Path(d), text))
 
 
 class NotServedTest(unittest.TestCase):
@@ -1798,6 +1857,98 @@ class NoAiEditorTest(unittest.TestCase):
                 tree.write(rel, tree.read(rel) + added)
                 with self.assertRaisesRegex(patch.PatchError, message):
                     patch.verify_no_ai_editor(tree)
+
+
+class ServiceAccountTest(unittest.TestCase):
+    # The four places that write the key, formatUserStatus and every
+    # strings.xml, as upstream has them: the key in English only.
+    def tree(self, root):
+        files = {f"{patch.JAVA}/{rel}": "getString(R.string.SupportStatus);\n" for rel in patch.SERVICE_ACCOUNT_USES}
+        files[patch.SERVICE_ACCOUNT_LOCALE] = patch.SERVICE_ACCOUNT_FORMAT[0] + "    }\n"
+        for folder in patch.STRING_RENAMES:
+            line = patch.SERVICE_ACCOUNT_UPSTREAM if folder == "values" else ""
+            files[f"{patch.RES}/{folder}/strings.xml"] = f"<resources>\n{line}</resources>\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "not the service account's text"):
+                patch.verify_service_account(tree)
+            patch.service_account(tree)
+            patch.verify_service_account(tree)
+            self.assertEqual(tree.read(f"{patch.RES}/values/strings.xml"),
+                             '<resources>\n    <string name="SupportStatus">service account</string>\n</resources>\n')
+            self.assertEqual(tree.read(f"{patch.RES}/values-ru/strings.xml"),
+                             '<resources>\n    <string name="SupportStatus">сервисный аккаунт</string>\n</resources>\n')
+            self.assertIn("        if (user != null && user.support) {", tree.read(patch.SERVICE_ACCOUNT_LOCALE))
+            with self.assertRaises(patch.PatchError):
+                patch.service_account(tree)
+
+    def test_every_bundled_language(self):
+        self.assertEqual(set(patch.SERVICE_ACCOUNT_STATUS), set(patch.STRING_RENAMES))
+        for folder, text in patch.SERVICE_ACCOUNT_STATUS.items():
+            with self.subTest(folder=folder):
+                # Plain text: nothing strings.xml would need escaped.
+                self.assertRegex(text, r"^[^\s<>&'\"\\@?%]+( [^\s<>&'\"\\@?%]+)*$")
+                # A status is lower case, as "online" is; a German noun keeps its capital.
+                self.assertEqual(text, text.lower() if folder != "values-de" else "Dienstkonto")
+                self.assertNotIn(text, ("support", "Service notifications"))
+
+    def test_new_place_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            added = f"{patch.JAVA}/ui/Cells/UserCell.java"
+            tree.write(added, "getString(R.string.SupportStatus);\n")
+            with self.assertRaisesRegex(patch.PatchError, "upstream changed it"):
+                patch.service_account(tree)
+            (tree.root / added).unlink()
+            patch.service_account(tree)
+            tree.write(added, "getString(R.string.SupportStatus);\n")
+            with self.assertRaisesRegex(patch.PatchError, "is not read"):
+                patch.verify_service_account(tree)
+
+    def test_upstream_changed(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values/strings.xml"
+            tree.write(rel, '<resources>\n    <string name="SupportStatus">volunteer</string>\n</resources>\n')
+            with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                patch.service_account(tree)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values-ru/strings.xml"
+            tree.write(rel, '<resources>\n    <string name="SupportStatus">поддержка</string>\n</resources>\n')
+            with self.assertRaisesRegex(patch.PatchError, "upstream has a string"):
+                patch.service_account(tree)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            (tree.root / patch.RES / "values-fr").mkdir()
+            tree.write(f"{patch.RES}/values-fr/strings.xml", "<resources>\n</resources>\n")
+            with self.assertRaisesRegex(patch.PatchError, "values-fr"):
+                patch.service_account(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.service_account(tree)
+            for folder, text in patch.SERVICE_ACCOUNT_STATUS.items():
+                rel = f"{patch.RES}/{folder}/strings.xml"
+                xml = tree.read(rel)
+                for damaged in (xml.replace(text, "support"), xml.replace("    <string", "    <string name=\"SupportStatus\">support</string>\n    <string", 1)):
+                    tree.write(rel, damaged)
+                    with self.subTest(folder=folder), self.assertRaisesRegex(patch.PatchError, "not the service account's text"):
+                        patch.verify_service_account(tree)
+                tree.write(rel, xml)
+            java = tree.read(patch.SERVICE_ACCOUNT_LOCALE)
+            tree.write(patch.SERVICE_ACCOUNT_LOCALE, java.replace(patch.SERVICE_ACCOUNT_FORMAT[1], patch.SERVICE_ACCOUNT_FORMAT[0]))
+            with self.assertRaisesRegex(patch.PatchError, "does not name the service account"):
+                patch.verify_service_account(tree)
+            tree.write(patch.SERVICE_ACCOUNT_LOCALE, java)
+            patch.verify_service_account(tree)
 
 
 if __name__ == "__main__":
