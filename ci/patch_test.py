@@ -3,6 +3,7 @@ import hashlib
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1949,6 +1950,235 @@ class ServiceAccountTest(unittest.TestCase):
                 patch.verify_service_account(tree)
             tree.write(patch.SERVICE_ACCOUNT_LOCALE, java)
             patch.verify_service_account(tree)
+
+
+# The checkout ci/fetch-upstream.sh makes, with its submodules; the CI's check
+# job has none and skips the tests that need it.
+UPSTREAM = ROOT / "upstream"
+
+
+def upstream_env():
+    return patch.load_env(ROOT / "upstream.env")
+
+
+class GroupCallsE2ETest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect, with the places
+    # that name the RTMP sheet after the patch, the conference's join with its
+    # key, the camera tabs upstream keeps, and every strings.xml.
+    EXTRA = {
+        patch.VOIP_SERVICE: "final TL_phone.joinGroupCall req = new TL_phone.joinGroupCall();\n"
+                            "req.public_key = conference.getMyPublicKey();\n",
+        patch.CREATE_RTMP_SHEET: "public class CreateRtmpStreamBottomSheet {\n}\n",
+        patch.STORY_PRIVACY_SHEET: "final CreateRtmpStreamBottomSheet[] sheet = new CreateRtmpStreamBottomSheet[1];\n",
+        patch.STORY_MODE_TABS: "photoLayout.setOnClickListener(v -> switchModeInternal(0));\n"
+                               "videoLayout.setOnClickListener(v -> switchModeInternal(1));\n",
+        patch.STORY_RECORDER: "public static final int MODE_LIVE = -1;\n"
+                              "livePeerView.setShowing(mode == MODE_LIVE, true);\n"
+                              "setActionBarButtonVisible(flashButton, mode != MODE_LIVE, animated);\n",
+    }
+
+    def tree(self, root, edits=patch.GROUP_CALLS_E2E_EDITS):
+        files = dict(self.EXTRA)
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "\nx();\n"
+        for folder in patch.E2E_FAILED_TEXT:
+            files[f"{patch.RES}/{folder}/strings.xml"] = "<resources>\n</resources>\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        (root / "TMessagesProj").mkdir(exist_ok=True)
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_group_calls_e2e(tree)
+            patch.group_calls_e2e(tree)
+            patch.verify_group_calls_e2e(tree)
+            voip = tree.read(patch.VOIP_SERVICE)
+            # A chat call joins with the user's key on the chain's last block, and the interface's
+            # conference is one without a chat.
+            self.assertIn("return joinConference != null || conference != null && chat == null;", voip)
+            self.assertIn("\t\t\treq.flags |= 8; // pluma: the key and the join block (ADR 0060)\n", voip)
+            self.assertIn("\t\t\t\tconference = plumaChatConference();", voip)
+            self.assertIn("}, conference != null, isConference());", voip)
+            # VoIPService indents with tabs, and so do the edits.
+            for rel, _, new in patch.GROUP_CALLS_E2E_EDITS:
+                if rel == patch.VOIP_SERVICE:
+                    self.assertNotRegex(new, r"(?m)^ ")
+            native = tree.read(patch.NATIVE_INSTANCE)
+            self.assertIn("noiseSupression, e2e, isConference);", native)
+            jni = tree.read(patch.NATIVE_GROUP_JNI)
+            self.assertIn("    if (e2e) { // pluma", jni)
+            for folder, text in patch.E2E_FAILED_TEXT.items():
+                self.assertIn(f'<string name="{patch.E2E_FAILED_KEY}">{text}</string>',
+                              tree.read(f"{patch.RES}/{folder}/strings.xml"))
+
+    def test_second_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.group_calls_e2e(tree)
+            rels = {rel for rel, _, _ in patch.GROUP_CALLS_E2E_EDITS}
+            patched = {rel: tree.read(rel) for rel in rels}
+            with self.assertRaises(patch.PatchError):
+                patch.group_calls_e2e(tree)
+            # Several edits keep their anchor; a second run writes nothing.
+            for rel, text in patched.items():
+                self.assertEqual(tree.read(rel), text)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.GROUP_CALLS_E2E_EDITS):
+            changed = old[:len(old) // 2] + "added();" + old[len(old) // 2:]
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.GROUP_CALLS_E2E_EDITS)]
+            with self.subTest(edit=i, file=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = {r: tree.read(r) for r, _, _ in edits}
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.group_calls_e2e(tree)
+                for r, text in before.items():
+                    self.assertEqual(tree.read(r), text)
+        # An anchor upstream uses twice.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), patch.GROUP_CALLS_E2E_EDITS + patch.GROUP_CALLS_E2E_EDITS[2:3])
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.group_calls_e2e(tree)
+        # A string of the key upstream already has.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values-de/strings.xml"
+            tree.write(rel, f'<resources>\n    <string name="{patch.E2E_FAILED_KEY}">x</string>\n</resources>\n')
+            with self.assertRaisesRegex(patch.PatchError, "upstream has a string"):
+                patch.group_calls_e2e(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.group_calls_e2e(tree)
+            for rel, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old), patched.replace(new, ""), patched + new):
+                    with self.subTest(file=rel, edit=new.strip().splitlines()[0][:80]):
+                        self.assertNotEqual(text, patched)
+                        tree.write(rel, text)
+                        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                            patch.verify_group_calls_e2e(tree)
+                tree.write(rel, patched)
+            patch.verify_group_calls_e2e(tree)
+            # What upstream could bring back next to the edits.
+            for rel, extra, error in (
+                (patch.VOIP_SERVICE, 'newModeStreaming = object.optBoolean("stream");\n', "still there"),
+                (patch.VOIP_SERVICE, 'isRtmpStream = intent.getBooleanExtra("isRtmpStream", false);\n', "still there"),
+                (patch.VOIP_SERVICE, "startGroupCall(ssrc, json, true);\n", "still there"),
+                (patch.VOIP_SERVICE, "final TL_phone.joinGroupCall req = new TL_phone.joinGroupCall();\n", "without the user's key"),
+                (patch.VOIP_SERVICE, "x(R.string.PlumaCallEncryptionFailed);\n", "self-recovery"),
+                (patch.JOIN_CALL_ALERT, "TL_phone.getGroupCallJoinAs req;\n", "join-as list"),
+                (patch.GROUP_CALL_ACTIVITY, "CreateRtmpStreamBottomSheet.show(null, null, 0, false, null);\n", "a way into it is open"),
+                (patch.STORY_PRIVACY_SHEET, 'items.add(ItemInner.asButton(5, "", ""));\n', "leads to RTMP"),
+                (patch.STORY_MODE_TABS, "liveLayout.setOnClickListener(v -> switchModeInternal(-1));\n", "Live tab is back"),
+                (patch.LINK_MANAGER, "mode = StoryRecorder.MODE_LIVE;\n", "a way into it is open"),
+                (patch.STORY_RECORDER, "mode = MODE_LIVE;\n", "set to the live story mode"),
+                (patch.STORY_RECORDER, "setMode(MODE_LIVE);\n", "set to the live story mode"),
+            ):
+                text = tree.read(rel)
+                with self.subTest(extra=extra):
+                    tree.write(rel, text + extra)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_group_calls_e2e(tree)
+                tree.write(rel, text)
+            # A language without the text, or with another one.
+            rel = f"{patch.RES}/values-uk/strings.xml"
+            xml = tree.read(rel)
+            for damaged in (xml.replace(patch._e2e_failed_line("values-uk"), ""),
+                            xml.replace(patch.E2E_FAILED_TEXT["values-uk"], "x")):
+                tree.write(rel, damaged)
+                with self.assertRaisesRegex(patch.PatchError, "not the text of task 094"):
+                    patch.verify_group_calls_e2e(tree)
+            tree.write(rel, xml)
+            patch.verify_group_calls_e2e(tree)
+
+    def test_report_fields(self):
+        # The fields the code writes are the ones the report names, and none of them carries a
+        # key, a nonce, an emoji or a frame.
+        native = "".join(new for rel, _, new in patch.GROUP_CALLS_E2E_EDITS if rel == patch.NATIVE_GROUP_JNI)
+        written = set(re.findall(r'\\"(\w+)\\":', native))
+        self.assertEqual(written, set(patch.E2E_STATUS_FIELDS[:6]) | set(patch.E2E_STATUS_SENDER_FIELDS))
+        java = "".join(new for rel, _, new in patch.GROUP_CALLS_E2E_EDITS if rel in (patch.CONFERENCE_CALL, patch.VOIP_SERVICE))
+        self.assertEqual(set(re.findall(r'status\.put\("(\w+)", ', java)), set(patch.E2E_STATUS_FIELDS[6:]) | {"encryptFailed"})
+        self.assertIn(f'\\"colibriClass\\":\\"{patch.E2E_STATUS_CLASS}\\"', native)
+        for field in patch.E2E_STATUS_FIELDS + patch.E2E_STATUS_SENDER_FIELDS:
+            with self.subTest(field=field):
+                self.assertNotRegex(field.lower(), r"key|nonce|emoji|secret|frame|payload")
+
+    def test_texts(self):
+        self.assertEqual(set(patch.E2E_FAILED_TEXT), set(patch.STRING_RENAMES))
+        for folder, text in patch.E2E_FAILED_TEXT.items():
+            with self.subTest(folder=folder):
+                self.assertNotIn("Telegram", text)
+                self.assertNotRegex(text, r"(?<!\\)'")
+                self.assertNotRegex(text, r"[<>&\"]")
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        env = upstream_env()
+        if (UPSTREAM / ".git").exists():
+            head = subprocess.run(["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+            self.assertEqual(head.stdout.strip(), env["UPSTREAM_REF"], "./upstream is not the pinned commit")
+            # tgcalls, which the patch edits, at the commit the release records.
+            pinned = subprocess.run(["git", "-C", str(UPSTREAM), "ls-tree", "HEAD", "TMessagesProj/jni/tgcalls"],
+                                    capture_output=True, text=True, check=True).stdout.split()[2]
+            tgcalls = subprocess.run(["git", "-C", str(UPSTREAM / "TMessagesProj/jni/tgcalls"), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True, check=True)
+            self.assertEqual(tgcalls.stdout.strip(), pinned, "TMessagesProj/jni/tgcalls is not the pinned commit")
+        rels = sorted({rel for rel, _, _ in patch.GROUP_CALLS_E2E_EDITS}
+                      | {str(p.relative_to(UPSTREAM)) for p in (UPSTREAM / patch.RES).glob("values*/strings.xml")})
+        java = pathlib.Path(patch.JAVA)
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            # The whole Java tree: the patch checks every file of it for a way into RTMP.
+            shutil.copytree(UPSTREAM / java, root / java)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            others = {p: p.read_bytes() for p in sorted((root / java).rglob("*")) if p.is_file()
+                      and str(p.relative_to(root)) not in original}
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_group_calls_e2e(tree)
+            patch.group_calls_e2e(tree)
+            patch.verify_group_calls_e2e(tree)
+            patched = {rel: tree.read(rel) for rel in rels}
+            # Nothing else changed: each file is upstream's once its edits are taken back, and no
+            # other file of the Java tree was touched.
+            for rel in rels:
+                text = patched[rel]
+                for r, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                    if r == rel:
+                        self.assertEqual(text.count(new), 1, f"{rel}: {new[:60]!r}")
+                        text = text.replace(new, old)
+                if rel.endswith("strings.xml"):
+                    folder = pathlib.Path(rel).parent.name
+                    self.assertEqual(text.count(patch._e2e_failed_line(folder)), 1)
+                    text = text.replace(patch._e2e_failed_line(folder), "")
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            for p, data in others.items():
+                self.assertEqual(p.read_bytes(), data, p)
+            # DAMAGE: each edit taken back on the real tree fails the check.
+            for rel, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                with self.subTest(damage=new.strip().splitlines()[0][:80]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_group_calls_e2e(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_group_calls_e2e(tree)
+            # The real upstream keeps what the verification relies on: the conference's join, the
+            # tabs of the camera, the handler of the RTMP row that no list adds, the live mode that
+            # the camera only compares with.
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("new TL_phone.joinGroupCall()"), 2)
+            self.assertIn("mode == MODE_LIVE", (root / patch.STORY_RECORDER).read_text(encoding="utf-8"))
+            self.assertIn("ItemInner.asButton(OPTION_EDIT_COVER,", patched[patch.STORY_PRIVACY_SHEET])
 
 
 if __name__ == "__main__":
