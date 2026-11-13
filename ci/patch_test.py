@@ -2176,9 +2176,7 @@ class GroupCallsE2ETest(unittest.TestCase):
                      # rule 4: 15 s without a decrypted frame while the own chain is current
                      "PLUMA_E2E_UNDECRYPTED_LIMIT_MS = 15_000;", "conference.chainBehind()",
                      # rule 1: the sticky error, at every tick too
-                     "conference.checkError();",
-                     # CONF_WRITE_CHAIN_INVALID: at most 10 join retries in a row, outside the limit
-                     "PLUMA_CHAIN_RETRIES = 10;"):
+                     "conference.checkError();"):
             with self.subTest(rule=rule):
                 self.assertIn(rule, java)
         # Rule 3: GROUPCALL_FORBIDDEN on any answer of the chain, reads and writes alike.
@@ -2195,6 +2193,40 @@ class GroupCallsE2ETest(unittest.TestCase):
         check = java[java.index("    private void plumaCheckDecryption("):]
         self.assertIn('undecrypted &= sender.getLong("ok") == 0 && sender.getLong("unknownEpoch") + sender.getLong("failed") > 0;', check)
         self.assertIn("if (!undecrypted || conference.chainBehind()) {", check)
+
+    def test_chain_retries(self):
+        java = self.written(patch.VOIP_SERVICE)
+        # ADR 0060 §5: 10 refusals in a row after which the last block did not change, at most
+        # 100 attempts per join while it changes.
+        self.assertIn("PLUMA_CHAIN_STALLED_RETRIES = 10;", java)
+        self.assertIn("PLUMA_CHAIN_JOIN_ATTEMPTS = 100;", java)
+        retry = java[java.index("    private boolean plumaChainRetry() {"):java.index("    private boolean plumaChainJoinBase() {")]
+        self.assertIn("if (plumaChainRetries + 1 >= PLUMA_CHAIN_JOIN_ATTEMPTS) {", retry)
+        self.assertLess(retry.index("return false;"), retry.index("plumaChainRetries++;"))
+        # Moved: the block read is neither the one the refused join was made on nor the refused
+        # join block itself (a read that brought nothing leaves that one); only a stall counts.
+        base = java[java.index("    private boolean plumaChainJoinBase() {"):java.index("    private void plumaChainJoinReset() {")]
+        self.assertIn("if (plumaChainRetries > 0) {", base)
+        self.assertIn("!Arrays.equals(base, plumaChainJoinBase) && !Arrays.equals(base, plumaChainJoinBlock)", base)
+        self.assertIn("plumaChainStalledRetries = moved ? 0 : plumaChainStalledRetries + 1;", base)
+        self.assertIn("if (plumaChainStalledRetries >= PLUMA_CHAIN_STALLED_RETRIES) {", base)
+        self.assertNotIn("PLUMA_CHAIN_JOIN_ATTEMPTS", base)
+        reset = java[java.index("    private void plumaChainJoinReset() {"):]
+        reset = reset[:reset.index("\n    }\n")]
+        for field in ("plumaChainRetries = 0;", "plumaChainStalledRetries = 0;",
+                      "plumaChainJoinBase = null;", "plumaChainJoinBlock = null;"):
+            self.assertIn(field, reset)
+        # Both joins check the chain on the block just read, before the join block is made on
+        # it, and remember the block they send.
+        for join in (java[java.index("    private void plumaJoinOnLastBlock("):java.index("    private static final int PLUMA_CHAIN_STALLED_RETRIES")],
+                     java[java.index("            conference.requestLastBlock(() -> {\n                if (conference == null) {"):]):
+            with self.subTest(join=join[:60]):
+                self.assertLess(join.index("if (!plumaChainJoinBase()) {"), join.index("plumaChainJoinBlock = conference.generateAddSelfBlock();"))
+        # Both refusals go through the cap; a join that went through or starts over counts anew.
+        self.assertEqual(java.count("plumaChainRetry()) {"), 2)
+        self.assertEqual(java.count('error.text.startsWith("CONF_WRITE_CHAIN_INVALID") && conference != null && plumaChainRetry()'), 1)
+        self.assertEqual(java.count("plumaChainJoinReset();"), 4)
+        self.assertNotIn("plumaChainRetries < ", java)
 
     def test_texts(self):
         self.assertEqual(set(patch.E2E_FAILED_TEXT), set(patch.STRING_RENAMES))
@@ -2263,6 +2295,12 @@ class GroupCallsE2ETest(unittest.TestCase):
             # tabs of the camera, the handler of the RTMP row that no list adds, the live mode that
             # the camera only compares with.
             self.assertEqual(patched[patch.VOIP_SERVICE].count("new TL_phone.joinGroupCall()"), 2)
+            # Both joins (a chat call's and a conference's) check whether the chain moved before
+            # the join block is made, and nowhere else is one made.
+            self.assertEqual(original[patch.VOIP_SERVICE].count("conference.generateAddSelfBlock();"), 1)
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("plumaChainJoinBlock = conference.generateAddSelfBlock();"), 2)
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("generateAddSelfBlock()"), 2)
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("if (!plumaChainJoinBase()) {"), 2)
             self.assertIn("mode == MODE_LIVE", (root / patch.STORY_RECORDER).read_text(encoding="utf-8"))
             self.assertIn("ItemInner.asButton(OPTION_EDIT_COVER,", patched[patch.STORY_PRIVACY_SHEET])
             # Upstream shows the record item to whoever manages the call; the patch never does, and

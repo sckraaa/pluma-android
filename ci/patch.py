@@ -5047,7 +5047,10 @@ def verify_service_account(tree):
 #   chain from then on. A join that lost its height to another block
 #   (CONF_WRITE_CHAIN_INVALID) is made again on the new last block, as tdesktop
 #   does (GroupCall::joinFail), in the conference too, where upstream ends the
-#   call (stopSelf()). A join of the instance after the first one (a lost
+#   call (stopSelf()). ADR 0060 §5: 10 refusals in a row after which the last
+#   block did not change end the join; while the chain moves it keeps trying, at
+#   most 100 attempts (everyone rejoining at once after an SFU restart gets one
+#   join through per round). A join of the instance after the first one (a lost
 #   connection, a duplicate SSRC) resets the call object: a new key.
 # - tgcalls encrypts the frames of every group call; a chat call keeps three
 #   video layers (only a conference sends one, GroupInstanceCustomImpl
@@ -5168,19 +5171,63 @@ _VOIP_HELPERS = """\
             if (sharedInstance != this || conference == null || groupCall == null) {
                 return;
             }
-            conference.generateAddSelfBlock();
+            if (!plumaChainJoinBase()) {
+                NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.needShowAlert, 6, "CONF_WRITE_CHAIN_INVALID");
+                hangUp(0);
+                return;
+            }
+            plumaChainJoinBlock = conference.generateAddSelfBlock();
             plumaSendJoinGroupCall(ssrc, json, create);
         });
     }
 
-    // pluma: a join block that lost its height to another block is made again on the new last
-    // block, as tdesktop does (GroupCall::joinFail), at most 10 times in a row (ADR 0060 §5);
-    // these retries keep the key and do not count toward the limit of the self-recovery.
-    private static final int PLUMA_CHAIN_RETRIES = 10;
+    // pluma: a join block that lost its height to another block (CONF_WRITE_CHAIN_INVALID) is made
+    // again on the chain's new last block, as tdesktop does (GroupCall::joinFail). ADR 0060 §5: a
+    // refusal counts toward the limit of 10 in a row only when the last block read after it is
+    // still the one the refused join was made on (the chain stands still, so the refusal is not a
+    // race); while the chain moves the join keeps trying, at most 100 attempts in all
+    // (conference_call_size_limit): when everyone joins again at once after an SFU restart, each
+    // round lets one join through. These retries keep the key and do not count toward the limit
+    // of the self-recovery.
+    private static final int PLUMA_CHAIN_STALLED_RETRIES = 10;
+    private static final int PLUMA_CHAIN_JOIN_ATTEMPTS = 100;
     private int plumaChainRetries;
+    private int plumaChainStalledRetries;
+    private byte[] plumaChainJoinBase; // the last block the join sent was made on
+    private byte[] plumaChainJoinBlock; // the join block sent
 
-    private int plumaChainRetryLimit() {
-        return PLUMA_CHAIN_RETRIES;
+    // On CONF_WRITE_CHAIN_INVALID: whether the join may be made once more, and the retry counted.
+    private boolean plumaChainRetry() {
+        if (plumaChainRetries + 1 >= PLUMA_CHAIN_JOIN_ATTEMPTS) {
+            return false;
+        }
+        plumaChainRetries++;
+        return true;
+    }
+
+    // With the last block just read, before the join block is made on it: false when it is the
+    // 10th refusal in a row after which the chain did not move. A read that brought no block
+    // leaves the refused join block as the call object's last block, and counts as no move.
+    private boolean plumaChainJoinBase() {
+        final byte[] base = conference.getLastBlock();
+        if (plumaChainRetries > 0) {
+            final boolean moved = !Arrays.equals(base, plumaChainJoinBase) && !Arrays.equals(base, plumaChainJoinBlock);
+            plumaChainStalledRetries = moved ? 0 : plumaChainStalledRetries + 1;
+            if (plumaChainStalledRetries >= PLUMA_CHAIN_STALLED_RETRIES) {
+                FileLog.e("[tde2e] the join is refused " + PLUMA_CHAIN_STALLED_RETRIES + " times in a row on a chain that does not move");
+                return false;
+            }
+        }
+        plumaChainJoinBase = base;
+        return true;
+    }
+
+    // A join that went through, or one that starts over.
+    private void plumaChainJoinReset() {
+        plumaChainRetries = 0;
+        plumaChainStalledRetries = 0;
+        plumaChainJoinBase = null;
+        plumaChainJoinBlock = null;
     }
 
     // pluma: self-recovery (ADR 0060 §5). A sticky tde2e error, a chain this client stays behind
@@ -5440,6 +5487,7 @@ _VOIP_EDITS = (
      "            if (rejoin) {\n"
      "                conference.reset();\n"
      "            }\n"
+     "            plumaChainJoinReset();\n"
      "            plumaJoinOnLastBlock(ssrc, json, create);\n"
      "        }\n"
      "    }\n"
@@ -5472,7 +5520,7 @@ _VOIP_EDITS = (
      "                        // pluma: the call object takes the join's blocks and polls the chain, as a\n"
      "                        // conference's does (ADR 0060).\n"
      "                        if (conference != null) {\n"
-     "                            plumaChainRetries = 0;\n"
+     "                            plumaChainJoinReset();\n"
      "                            conference.joined();\n"
      "                            for (TL_update.TL_updateGroupCallChainBlocks upd : blockUpdates) {\n"
      "                                conference.applyUpdate(0, upd, true, null);\n"
@@ -5493,20 +5541,42 @@ _VOIP_EDITS = (
      "                        } else {\n",
      '                        } else if ("GROUPCALL_SSRC_DUPLICATE_MUCH".equals(error.text)) {\n'
      "                            createGroupInstance(CAPTURE_DEVICE_CAMERA, false, false);\n"
-     '                        } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID") && conference != null && plumaChainRetries < plumaChainRetryLimit()) {\n'
-     "                            // pluma: another block took the height first (ADR 0060): the join block is made\n"
-     "                            // again on the chain's new last block, as tdesktop does (GroupCall::joinFail).\n"
-     "                            plumaChainRetries++;\n"
+     '                        } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID") && conference != null && plumaChainRetry()) {\n'
+     "                            // pluma: another block took the height first (ADR 0060 §5): the join block is\n"
+     "                            // made again on the chain's new last block, as tdesktop does (GroupCall::joinFail).\n"
      "                            plumaJoinOnLastBlock(ssrc, json, create);\n"
      "                        } else {\n"),
-    # The conference's join: the same retry instead of ending the call.
+    # The conference's join: the same retry instead of ending the call. A join that starts over
+    # (reconnect) starts its counts over; one that follows a refusal checks whether the chain moved.
+    ("            if (reconnect) {\n"
+     "                conference.reset();\n"
+     "            }\n"
+     "            conference.requestLastBlock(() -> {\n"
+     "                if (conference == null) {\n"
+     "                    return;\n"
+     "                }\n"
+     "                conference.generateAddSelfBlock();\n"
+     "                join.run();\n",
+     "            if (reconnect) {\n"
+     "                conference.reset();\n"
+     "                plumaChainJoinReset(); // pluma: ADR 0060 §5\n"
+     "            }\n"
+     "            conference.requestLastBlock(() -> {\n"
+     "                if (conference == null) {\n"
+     "                    return;\n"
+     "                }\n"
+     "                if (!plumaChainJoinBase()) { // pluma: the chain does not move (ADR 0060 §5)\n"
+     "                    stopSelf();\n"
+     "                    return;\n"
+     "                }\n"
+     "                plumaChainJoinBlock = conference.generateAddSelfBlock();\n"
+     "                join.run();\n"),
     ('                            } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID")) {\n'
      "                                stopSelf();\n",
      '                            } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID")) {\n'
      "                                // pluma: another block took the height first (ADR 0060): join again on the\n"
      "                                // chain's new last block, as tdesktop does (GroupCall::joinFail).\n"
-     "                                if (plumaChainRetries < plumaChainRetryLimit()) {\n"
-     "                                    plumaChainRetries++;\n"
+     "                                if (plumaChainRetry()) {\n"
      "                                    startConferenceGroupCall(false, ssrc, json, false);\n"
      "                                } else {\n"
      "                                    stopSelf();\n"
@@ -5515,7 +5585,7 @@ _VOIP_EDITS = (
      "                            conference.joined();\n",
      "                            if (conference == null) return;\n"
      "                            conference.joined();\n"
-     "                            plumaChainRetries = 0; // pluma: ADR 0060\n"
+     "                            plumaChainJoinReset(); // pluma: ADR 0060\n"
      "                            plumaStartE2EStatus();\n"),
     ("                    if (conference != null) {\n"
      "                        startConferenceGroupCall(false, ssrc, json, !first[0]);\n"
