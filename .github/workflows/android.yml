@@ -35,6 +35,10 @@ on:
         description: "A development build for the stand at this IPv4 instead of 10.0.2.2, e.g. the stand machine's Wi-Fi address, or 127.0.0.1 with adb reverse"
         required: false
         default: ""
+      mandatory:
+        description: "Publish the build as a mandatory update: a full-screen update without Skip (main, without abis and dev_address)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -53,6 +57,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: A mandatory update needs a published build
+        if: github.event_name == 'workflow_dispatch' && inputs.mandatory && (github.ref != 'refs/heads/main' || inputs.abis != '' || inputs.dev_address != '')
+        run: |
+          echo "::error::mandatory marks the release of a published build: a run of main without abis and dev_address."
+          exit 1
       - name: Patch script tests
         run: python3 -I ci/patch_test.py -v
       - name: Shell scripts
@@ -178,6 +187,9 @@ jobs:
           PLUMA_SIGNING_CERT_SHA256: ${{ vars.PLUMA_SIGNING_CERT_SHA256 }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
           INPUT_ABIS: ${{ inputs.abis }}
+          # Mandatory only from a manual run with "mandatory" ticked; a
+          # push publishes an optional update.
+          PLUMA_RELEASE_MANDATORY: ${{ github.event_name == 'workflow_dispatch' && inputs.mandatory }}
           PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
           APK: ${{ needs.build.outputs.apk }}
         run: |
