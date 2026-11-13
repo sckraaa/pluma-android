@@ -14,7 +14,9 @@ the app makes itself and pluma.chat taken wherever t.me is, no Telegram
 blue in the colours of the default themes, a birthday notice that leads to
 the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
 Messages that ask for no Premium, premium stickers sent without Premium,
-no way into the AI message editor).
+no way into the AI message editor, no group call joined without its key, no
+way into RTMP streams, live stories or call recording, none of Telegram's
+colours on the call screens).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -390,6 +392,8 @@ def patch(tree, c):
 
     video_quality(tree)
     call_parameters(tree)
+    group_calls_e2e(tree)
+    call_colours(tree)
     birthdays(tree)
     sticker_sets(tree)
     saved_tags(tree)
@@ -4136,6 +4140,8 @@ def verify(tree, c):
             raise PatchError(f"{rel}: Telegram's account type is still there")
     verify_video_quality(tree)
     verify_call_parameters(tree)
+    verify_group_calls_e2e(tree)
+    verify_call_colours(tree)
     verify_birthdays(tree)
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
@@ -5016,6 +5022,1966 @@ def verify_service_account(tree):
     uses = _service_account_uses(tree)
     if uses != {**SERVICE_ACCOUNT_USES, "messenger/LocaleController.java": 1}:
         raise PatchError(f"{JAVA}: {SERVICE_ACCOUNT_KEY} is written in {uses}; a place upstream added is not read")
+
+
+# --- Group calls end to end (task 094) ----------------------------------------
+# ADR 0060 of the server repository: every group call is end-to-end, those of
+# groups and channels too, and the server serves no other. Upstream encrypts
+# only a conference (VoIPService.isConference(): joinConference or conference
+# set); a chat call joins without a key (VoIPService.startGroupCall) and tgcalls
+# gets no frame encryption (makeGroup(..., conference != null)). The patch
+# gives a chat or channel call the conference's tde2e call object
+# (ConferenceCall) and keeps the interface of a chat call:
+# - VoIPService.isConference() is the interface's flag (a conference has no
+#   chat); `conference != null` stays the crypto flag. Every place that tests
+#   either (VoIPService, ChatObject, MessagesController, GroupCallActivity and
+#   the call's other views) was read: the chat call's updates are applied by
+#   MessagesController (processParticipantsUpdate, processGroupCallUpdate), so
+#   VoIPService applies them itself only in a conference; ChatObject keeps the
+#   participants who are in the chain but not in the call for every end-to-end
+#   call; the rest of `conference != null` is crypto and now holds for every
+#   group call, and the rest of isConference() is the conference's interface.
+# - The join (startGroupCall) asks the chain's last block, makes the block that
+#   adds the user on it and sends it with the user's key, as the conference's
+#   join does; the join's chain blocks go to the call object, which polls the
+#   chain from then on. A join that lost its height to another block
+#   (CONF_WRITE_CHAIN_INVALID) is made again on the new last block, as tdesktop
+#   does (GroupCall::joinFail), in the conference too, where upstream ends the
+#   call (stopSelf()). ADR 0060 §5: 10 refusals in a row after which the last
+#   block did not change end the join; while the chain moves it keeps trying, at
+#   most 100 attempts (everyone rejoining at once after an SFU restart gets one
+#   join through per round). A join of the instance after the first one (a lost
+#   connection, a duplicate SSRC) resets the call object: a new key.
+# - tgcalls encrypts the frames of every group call; a chat call keeps three
+#   video layers (only a conference sends one, GroupInstanceCustomImpl
+#   generateSsrcs), as ADR 0060 decides; NativeInstance.makeGroup takes both
+#   flags.
+# - The emoji row of the key in the call's list (GroupCallActivity) shows in
+#   every end-to-end call.
+# - Self-recovery (ADR 0060 §5): any tde2e failure in the call object (upstream
+#   logs it and stops the queue, ConferenceCall.readQueue), a chain this client
+#   stays behind for 12 s, or GROUPCALL_FORBIDDEN on reading the chain (the
+#   server's answer to one removed from it) makes the client join again with a
+#   new key, as tdesktop does on any failure ("TdE2E: Got failure, scheduling
+#   rejoin!"; tde2e_api.cpp Call::apply fails on every error); at most three
+#   times in five minutes, then the call ends with PlumaCallEncryptionFailed.
+# - The E2E status report (ADR 0060 §5): every 5 s, over the data channel to the
+#   SFU, a JSON message of colibriClass "PlumaE2EStatus" (E2E_STATUS_FIELDS):
+#   the heights the client has applied, a prefix of the hash of its last block
+#   as the server stores it, the error of its call object, and the frame
+#   counters per sender from the encrypt/decrypt callback of tgcalls (the JNI
+#   of NativeInstance), with 8-byte prefixes of the epoch hashes the frames name
+#   in the clear. No key, nonce, emoji or frame bytes. tgcalls gets a method to
+#   send a message of the client's own over its data channel.
+# - Removal of who has left (ConferenceCall.updateParticipants) waits for the
+#   whole participant list: a chat call loads it in pages of 20, so an end-to-
+#   end call loads up to conference_call_size_limit at once.
+# - No "join as": the call is joined as the user (the key in the chain is the
+#   user's; tdesktop passes userId 0 for a channel and cannot decrypt). The
+#   join-as list is never asked for (JoinCallAlert), a channel or chat peer
+#   from the intent is dropped, and the "display as" row stays hidden.
+# - No RTMP and no live stories: the "stream with another app" row of the
+#   sheet that starts a call (CreateGroupCallBottomSheet), the stream mode a
+#   join answer could switch to (its parts come from the server unencrypted),
+#   the RTMP flag of a new call, the Live tab of the story camera
+#   (StoryModeTabs), the link that opens the camera in the live mode
+#   (LinkManager, "post/live") and the RTMP rows of the live story settings.
+# Group call messages stay as upstream has them (the server does not serve
+# them, ADR 0060).
+CONFERENCE_CALL = f"{VOIP}/ConferenceCall.java"
+VOIP_SERVICE = f"{VOIP}/VoIPService.java"
+GROUP_CALL_ACTIVITY = "TMessagesProj/src/main/java/org/telegram/ui/GroupCallActivity.java"
+CHAT_OBJECT = "TMessagesProj/src/main/java/org/telegram/messenger/ChatObject.java"
+JOIN_CALL_ALERT = "TMessagesProj/src/main/java/org/telegram/ui/Components/JoinCallAlert.java"
+CREATE_GROUP_CALL_SHEET = "TMessagesProj/src/main/java/org/telegram/ui/Components/CreateGroupCallBottomSheet.java"
+CREATE_RTMP_SHEET = "TMessagesProj/src/main/java/org/telegram/ui/Components/CreateRtmpStreamBottomSheet.java"
+STORY_MODE_TABS = "TMessagesProj/src/main/java/org/telegram/ui/Stories/recorder/StoryModeTabs.java"
+STORY_PRIVACY_SHEET = "TMessagesProj/src/main/java/org/telegram/ui/Stories/recorder/StoryPrivacyBottomSheet.java"
+STORY_RECORDER = "TMessagesProj/src/main/java/org/telegram/ui/Stories/recorder/StoryRecorder.java"
+LINK_MANAGER = "TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java"
+NATIVE_GROUP_JNI = "TMessagesProj/jni/voip/org_telegram_messenger_voip_Instance.cpp"
+TDE2E_BRIDGE = "TMessagesProj/jni/tde2e/bridge.cpp"
+TGCALLS_GROUP = f"{TGCALLS}/group/GroupInstanceCustomImpl.cpp"
+TGCALLS_GROUP_H = f"{TGCALLS}/group/GroupInstanceCustomImpl.h"
+E2E_STATUS_CLASS = "PlumaE2EStatus"
+# PlumaE2EStatus v1 (ADR 0060 §5 of the server repository): every field is
+# required and no other is allowed. Native (the frame counters of tgcalls):
+# "colibriClass", "v" (1), "encrypted" and "encryptFailed" (own frames encrypted
+# and failed since the last report), "sendEpochs" (hash prefixes of the epochs
+# the last own frame names, at most 15), "decryptEpochs" (those the frames
+# decrypted since the last report name, at most 15), "unknownEpochs" (those of
+# the frames refused with Decrypt_UnknownEpoch since the last report, the first
+# 8), "senders" (per sender with frames since the last report: "user", "ok",
+# "unknownEpoch", "tooOld", "duplicate", "failed", "lastOkMs": milliseconds
+# since its last decrypted frame, -1 for never). Java: "seq" (from 1 after every
+# join), "height" (the applied height of sub-chain 0, -1 without a state),
+# "lastBlock" (hash prefix of the block at that height as the server stores it,
+# "" without a state), "offset0" and "offset1" (the next offset each sub-chain
+# is polled from, -1 before it is known), "error" (the sticky tde2e error code
+# of the call object, 0 while it works). Counters and the epoch lists of an
+# interval are deltas since the last report; the rest are current values.
+E2E_STATUS_NATIVE_FIELDS = ("colibriClass", "v", "encrypted", "encryptFailed", "sendEpochs", "decryptEpochs",
+                            "unknownEpochs", "senders")
+E2E_STATUS_JAVA_FIELDS = ("seq", "height", "lastBlock", "offset0", "offset1", "error")
+E2E_STATUS_FIELDS = E2E_STATUS_NATIVE_FIELDS + E2E_STATUS_JAVA_FIELDS
+E2E_STATUS_SENDER_FIELDS = ("user", "ok", "unknownEpoch", "tooOld", "duplicate", "failed", "lastOkMs")
+E2E_FAILED_KEY = "PlumaCallEncryptionFailed"
+E2E_FAILED_TEXT = {
+    "values": "The call\\'s end-to-end encryption could not be restored. Join the call again.",
+    "values-ar": "تعذّرت استعادة التشفير التام بين الطرفين للمكالمة. انضم إلى المكالمة مرة أخرى.",
+    "values-de": "Die Ende-zu-Ende-Verschlüsselung des Anrufs konnte nicht wiederhergestellt werden. Tritt dem Anruf erneut bei.",
+    "values-es": "No se pudo restablecer el cifrado de extremo a extremo de la llamada. Vuelve a unirte a la llamada.",
+    "values-it": "Impossibile ripristinare la crittografia end-to-end della chiamata. Unisciti di nuovo alla chiamata.",
+    "values-ko": "통화의 종단 간 암호화를 복원하지 못했습니다. 통화에 다시 참여하세요.",
+    "values-nl": "De end-to-end-versleuteling van het gesprek kon niet worden hersteld. Neem opnieuw deel aan het gesprek.",
+    "values-pt-rBR": "Não foi possível restaurar a criptografia de ponta a ponta da chamada. Entre na chamada novamente.",
+    "values-ru": "Не удалось восстановить сквозное шифрование звонка. Войдите в звонок снова.",
+    "values-uk": "Не вдалося відновити наскрізне шифрування дзвінка. Увійдіть у дзвінок знову.",
+}
+
+
+def _tabbed(text):
+    """VoIPService indents with tabs: the edits are written with four spaces."""
+    return re.sub(r"(?m)^((?:    )+)", lambda m: "\t" * (len(m.group(1)) // 4), text)
+
+
+_VOIP_HELPERS = """\
+    // pluma: every group call is end-to-end (ADR 0060). A chat or channel call keeps the
+    // interface of a chat call and takes the conference's tde2e call object: it joins with a
+    // key and a block, applies the chain's blocks, encrypts its frames and shows the emoji.
+    private ConferenceCall plumaChatConference() {
+        final ConferenceCall call = new ConferenceCall(currentAccount, UserConfig.getInstance(currentAccount).getClientUserId()) {
+            @Override
+            protected void gotCallId(long call_id) {
+                for (int a = 0; a < 2; ++a) {
+                    if (tgVoip[a] != null) {
+                        tgVoip[a].setConferenceCallId(call_id);
+                    }
+                }
+            }
+        };
+        call.inputGroupCall = groupCall.getInputGroupCall();
+        call.groupCall = groupCall.call;
+        return call;
+    }
+
+    // pluma: the join block is made on the chain's last block, as the conference's join does.
+    private void plumaJoinOnLastBlock(int ssrc, String json, boolean create) {
+        conference.requestLastBlock(() -> {
+            if (sharedInstance != this || conference == null || groupCall == null) {
+                return;
+            }
+            if (!plumaChainJoinBase()) {
+                NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.needShowAlert, 6, "CONF_WRITE_CHAIN_INVALID");
+                hangUp(0);
+                return;
+            }
+            plumaChainJoinBlock = conference.generateAddSelfBlock();
+            plumaSendJoinGroupCall(ssrc, json, create);
+        });
+    }
+
+    // pluma: a join block that lost its height to another block (CONF_WRITE_CHAIN_INVALID) is made
+    // again on the chain's new last block, as tdesktop does (GroupCall::joinFail). ADR 0060 §5: a
+    // refusal counts toward the limit of 10 in a row only when the last block read after it is
+    // still the one the refused join was made on (the chain stands still, so the refusal is not a
+    // race); while the chain moves the join keeps trying, at most 100 attempts in all
+    // (conference_call_size_limit): when everyone joins again at once after an SFU restart, each
+    // round lets one join through. These retries keep the key and do not count toward the limit
+    // of the self-recovery.
+    private static final int PLUMA_CHAIN_STALLED_RETRIES = 10;
+    private static final int PLUMA_CHAIN_JOIN_ATTEMPTS = 100;
+    private int plumaChainRetries;
+    private int plumaChainStalledRetries;
+    private byte[] plumaChainJoinBase; // the last block the join sent was made on
+    private byte[] plumaChainJoinBlock; // the join block sent
+
+    // On CONF_WRITE_CHAIN_INVALID: whether the join may be made once more, and the retry counted.
+    private boolean plumaChainRetry() {
+        if (plumaChainRetries + 1 >= PLUMA_CHAIN_JOIN_ATTEMPTS) {
+            return false;
+        }
+        plumaChainRetries++;
+        return true;
+    }
+
+    // With the last block just read, before the join block is made on it: false when it is the
+    // 10th refusal in a row after which the chain did not move. A read that brought no block
+    // leaves the refused join block as the call object's last block, and counts as no move.
+    private boolean plumaChainJoinBase() {
+        final byte[] base = conference.getLastBlock();
+        if (plumaChainRetries > 0) {
+            final boolean moved = !Arrays.equals(base, plumaChainJoinBase) && !Arrays.equals(base, plumaChainJoinBlock);
+            plumaChainStalledRetries = moved ? 0 : plumaChainStalledRetries + 1;
+            if (plumaChainStalledRetries >= PLUMA_CHAIN_STALLED_RETRIES) {
+                FileLog.e("[tde2e] the join is refused " + PLUMA_CHAIN_STALLED_RETRIES + " times in a row on a chain that does not move");
+                return false;
+            }
+        }
+        plumaChainJoinBase = base;
+        return true;
+    }
+
+    // A join that went through, or one that starts over.
+    private void plumaChainJoinReset() {
+        plumaChainRetries = 0;
+        plumaChainStalledRetries = 0;
+        plumaChainJoinBase = null;
+        plumaChainJoinBlock = null;
+    }
+
+    // pluma: self-recovery (ADR 0060 §5). A sticky tde2e error, a chain this client stays behind
+    // for 12 s, GROUPCALL_FORBIDDEN on the chain, or 15 s in which no sender's frame decrypts
+    // makes it join again with a new key, as tdesktop does on any tde2e failure ("TdE2E: Got
+    // failure, scheduling rejoin!"). At most three times in a rolling five minutes, after 0, 2
+    // and 5 s plus up to 1 s at random (simultaneous rejoins collide on the chain's height),
+    // then the call ends with a message. While a rejoin is pending or under way no condition is
+    // checked: the call object is not joined and the reports wait for the new join.
+    private static final int PLUMA_E2E_REJOINS = 3;
+    private static final long PLUMA_E2E_REJOIN_WINDOW_MS = 5 * 60 * 1000;
+    private static final long[] PLUMA_E2E_REJOIN_DELAYS_MS = {0, 2000, 5000};
+    private static final int PLUMA_E2E_REJOIN_JITTER_MS = 1000;
+    private final ArrayList<Long> plumaE2ERejoins = new ArrayList<>();
+    private boolean plumaRejoinPending;
+
+    private final Runnable plumaRejoinRunnable = () -> {
+        plumaRejoinPending = false;
+        if (sharedInstance != this || conference == null || tgVoip[CAPTURE_DEVICE_CAMERA] == null
+                || currentState == STATE_HANGING_UP || currentState == STATE_ENDED) {
+            return;
+        }
+        createGroupInstance(CAPTURE_DEVICE_CAMERA, false, false);
+    };
+
+    public void plumaE2EFailed() {
+        if (sharedInstance != this || conference == null || tgVoip[CAPTURE_DEVICE_CAMERA] == null || plumaRejoinPending
+                || currentState == STATE_HANGING_UP || currentState == STATE_ENDED) {
+            return;
+        }
+        final long now = SystemClock.elapsedRealtime();
+        while (!plumaE2ERejoins.isEmpty() && now - plumaE2ERejoins.get(0) > PLUMA_E2E_REJOIN_WINDOW_MS) {
+            plumaE2ERejoins.remove(0);
+        }
+        if (plumaE2ERejoins.size() >= PLUMA_E2E_REJOINS) {
+            FileLog.e("[tde2e] the call's encryption failed again, leaving the call");
+            final BaseFragment lastFragment = LaunchActivity.getSafeLastFragment();
+            if (lastFragment != null) {
+                BulletinFactory.of(lastFragment)
+                    .createSimpleBulletin(R.raw.error, LocaleController.getString(R.string.PlumaCallEncryptionFailed))
+                    .show()
+                    .hideAfterBottomSheet = false;
+            }
+            hangUp(0);
+            return;
+        }
+        final long delay = PLUMA_E2E_REJOIN_DELAYS_MS[plumaE2ERejoins.size()] + Utilities.random.nextInt(PLUMA_E2E_REJOIN_JITTER_MS + 1);
+        plumaE2ERejoins.add(now);
+        plumaRejoinPending = true;
+        AndroidUtilities.cancelRunOnUIThread(plumaE2EStatusRunnable);
+        FileLog.d("[tde2e] the call's encryption failed, joining again with a new key in " + delay + " ms");
+        AndroidUtilities.runOnUIThread(plumaRejoinRunnable, delay);
+    }
+
+    // pluma: the E2E status report, PlumaE2EStatus v1 (ADR 0060 §5): every 5 s after a join,
+    // over the data channel of the main connection to the SFU, only while that channel is open;
+    // a report not sent leaves its counters to the next one. The frame counters come from
+    // tgcalls, the chain's state from the call object; no key, nonce, emoji or frame bytes.
+    private static final long PLUMA_E2E_STATUS_INTERVAL_MS = 5000;
+    private static final int PLUMA_E2E_STATUS_MAX_BYTES = 16 * 1024;
+    private static final int PLUMA_E2E_STATUS_MAX_SENDERS = 100;
+    // Rule 4 of the self-recovery: frames come in and none decrypts for 15 s while the client's
+    // own chain is current; Web K's synchronization watchdog waits as long
+    // (groupCallInstance.ts:51).
+    private static final long PLUMA_E2E_UNDECRYPTED_LIMIT_MS = 15_000;
+    private final Runnable plumaE2EStatusRunnable = this::plumaSendE2EStatus;
+    private int plumaE2EStatusSeq;
+    private long plumaE2EStatusAt;
+    private long plumaUndecryptedSince;
+
+    // At every join: seq from 1, the counters of the frames before it dropped.
+    private void plumaStartE2EStatus() {
+        AndroidUtilities.cancelRunOnUIThread(plumaE2EStatusRunnable);
+        plumaE2EStatusSeq = 0;
+        plumaE2EStatusAt = SystemClock.elapsedRealtime();
+        plumaUndecryptedSince = 0;
+        for (int a = 0; a < 2; ++a) {
+            if (tgVoip[a] != null) {
+                tgVoip[a].takeE2EStats();
+            }
+        }
+        AndroidUtilities.runOnUIThread(plumaE2EStatusRunnable, PLUMA_E2E_STATUS_INTERVAL_MS);
+    }
+
+    private void plumaSendE2EStatus() {
+        final NativeInstance instance = tgVoip[CAPTURE_DEVICE_CAMERA];
+        if (sharedInstance != this || conference == null || instance == null || plumaRejoinPending || !conference.joined) {
+            return;
+        }
+        conference.checkError();
+        try {
+            if (instance.isDataChannelOpen()) {
+                final String frames = instance.takeE2EStats();
+                if (frames != null) {
+                    final JSONObject status = new JSONObject(frames);
+                    final NativeInstance screen = tgVoip[CAPTURE_DEVICE_SCREEN];
+                    final String screenFrames = screen != null ? screen.takeE2EStats() : null;
+                    if (screenFrames != null) {
+                        final JSONObject screenStatus = new JSONObject(screenFrames);
+                        status.put("encrypted", status.getLong("encrypted") + screenStatus.getLong("encrypted"));
+                        status.put("encryptFailed", status.getLong("encryptFailed") + screenStatus.getLong("encryptFailed"));
+                    }
+                    status.put("seq", ++plumaE2EStatusSeq);
+                    conference.putE2EStatus(status);
+                    plumaCheckDecryption(status.getJSONArray("senders"));
+                    instance.sendDataChannelMessage(plumaFitE2EStatus(status));
+                }
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        if (!plumaRejoinPending) {
+            AndroidUtilities.runOnUIThread(plumaE2EStatusRunnable, PLUMA_E2E_STATUS_INTERVAL_MS);
+        }
+    }
+
+    // Rule 4: every sender with frames in the interval decrypted none of them and had frames
+    // refused (an unknown epoch or another failure), for 15 s, while the own chain is current.
+    // A sender that alone fails to decrypt is the sender's fault and ends the 15 s; an interval
+    // without frames neither starts nor ends them.
+    private void plumaCheckDecryption(org.json.JSONArray senders) throws org.json.JSONException {
+        final long now = SystemClock.elapsedRealtime();
+        final long intervalStart = plumaE2EStatusAt;
+        plumaE2EStatusAt = now;
+        if (senders.length() == 0) {
+            return;
+        }
+        boolean undecrypted = true;
+        for (int i = 0; i < senders.length(); i++) {
+            final JSONObject sender = senders.getJSONObject(i);
+            undecrypted &= sender.getLong("ok") == 0 && sender.getLong("unknownEpoch") + sender.getLong("failed") > 0;
+        }
+        if (!undecrypted || conference.chainBehind()) {
+            plumaUndecryptedSince = 0;
+            return;
+        }
+        if (plumaUndecryptedSince == 0) {
+            plumaUndecryptedSince = intervalStart;
+        }
+        if (now - plumaUndecryptedSince >= PLUMA_E2E_UNDECRYPTED_LIMIT_MS) {
+            plumaUndecryptedSince = 0;
+            FileLog.e("[tde2e] no frame decrypted for " + (PLUMA_E2E_UNDECRYPTED_LIMIT_MS / 1000) + " s");
+            plumaE2EFailed();
+        }
+    }
+
+    // At most 100 senders and 16 KiB: the senders whose last decrypted frame is the oldest go
+    // first (PlumaE2EStatus v1); the rest stay sorted by user, as tgcalls writes them.
+    private static String plumaFitE2EStatus(JSONObject status) throws org.json.JSONException {
+        String text = status.toString();
+        final org.json.JSONArray senders = status.getJSONArray("senders");
+        if (senders.length() <= PLUMA_E2E_STATUS_MAX_SENDERS && text.length() <= PLUMA_E2E_STATUS_MAX_BYTES) {
+            return text;
+        }
+        final ArrayList<JSONObject> kept = new ArrayList<>();
+        for (int i = 0; i < senders.length(); i++) {
+            kept.add(senders.getJSONObject(i));
+        }
+        final ArrayList<JSONObject> byAge = new ArrayList<>(kept);
+        Collections.sort(byAge, (a, b) -> Long.compare(b.optLong("lastOkMs"), a.optLong("lastOkMs")));
+        for (JSONObject oldest : byAge) {
+            if (kept.size() <= PLUMA_E2E_STATUS_MAX_SENDERS && text.length() <= PLUMA_E2E_STATUS_MAX_BYTES) {
+                break;
+            }
+            kept.remove(oldest);
+            status.put("senders", new org.json.JSONArray(kept));
+            text = status.toString();
+        }
+        return text;
+    }
+
+"""
+
+_VOIP_EDITS = (
+    # The interface's conference; `conference` itself is the crypto flag.
+    ("    public ConferenceCall conference;\n"
+     "    @Override\n"
+     "    public boolean isConference() {\n"
+     "        return joinConference != null || conference != null;\n"
+     "    }\n",
+     "    public ConferenceCall conference;\n"
+     "    // pluma: a conference as the interface sees it. Every group call carries the tde2e call\n"
+     "    // object (ADR 0060); a chat or channel call keeps the interface of a chat call.\n"
+     "    @Override\n"
+     "    public boolean isConference() {\n"
+     "        return joinConference != null || conference != null && chat == null;\n"
+     "    }\n"),
+    ('        isRtmpStream = intent.getBooleanExtra("isRtmpStream", false);\n',
+     "        isRtmpStream = false; // pluma: no RTMP streams (ADR 0060)\n"),
+    ('        scheduleDate = intent.getIntExtra("scheduleDate", 0);\n',
+     "        // pluma: a group call is joined as the user only (ADR 0060): the key in the call's chain\n"
+     "        // is the user's, and the server refuses another join_as.\n"
+     "        if (groupCallPeer != null && !(groupCallPeer instanceof TLRPC.TL_inputPeerUser)) {\n"
+     "            groupCallPeer = null;\n"
+     "        }\n"
+     "        hasFewPeers = false;\n"
+     '        scheduleDate = intent.getIntExtra("scheduleDate", 0);\n'),
+    # MessagesController applies a chat call's updates to the same ChatObject.Call.
+    ("        if (conference != null) {\n"
+     "            groupCall.processParticipantsUpdate(update, false);\n",
+     "        if (conference != null) {\n"
+     "            if (isConference()) { // pluma: MessagesController applies a chat call's update\n"
+     "                groupCall.processParticipantsUpdate(update, false);\n"
+     "            }\n"),
+    ("        if (conference != null) {\n"
+     "            groupCall.processGroupCallUpdate(call);\n"
+     "        }\n",
+     "        if (isConference()) { // pluma: MessagesController applies a chat call's update\n"
+     "            groupCall.processGroupCallUpdate(call);\n"
+     "        }\n"),
+    ('                newModeStreaming = object.optBoolean("stream");\n',
+     "                // pluma: never the stream mode (ADR 0060): its parts come from the server unencrypted.\n"
+     "                newModeStreaming = false;\n"),
+    ("    private void startGroupCall(int ssrc, String json, boolean create) {\n"
+     "        if (sharedInstance != this) {\n",
+     _VOIP_HELPERS +
+     "    private void startGroupCall(int ssrc, String json, boolean create) {\n"
+     "        startGroupCall(ssrc, json, create, false);\n"
+     "    }\n"
+     "\n"
+     "    // pluma: rejoin: the instance joins again (a lost connection, a duplicate SSRC); the call\n"
+     "    // object starts over with a new key, as a conference's does (ADR 0060).\n"
+     "    private void startGroupCall(int ssrc, String json, boolean create, boolean rejoin) {\n"
+     "        if (sharedInstance != this) {\n"),
+    ("            if (groupCall == null && chat != null) {\n"
+     "                groupCall = MessagesController.getInstance(currentAccount).getGroupCall(chat.id, false);\n"
+     "                if (groupCall != null) {\n"
+     "                    groupCall.setSelfPeer(groupCallPeer);\n"
+     "                }\n"
+     "            }\n",
+     "            if (groupCall == null && chat != null) {\n"
+     "                groupCall = MessagesController.getInstance(currentAccount).getGroupCall(chat.id, false);\n"
+     "                if (groupCall != null) {\n"
+     "                    groupCall.setSelfPeer(groupCallPeer);\n"
+     "                }\n"
+     "            }\n"
+     "            if (groupCall != null && conference == null) {\n"
+     "                conference = plumaChatConference(); // pluma: before the instance, which encrypts with it\n"
+     "            }\n"),
+    # The join goes out on the chain's last block, from a method of its own.
+    ("            dispatchStateChanged(STATE_WAIT_INIT);\n"
+     "            if (BuildVars.LOGS_ENABLED) {\n"
+     '                FileLog.d("initital source = " + ssrc);\n'
+     "            }\n"
+     "            final TL_phone.joinGroupCall req = new TL_phone.joinGroupCall();\n",
+     "            dispatchStateChanged(STATE_WAIT_INIT);\n"
+     "            if (BuildVars.LOGS_ENABLED) {\n"
+     '                FileLog.d("initital source = " + ssrc);\n'
+     "            }\n"
+     "            // pluma: the join carries the user's key and the block that adds them to the call's\n"
+     "            // chain (ADR 0060). An instance made without frame encryption never joins.\n"
+     "            if (conference == null) {\n"
+     '                FileLog.e("[tde2e] a group call without its call object, leaving it");\n'
+     "                hangUp(0);\n"
+     "                return;\n"
+     "            }\n"
+     "            if (rejoin) {\n"
+     "                conference.reset();\n"
+     "            }\n"
+     "            plumaChainJoinReset();\n"
+     "            plumaJoinOnLastBlock(ssrc, json, create);\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "    private void plumaSendJoinGroupCall(int ssrc, String json, boolean create) {\n"
+     "        {\n"
+     "            final TL_phone.joinGroupCall req = new TL_phone.joinGroupCall();\n"),
+    ("            req.call = groupCall.getInputGroupCall();\n"
+     "            req.params = new TLRPC.TL_dataJSON();\n"
+     "            req.params.data = json;\n",
+     "            req.call = groupCall.getInputGroupCall();\n"
+     "            req.params = new TLRPC.TL_dataJSON();\n"
+     "            req.params.data = json;\n"
+     "            req.flags |= 8; // pluma: the key and the join block (ADR 0060)\n"
+     "            req.public_key = conference.getMyPublicKey();\n"
+     "            req.block = conference.getLastBlock();\n"),
+    ("                    TLRPC.Updates updates = (TLRPC.Updates) response;\n"
+     "                    long selfId = getSelfId();\n"
+     "                    for (int a = 0, N = updates.updates.size(); a < N; a++) {\n",
+     "                    TLRPC.Updates updates = (TLRPC.Updates) response;\n"
+     "                    long selfId = getSelfId();\n"
+     "                    // pluma: the chain's blocks of the join go to the call object (ADR 0060).\n"
+     "                    final ArrayList<TL_update.TL_updateGroupCallChainBlocks> blockUpdates = findUpdatesAndRemove(updates, TL_update.TL_updateGroupCallChainBlocks.class);\n"
+     "                    for (int a = 0, N = updates.updates.size(); a < N; a++) {\n"),
+    ("                    MessagesController.getInstance(currentAccount).processUpdates(updates, false);\n"
+     "                    AndroidUtilities.runOnUIThread(() -> groupCall.loadMembers(create));\n"
+     "                    startGroupCheckShortpoll();\n",
+     "                    MessagesController.getInstance(currentAccount).processUpdates(updates, false);\n"
+     "                    AndroidUtilities.runOnUIThread(() -> {\n"
+     "                        // pluma: the call object takes the join's blocks and polls the chain, as a\n"
+     "                        // conference's does (ADR 0060).\n"
+     "                        if (conference != null) {\n"
+     "                            plumaChainJoinReset();\n"
+     "                            conference.joined();\n"
+     "                            for (TL_update.TL_updateGroupCallChainBlocks upd : blockUpdates) {\n"
+     "                                conference.applyUpdate(0, upd, true, null);\n"
+     "                            }\n"
+     "                            conference.forcePoll();\n"
+     "                            for (int a = 0; a < 2; ++a) {\n"
+     "                                if (tgVoip[a] != null) {\n"
+     "                                    tgVoip[a].setConferenceCallId(conference.getCallId());\n"
+     "                                }\n"
+     "                            }\n"
+     "                            plumaStartE2EStatus();\n"
+     "                        }\n"
+     "                        groupCall.loadMembers(create);\n"
+     "                    });\n"
+     "                    startGroupCheckShortpoll();\n"),
+    ('                        } else if ("GROUPCALL_SSRC_DUPLICATE_MUCH".equals(error.text)) {\n'
+     "                            createGroupInstance(CAPTURE_DEVICE_CAMERA, false, false);\n"
+     "                        } else {\n",
+     '                        } else if ("GROUPCALL_SSRC_DUPLICATE_MUCH".equals(error.text)) {\n'
+     "                            createGroupInstance(CAPTURE_DEVICE_CAMERA, false, false);\n"
+     '                        } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID") && conference != null && plumaChainRetry()) {\n'
+     "                            // pluma: another block took the height first (ADR 0060 §5): the join block is\n"
+     "                            // made again on the chain's new last block, as tdesktop does (GroupCall::joinFail).\n"
+     "                            plumaJoinOnLastBlock(ssrc, json, create);\n"
+     "                        } else {\n"),
+    # The conference's join: the same retry instead of ending the call. A join that starts over
+    # (reconnect) starts its counts over; one that follows a refusal checks whether the chain moved.
+    ("            if (reconnect) {\n"
+     "                conference.reset();\n"
+     "            }\n"
+     "            conference.requestLastBlock(() -> {\n"
+     "                if (conference == null) {\n"
+     "                    return;\n"
+     "                }\n"
+     "                conference.generateAddSelfBlock();\n"
+     "                join.run();\n",
+     "            if (reconnect) {\n"
+     "                conference.reset();\n"
+     "                plumaChainJoinReset(); // pluma: ADR 0060 §5\n"
+     "            }\n"
+     "            conference.requestLastBlock(() -> {\n"
+     "                if (conference == null) {\n"
+     "                    return;\n"
+     "                }\n"
+     "                if (!plumaChainJoinBase()) { // pluma: the chain does not move (ADR 0060 §5)\n"
+     "                    stopSelf();\n"
+     "                    return;\n"
+     "                }\n"
+     "                plumaChainJoinBlock = conference.generateAddSelfBlock();\n"
+     "                join.run();\n"),
+    ('                            } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID")) {\n'
+     "                                stopSelf();\n",
+     '                            } else if (error.text.startsWith("CONF_WRITE_CHAIN_INVALID")) {\n'
+     "                                // pluma: another block took the height first (ADR 0060): join again on the\n"
+     "                                // chain's new last block, as tdesktop does (GroupCall::joinFail).\n"
+     "                                if (plumaChainRetry()) {\n"
+     "                                    startConferenceGroupCall(false, ssrc, json, false);\n"
+     "                                } else {\n"
+     "                                    stopSelf();\n"
+     "                                }\n"),
+    ("                            if (conference == null) return;\n"
+     "                            conference.joined();\n",
+     "                            if (conference == null) return;\n"
+     "                            conference.joined();\n"
+     "                            plumaChainJoinReset(); // pluma: ADR 0060\n"
+     "                            plumaStartE2EStatus();\n"),
+    ("                    if (conference != null) {\n"
+     "                        startConferenceGroupCall(false, ssrc, json, !first[0]);\n"
+     "                    } else {\n"
+     "                        startGroupCall(ssrc, json, true);\n"
+     "                    }\n",
+     "                    if (isConference()) {\n"
+     "                        startConferenceGroupCall(false, ssrc, json, !first[0]);\n"
+     "                    } else {\n"
+     "                        startGroupCall(ssrc, json, true, !first[0]); // pluma: a new key when joining again\n"
+     "                    }\n"),
+    ("            }, conference != null);\n",
+     "            }, conference != null, isConference()); // pluma: frames encrypted in every group call, one video layer in a conference only\n"),
+    ("        if (conference != null) {\n"
+     "            conference.destroy();\n"
+     "        }\n"
+     "        super.onDestroy();\n",
+     "        AndroidUtilities.cancelRunOnUIThread(plumaE2EStatusRunnable); // pluma: ADR 0060\n"
+     "        AndroidUtilities.cancelRunOnUIThread(plumaRejoinRunnable);\n"
+     "        if (conference != null) {\n"
+     "            conference.destroy();\n"
+     "        }\n"
+     "        super.onDestroy();\n"),
+)
+
+_CONFERENCE_STATUS = """\
+    // pluma: self-recovery and the E2E status report (ADR 0060 §5).
+    private static final long BEHIND_LIMIT_MS = 12_000;
+    private byte[] lastAppliedBlock;
+    private int serverNextOffset = -1;
+    private long behindSince;
+    private boolean failureReported;
+
+    // Any tde2e failure makes the client join again with a new key, as tdesktop does
+    // (tde2e_api.cpp Call::apply fails on every error; GroupCall: "TdE2E: Got failure,
+    // scheduling rejoin!"). VoIPService limits how often.
+    private void fail(String why) {
+        if (destroyed || !joined || failureReported) {
+            return;
+        }
+        failureReported = true;
+        FileLog.e("[tde2e] " + why + ", joining again");
+        AndroidUtilities.runOnUIThread(() -> {
+            final VoIPService voip = VoIPService.getSharedInstance();
+            if (voip != null && voip.conference == this) {
+                voip.plumaE2EFailed();
+            }
+        });
+    }
+
+    // The server is ahead of the blocks this client has applied for longer than a key change
+    // takes: the client no longer follows the chain.
+    private void checkBehind() {
+        if (call_id < 0 || last_offset[0] < 0 || last_offset[0] >= serverNextOffset) {
+            behindSince = 0;
+            return;
+        }
+        final long now = System.currentTimeMillis();
+        if (behindSince == 0) {
+            behindSince = now;
+        } else if (now - behindSince > BEHIND_LIMIT_MS) {
+            fail("sub-chain 0 is at " + serverNextOffset + ", applied up to " + last_offset[0]);
+        }
+    }
+
+    // Rule 2 of the self-recovery is under way or the state is not built: the own chain is not
+    // current, and frames that fail to decrypt say nothing about this client (rule 4).
+    public boolean chainBehind() {
+        return call_id < 0 || last_offset[0] < 0 || last_offset[0] < serverNextOffset;
+    }
+
+    // Rule 1: a sticky tde2e error of the call object, which every call of it answers
+    // (tde2e Call::get_status); the report's tick looks for one that no block apply has shown.
+    public void checkError() {
+        if (call_id >= 0) {
+            final int code = call_get_error_code(call_id);
+            if (code != 0) {
+                fail("the call object failed with tde2e error " + code);
+            }
+        }
+    }
+
+    // The chain's part of PlumaE2EStatus v1: the applied height of sub-chain 0 (-1 without a
+    // state, before the join or after a failure), a prefix of the hash of the block at that
+    // height as the server stores it, the offsets each sub-chain is polled from, the sticky
+    // error of the call object.
+    public void putE2EStatus(JSONObject status) throws JSONException {
+        int height = -1;
+        if (call_id >= 0) {
+            try {
+                height = call_get_height(call_id);
+            } catch (Exception e) {
+                height = -1;
+            }
+        }
+        status.put("height", height);
+        status.put("lastBlock", height >= 0 && lastAppliedBlock != null ? blockHashPrefix(lastAppliedBlock) : "");
+        status.put("offset0", last_offset[0]);
+        status.put("offset1", last_offset[1]);
+        status.put("error", call_id >= 0 ? call_get_error_code(call_id) : 0);
+    }
+
+    // The server sends a block with its first int32 one more than it stores (tde2e
+    // Blockchain::from_server_to_local); the hash is that of the stored block.
+    private static String blockHashPrefix(byte[] block) {
+        if (block.length < 4) {
+            return "";
+        }
+        final byte[] stored = block.clone();
+        int magic = (stored[0] & 0xff) | (stored[1] & 0xff) << 8 | (stored[2] & 0xff) << 16 | (stored[3] & 0xff) << 24;
+        magic--;
+        stored[0] = (byte) magic;
+        stored[1] = (byte) (magic >> 8);
+        stored[2] = (byte) (magic >> 16);
+        stored[3] = (byte) (magic >> 24);
+        final byte[] hash = Utilities.computeSHA256(stored);
+        return Utilities.bytesToHex(Arrays.copyOf(hash, 8)).toLowerCase(Locale.ROOT);
+    }
+
+"""
+
+_CONFERENCE_EDITS = (
+    ("import org.telegram.messenger.AndroidUtilities;\n",
+     "import org.json.JSONException;\n"
+     "import org.json.JSONObject;\n"
+     "import org.telegram.messenger.AndroidUtilities;\n"),
+    ("import java.util.Iterator;\n",
+     "import java.util.Iterator;\n"
+     "import java.util.Locale;\n"),
+    ("    public static native void call_destroy_all();\n",
+     "    public static native void call_destroy_all();\n"
+     "    // pluma: the tde2e error code the call object has failed with, 0 while it works (ADR 0060).\n"
+     "    public static native int call_get_error_code(long call_id);\n"),
+    ("    public TLRPC.InputGroupCall inputGroupCall;\n",
+     "    public TLRPC.InputGroupCall inputGroupCall;\n"
+     "\n" + _CONFERENCE_STATUS.rstrip("\n") + "\n"),
+    ("                        call_id = call_create(my_user_id, my_private_key_id, last_block = block);\n",
+     "                        call_id = call_create(my_user_id, my_private_key_id, last_block = block);\n"
+     "                        lastAppliedBlock = block;\n"),
+    ('                                FileLog.d("[tde2e] #" + index + " call_apply_block(" + call_id + ", " + blockStr(block) + ") = " + call_apply_block(call_id, block));\n',
+     '                                FileLog.d("[tde2e] #" + index + " call_apply_block(" + call_id + ", " + blockStr(block) + ") = " + call_apply_block(call_id, block));\n'
+     "                                lastAppliedBlock = block;\n"),
+    ('                    FileLog.e("[tde2e] {subchain: " + sub_chain + "} #" + index + " block got into error: ", e);\n'
+     "                    return;\n",
+     '                    FileLog.e("[tde2e] {subchain: " + sub_chain + "} #" + index + " block got into error: ", e);\n'
+     '                    fail("block #" + index + " of sub-chain " + sub_chain + " failed"); // pluma: ADR 0060\n'
+     "                    return;\n"),
+    ("                if (sub_chain == 0 && !had_call && has_call) {\n"
+     "                    readQueue(1);\n"
+     "                }\n"
+     "            }\n",
+     "                if (sub_chain == 0 && !had_call && has_call) {\n"
+     "                    readQueue(1);\n"
+     "                }\n"
+     "            }\n"
+     "            if (sub_chain == 0) { // pluma: how far the server's chain is (ADR 0060)\n"
+     "                if (requested_offset == null || requested_offset != -1) {\n"
+     "                    serverNextOffset = Math.max(serverNextOffset, next_offset);\n"
+     "                }\n"
+     "                checkBehind();\n"
+     "            }\n"),
+    ("        polling = true;\n"
+     "        final AtomicInteger received = new AtomicInteger(0);\n",
+     "        checkBehind(); // pluma: ADR 0060\n"
+     "        polling = true;\n"
+     "        final AtomicInteger received = new AtomicInteger(0);\n"),
+    # Every answer of the chain goes through processUpdates: the poll and the last
+    # block (reads), the broadcasts and the removals (writes).
+    ("    private boolean processUpdates(Integer requested_offset, Long requestTime, TLObject res, TLRPC.TL_error err) {\n"
+     "        boolean hadBlocks = false;\n",
+     "    private boolean processUpdates(Integer requested_offset, Long requestTime, TLObject res, TLRPC.TL_error err) {\n"
+     "        boolean hadBlocks = false;\n"
+     '        if (err != null && "GROUPCALL_FORBIDDEN".equals(err.text)) {\n'
+     "            // pluma: rule 3 of the self-recovery (ADR 0060 §5): the chain refuses this client, on\n"
+     "            // a write (a broadcast, a removal) or a read, as tdesktop rejoins on both\n"
+     "            // (calls_group_call.cpp:848-853, 1909-1917, 1930-1934). Before the join it is ignored.\n"
+     '            fail("the call\'s chain answered GROUPCALL_FORBIDDEN");\n'
+     "        }\n"),
+    ("        final Set<Long> leftParticipants = getShadyLeftParticipants(participants);\n"
+     "        if (!leftParticipants.isEmpty()) {\n",
+     "        final Set<Long> leftParticipants = getShadyLeftParticipants(participants);\n"
+     "        // pluma: who has left is known from the whole list of participants only, which a chat\n"
+     "        // call loads in pages (ADR 0060).\n"
+     "        final VoIPService voip = VoIPService.getSharedInstance();\n"
+     "        final boolean listLoaded = voip == null || voip.groupCall == null || voip.groupCall.membersLoadEndReached;\n"
+     "        if (listLoaded && !leftParticipants.isEmpty()) {\n"),
+    ("    public void reset() {\n"
+     "        AndroidUtilities.cancelRunOnUIThread(pollRunnable);\n"
+     "        if (call_id != -1) {\n"
+     "            for (int a = 0; a < 2; ++a) {\n"
+     "                if (pollRequestId[a] != 0) {\n"
+     "                    ConnectionsManager.getInstance(currentAccount).cancelRequest(pollRequestId[a], true);\n"
+     "                    pollRequestId[a] = 0;\n"
+     "                }\n"
+     "            }\n"
+     "\n"
+     "            call_destroy(call_id);\n",
+     "    public void reset() {\n"
+     "        AndroidUtilities.cancelRunOnUIThread(pollRunnable);\n"
+     "        // pluma: a poll in flight belongs to the old key, with or without a call object, and the\n"
+     "        // client is not joined until the new join answers (ADR 0060).\n"
+     "        for (int a = 0; a < 2; ++a) {\n"
+     "            if (pollRequestId[a] != 0) {\n"
+     "                ConnectionsManager.getInstance(currentAccount).cancelRequest(pollRequestId[a], true);\n"
+     "                pollRequestId[a] = 0;\n"
+     "            }\n"
+     "        }\n"
+     "        polling = false;\n"
+     "        joined = false;\n"
+     "        failureReported = false;\n"
+     "        lastAppliedBlock = null;\n"
+     "        serverNextOffset = -1;\n"
+     "        behindSince = 0;\n"
+     "        if (call_id != -1) {\n"
+     "            call_destroy(call_id);\n"),
+)
+
+_PLUMA_E2E_STATS = r"""// pluma: frame counters of an end-to-end group call for the E2E status report, PlumaE2EStatus
+// v1 (ADR 0060 §5), taken every 5 s by VoIPService. A tde2e frame (tde2e Call.cpp
+// CallEncryption::decrypt) is the clear prefix, an int32 head whose low byte is the number of
+// epochs, a 32-byte hash per epoch, the encrypted rest and the prefix length as the last
+// uint32. Only the epoch hashes, which the SFU sees in every frame, leave the device, as 8-byte
+// prefixes; no key and no frame bytes. The counters and the epochs of decrypted and refused
+// frames are deltas since the last take; sendEpochs and lastOkMs are current values.
+struct PlumaE2EStats {
+    struct Sender {
+        uint32_t ok = 0;
+        uint32_t unknownEpoch = 0;
+        uint32_t tooOld = 0;
+        uint32_t duplicate = 0;
+        uint32_t failed = 0;
+        int64_t lastOkAt = -1;
+    };
+    static constexpr size_t kHashPrefix = 8;
+    static constexpr size_t kMaxSendEpochs = 15;
+    static constexpr size_t kMaxDecryptEpochs = 15;
+    static constexpr size_t kMaxUnknownEpochs = 8;
+
+    std::mutex mutex;
+    std::map<int64_t, Sender> senders;
+    std::vector<uint64_t> sendEpochs;
+    std::set<uint64_t> decryptEpochs;
+    std::set<uint64_t> unknownEpochs;
+    uint32_t encrypted = 0;
+    uint32_t encryptFailed = 0;
+
+    static int64_t nowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // The 8-byte prefixes of the epoch hashes of a frame whose encrypted part starts at offset.
+    static std::vector<uint64_t> epochs(const uint8_t *data, size_t size, size_t offset, size_t limit) {
+        std::vector<uint64_t> result;
+        if (offset > size || size - offset < 4) {
+            return result;
+        }
+        const size_t count = data[offset];
+        offset += 4;
+        for (size_t i = 0; i < count && result.size() < limit && size - offset >= 32; i++, offset += 32) {
+            uint64_t prefix = 0;
+            for (size_t j = 0; j < kHashPrefix; j++) {
+                prefix = (prefix << 8) | data[offset + j];
+            }
+            result.push_back(prefix);
+        }
+        return result;
+    }
+
+    // The epochs a received frame names: its clear prefix length is its last uint32.
+    static std::vector<uint64_t> receivedEpochs(const std::vector<uint8_t> &frame, size_t limit) {
+        if (frame.size() < 4) {
+            return {};
+        }
+        const size_t end = frame.size() - 4;
+        const uint32_t prefixSize = uint32_t(frame[end]) | (uint32_t(frame[end + 1]) << 8) | (uint32_t(frame[end + 2]) << 16) | (uint32_t(frame[end + 3]) << 24);
+        return epochs(frame.data(), end, prefixSize, limit);
+    }
+
+    static void addEpochs(std::set<uint64_t> &to, const std::vector<uint64_t> &found, size_t limit) {
+        for (uint64_t prefix : found) {
+            if (to.size() >= limit) {
+                return;
+            }
+            to.insert(prefix);
+        }
+    }
+
+    static std::string hex(uint64_t prefix) {
+        static const char digits[] = "0123456789abcdef";
+        std::string out(kHashPrefix * 2, '0');
+        for (size_t i = 0; i < kHashPrefix * 2; i++) {
+            out[kHashPrefix * 2 - 1 - i] = digits[prefix & 15];
+            prefix >>= 4;
+        }
+        return out;
+    }
+
+    template <typename Container>
+    static std::string hexList(const Container &prefixes) {
+        std::string json = "[";
+        for (uint64_t prefix : prefixes) {
+            json += (json.size() > 1 ? ",\"" : "\"") + hex(prefix) + "\"";
+        }
+        return json + "]";
+    }
+
+    void encryptedOnce(const std::string &frame, int32_t prefixSize) {
+        auto found = epochs(reinterpret_cast<const uint8_t *>(frame.data()), frame.size(), size_t(prefixSize), kMaxSendEpochs);
+        std::lock_guard<std::mutex> lock(mutex);
+        encrypted++;
+        sendEpochs = std::move(found);
+    }
+
+    void encryptFailedOnce() {
+        std::lock_guard<std::mutex> lock(mutex);
+        encryptFailed++;
+    }
+
+    void decrypted(int64_t userId, const std::vector<uint8_t> &frame) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto &sender = senders[userId];
+        sender.ok++;
+        sender.lastOkAt = nowMs();
+        if (decryptEpochs.size() < kMaxDecryptEpochs) {
+            addEpochs(decryptEpochs, receivedEpochs(frame, kMaxDecryptEpochs), kMaxDecryptEpochs);
+        }
+    }
+
+    void decryptFailed(int64_t userId, const tde2e_api::Error &error, const std::vector<uint8_t> &frame) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto &sender = senders[userId];
+        if (error.code == tde2e_api::ErrorCode::Decrypt_UnknownEpoch) {
+            sender.unknownEpoch++;
+            if (unknownEpochs.size() < kMaxUnknownEpochs) {
+                addEpochs(unknownEpochs, receivedEpochs(frame, kMaxUnknownEpochs), kMaxUnknownEpochs);
+            }
+        } else if (error.message.find("Message is too old") != std::string::npos) {
+            sender.tooOld++;
+        } else if (error.message.find("Message is already processed") != std::string::npos) {
+            sender.duplicate++;
+        } else {
+            sender.failed++;
+        }
+    }
+
+    // The report's part of tgcalls: the deltas since the last call, then zero. Senders come in
+    // the order of their user id, those without frames since the last call left out.
+    std::string take() {
+        std::lock_guard<std::mutex> lock(mutex);
+        const int64_t now = nowMs();
+        std::string json = "{\"colibriClass\":\"PlumaE2EStatus\",\"v\":1"
+                ",\"encrypted\":" + std::to_string(encrypted)
+                + ",\"encryptFailed\":" + std::to_string(encryptFailed)
+                + ",\"sendEpochs\":" + hexList(sendEpochs)
+                + ",\"decryptEpochs\":" + hexList(decryptEpochs)
+                + ",\"unknownEpochs\":" + hexList(unknownEpochs)
+                + ",\"senders\":[";
+        bool first = true;
+        for (auto &[userId, sender] : senders) {
+            if (sender.ok + sender.unknownEpoch + sender.tooOld + sender.duplicate + sender.failed == 0) {
+                continue;
+            }
+            json += first ? "{" : ",{";
+            first = false;
+            json += "\"user\":" + std::to_string(userId)
+                    + ",\"ok\":" + std::to_string(sender.ok)
+                    + ",\"unknownEpoch\":" + std::to_string(sender.unknownEpoch)
+                    + ",\"tooOld\":" + std::to_string(sender.tooOld)
+                    + ",\"duplicate\":" + std::to_string(sender.duplicate)
+                    + ",\"failed\":" + std::to_string(sender.failed)
+                    + ",\"lastOkMs\":" + std::to_string(sender.lastOkAt < 0 ? -1 : now - sender.lastOkAt) + "}";
+            sender.ok = sender.unknownEpoch = sender.tooOld = sender.duplicate = sender.failed = 0;
+        }
+        json += "]}";
+        decryptEpochs.clear();
+        unknownEpochs.clear();
+        encrypted = 0;
+        encryptFailed = 0;
+        return json;
+    }
+};
+
+"""
+
+_NATIVE_EDITS = (
+    (NATIVE_GROUP_JNI,
+     "#include <map>\n#include <mutex>\n",
+     "#include <map>\n#include <mutex>\n#include <chrono>\n#include <set>\n"),
+    (NATIVE_GROUP_JNI,
+     "struct InstanceHolder {\n",
+     _PLUMA_E2E_STATS + "struct InstanceHolder {\n"),
+    (NATIVE_GROUP_JNI,
+     "    std::shared_ptr<long> conferenceCallId;\n    bool useScreencast = false;\n",
+     "    std::shared_ptr<long> conferenceCallId;\n"
+     "    std::shared_ptr<PlumaE2EStats> e2eStats; // pluma: ADR 0060\n"
+     "    bool useScreencast = false;\n"),
+    (NATIVE_GROUP_JNI,
+     "jboolean screencast, jboolean noiseSupression, jboolean conference) {\n",
+     "jboolean screencast, jboolean noiseSupression, jboolean e2e, jboolean conference) {\n"),
+    (NATIVE_GROUP_JNI,
+     "    std::shared_ptr<long> conferenceCallIdPtr = nullptr;\n"
+     "    if (conference) {\n"
+     "        conferenceCallIdPtr = std::make_shared<long>();\n"
+     "        e2eEncryptDecrypt = [conferenceCallIdPtr](",
+     "    std::shared_ptr<long> conferenceCallIdPtr = nullptr;\n"
+     "    std::shared_ptr<PlumaE2EStats> e2eStats = nullptr;\n"
+     "    if (e2e) { // pluma: frames are encrypted in every group call (ADR 0060)\n"
+     "        conferenceCallIdPtr = std::make_shared<long>();\n"
+     "        e2eStats = std::make_shared<PlumaE2EStats>();\n"
+     "        e2eEncryptDecrypt = [conferenceCallIdPtr, e2eStats]("),
+    (NATIVE_GROUP_JNI,
+     "                auto result = tde2e_api::call_encrypt(call_id, 0, std::string_view{ (const char*) input.data(), input.size() }, unencrypted_prefix_size);\n"
+     "                if (result.is_ok()) {\n",
+     "                auto result = tde2e_api::call_encrypt(call_id, 0, std::string_view{ (const char*) input.data(), input.size() }, unencrypted_prefix_size);\n"
+     "                if (result.is_ok()) {\n"
+     "                    e2eStats->encryptedOnce(result.value(), unencrypted_prefix_size);\n"),
+    (NATIVE_GROUP_JNI,
+     '                    DEBUG_D("[tde2e] e2eEncryptDecrypt failed: err %s", result.error().message.c_str());\n'
+     "                }\n"
+     "            } else {\n",
+     '                    DEBUG_D("[tde2e] e2eEncryptDecrypt failed: err %s", result.error().message.c_str());\n'
+     "                    e2eStats->encryptFailedOnce();\n"
+     "                }\n"
+     "            } else {\n"),
+    (NATIVE_GROUP_JNI,
+     "                auto result = tde2e_api::call_decrypt(call_id, userId, 0, std::string_view{ (const char*) input.data(), input.size() });\n"
+     "                if (result.is_ok()) {\n",
+     "                auto result = tde2e_api::call_decrypt(call_id, userId, 0, std::string_view{ (const char*) input.data(), input.size() });\n"
+     "                if (result.is_ok()) {\n"
+     "                    e2eStats->decrypted(userId, input);\n"),
+    (NATIVE_GROUP_JNI,
+     '                    DEBUG_D("[tde2e] e2eEncryptDecrypt failed: err %s", result.error().message.c_str());\n'
+     "                }\n"
+     "            }\n"
+     "            return std::vector<uint8_t>{};\n",
+     '                    DEBUG_D("[tde2e] e2eEncryptDecrypt failed: err %s", result.error().message.c_str());\n'
+     "                    e2eStats->decryptFailed(userId, result.error(), input);\n"
+     "                }\n"
+     "            }\n"
+     "            return std::vector<uint8_t>{};\n"),
+    (NATIVE_GROUP_JNI,
+     "    holder->conferenceCallId = std::move(conferenceCallIdPtr);\n",
+     "    holder->conferenceCallId = std::move(conferenceCallIdPtr);\n"
+     "    holder->e2eStats = std::move(e2eStats);\n"),
+    (NATIVE_GROUP_JNI,
+     '    DEBUG_D("setConferenceCallId %d", call_id);\n'
+     "    *instance->conferenceCallId = (long) call_id;\n"
+     "}\n",
+     '    DEBUG_D("setConferenceCallId %d", call_id);\n'
+     "    *instance->conferenceCallId = (long) call_id;\n"
+     "}\n"
+     "\n"
+     "// pluma: the E2E status report (ADR 0060): the frame counters since the last call, null in an\n"
+     "// instance without frame encryption, and a message to the SFU over the data channel.\n"
+     'extern "C"\n'
+     "JNIEXPORT jstring JNICALL\n"
+     "Java_org_telegram_messenger_voip_NativeInstance_takeE2EStats(JNIEnv *env, jobject obj) {\n"
+     "    InstanceHolder *instance = getInstanceHolder(env, obj);\n"
+     "    if (instance->e2eStats == nullptr) {\n"
+     "        return nullptr;\n"
+     "    }\n"
+     "    return env->NewStringUTF(instance->e2eStats->take().c_str());\n"
+     "}\n"
+     "\n"
+     'extern "C"\n'
+     "JNIEXPORT void JNICALL\n"
+     "Java_org_telegram_messenger_voip_NativeInstance_sendDataChannelMessage(JNIEnv *env, jobject obj, jstring message) {\n"
+     "    InstanceHolder *instance = getInstanceHolder(env, obj);\n"
+     "    if (instance->groupNativeInstance == nullptr) {\n"
+     "        return;\n"
+     "    }\n"
+     "    instance->groupNativeInstance->sendDataChannelMessage(tgvoip::jni::JavaStringToStdString(env, message));\n"
+     "}\n"
+     "\n"
+     'extern "C"\n'
+     "JNIEXPORT jboolean JNICALL\n"
+     "Java_org_telegram_messenger_voip_NativeInstance_isDataChannelOpen(JNIEnv *env, jobject obj) {\n"
+     "    InstanceHolder *instance = getInstanceHolder(env, obj);\n"
+     "    if (instance->groupNativeInstance == nullptr) {\n"
+     "        return JNI_FALSE;\n"
+     "    }\n"
+     "    return instance->groupNativeInstance->isDataChannelOpen() ? JNI_TRUE : JNI_FALSE;\n"
+     "}\n"),
+    (TDE2E_BRIDGE,
+     "    auto result = tde2e_api::call_describe_message(view);\n"
+     "    env->ReleaseByteArrayElements(message, bytes, JNI_ABORT);\n"
+     "    if (!result.is_ok()) {\n"
+     "        java_throw(env, result.error());\n"
+     "        return nullptr;\n"
+     "    }\n"
+     "    return java_string(env, result.value());\n"
+     "}",
+     "    auto result = tde2e_api::call_describe_message(view);\n"
+     "    env->ReleaseByteArrayElements(message, bytes, JNI_ABORT);\n"
+     "    if (!result.is_ok()) {\n"
+     "        java_throw(env, result.error());\n"
+     "        return nullptr;\n"
+     "    }\n"
+     "    return java_string(env, result.value());\n"
+     "}\n"
+     "\n"
+     "// pluma: the error code the call object has failed with, 0 while it works. A failure is\n"
+     "// sticky: every call of the object answers it (tde2e Call::get_status). ADR 0060.\n"
+     'extern "C"\n'
+     "JNIEXPORT jint JNICALL\n"
+     "Java_org_telegram_messenger_voip_ConferenceCall_call_1get_1error_1code(JNIEnv *env, jclass clazz, jlong call_id) {\n"
+     "    auto result = tde2e_api::call_get_height(call_id);\n"
+     "    if (result.is_ok()) {\n"
+     "        return 0;\n"
+     "    }\n"
+     "    return static_cast<jint>(result.error().code);\n"
+     "}"),
+    # tgcalls: a message of the client's own over the data channel, next to
+    # the video constraints it sends there.
+    (TGCALLS_GROUP_H,
+     "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n",
+     "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n"
+     "\n"
+     "    // pluma: a message of the client's own to the SFU over the data channel, such as the\n"
+     "    // E2E status report of Pluma (ADR 0060). Sent only while the channel is open, which\n"
+     "    // isDataChannelOpen tells from any thread; a report waits for it instead of being lost.\n"
+     "    void sendDataChannelMessage(std::string const &message);\n"
+     "    bool isDataChannelOpen() const;\n"),
+    (TGCALLS_GROUP_H,
+     "#include <memory>\n#include <map>\n",
+     "#include <memory>\n#include <map>\n#include <atomic>\n"),
+    (TGCALLS_GROUP_H,
+     "    std::unique_ptr<LogSinkImpl> _logSink;\n",
+     "    std::unique_ptr<LogSinkImpl> _logSink;\n"
+     "    // pluma: the state of the data channel, written by the media thread (ADR 0060).\n"
+     "    std::shared_ptr<std::atomic<bool>> _isDataChannelOpen = std::make_shared<std::atomic<bool>>(false);\n"),
+    (TGCALLS_GROUP,
+     "    void setConnectionMode(GroupConnectionMode connectionMode, bool keepBroadcastIfWasEnabled, bool isUnifiedBroadcast) {\n"
+     "        if (_connectionMode != connectionMode",
+     "    // pluma: see GroupInstanceCustomImpl::sendDataChannelMessage and isDataChannelOpen.\n"
+     "    void setDataChannelOpenFlag(std::shared_ptr<std::atomic<bool>> flag) {\n"
+     "        _isDataChannelOpenFlag = std::move(flag);\n"
+     "        _isDataChannelOpenFlag->store(_isDataChannelOpen);\n"
+     "    }\n"
+     "\n"
+     "    void sendDataChannelMessage(std::string const &message) {\n"
+     "        if (!_isDataChannelOpen) {\n"
+     "            return;\n"
+     "        }\n"
+     "        _networkManager->perform([message](GroupNetworkManager *networkManager) {\n"
+     "            networkManager->sendDataChannelMessage(message);\n"
+     "        });\n"
+     "    }\n"
+     "\n"
+     "    void setConnectionMode(GroupConnectionMode connectionMode, bool keepBroadcastIfWasEnabled, bool isUnifiedBroadcast) {\n"
+     "        if (_connectionMode != connectionMode"),
+    (TGCALLS_GROUP,
+     "void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {\n"
+     "    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->internal_addCustomNetworkEvent(isRemoteConnected);\n"
+     "    });\n"
+     "}\n",
+     "void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {\n"
+     "    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->internal_addCustomNetworkEvent(isRemoteConnected);\n"
+     "    });\n"
+     "}\n"
+     "\n"
+     "void GroupInstanceCustomImpl::sendDataChannelMessage(std::string const &message) {\n"
+     "    _internal->perform([message](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->sendDataChannelMessage(message);\n"
+     "    });\n"
+     "}\n"
+     "\n"
+     "bool GroupInstanceCustomImpl::isDataChannelOpen() const {\n"
+     "    return _isDataChannelOpen->load();\n"
+     "}\n"),
+    (TGCALLS_GROUP,
+     "        _isDataChannelOpen = isDataChannelOpen;\n"
+     "\n"
+     "        if (_isDataChannelOpen) {\n"
+     "            maybeUpdateRemoteVideoConstraints();\n",
+     "        _isDataChannelOpen = isDataChannelOpen;\n"
+     "        if (_isDataChannelOpenFlag) { // pluma: ADR 0060\n"
+     "            _isDataChannelOpenFlag->store(isDataChannelOpen);\n"
+     "        }\n"
+     "\n"
+     "        if (_isDataChannelOpen) {\n"
+     "            maybeUpdateRemoteVideoConstraints();\n"),
+    (TGCALLS_GROUP,
+     "    bool _isDataChannelOpen = false;\n",
+     "    bool _isDataChannelOpen = false;\n"
+     "    std::shared_ptr<std::atomic<bool>> _isDataChannelOpenFlag; // pluma: ADR 0060\n"),
+    (TGCALLS_GROUP,
+     "    _internal->perform([](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->start();\n"
+     "    });\n",
+     "    _internal->perform([flag = _isDataChannelOpen](GroupInstanceCustomInternal *internal) {\n"
+     "        internal->setDataChannelOpenFlag(flag); // pluma: ADR 0060\n"
+     "        internal->start();\n"
+     "    });\n"),
+)
+
+_MAKE_GROUP_PARAMS = ("String logPath, long videoCapturer, boolean screencast, boolean noiseSupression, PayloadCallback payloadCallback, "
+                      "AudioLevelsCallback audioLevelsCallback, VideoSourcesCallback unknownParticipantsCallback, "
+                      "RequestBroadcastPartCallback requestBroadcastPartCallback, RequestBroadcastPartCallback cancelRequestBroadcastPartCallback, "
+                      "RequestCurrentTimeCallback requestCurrentTimeCallback")
+
+_UI_EDITS = (
+    (NATIVE_INSTANCE,
+     f"    public static NativeInstance makeGroup({_MAKE_GROUP_PARAMS}, boolean isConference) {{\n",
+     f"    public static NativeInstance makeGroup({_MAKE_GROUP_PARAMS}, boolean isConference) {{\n"
+     "        return makeGroup(logPath, videoCapturer, screencast, noiseSupression, payloadCallback, audioLevelsCallback, unknownParticipantsCallback, "
+     "requestBroadcastPartCallback, cancelRequestBroadcastPartCallback, requestCurrentTimeCallback, isConference, isConference);\n"
+     "    }\n"
+     "\n"
+     "    // pluma: e2e encrypts the frames, in every group call (ADR 0060); isConference stays the\n"
+     "    // conference's, which tgcalls sends with one video layer.\n"
+     f"    public static NativeInstance makeGroup({_MAKE_GROUP_PARAMS}, boolean e2e, boolean isConference) {{\n"),
+    (NATIVE_INSTANCE,
+     "        instance.nativePtr = makeGroupNativeInstance(instance, logPath, SharedConfig.disableVoiceAudioEffects, videoCapturer, screencast, noiseSupression, isConference);\n",
+     "        instance.nativePtr = makeGroupNativeInstance(instance, logPath, SharedConfig.disableVoiceAudioEffects, videoCapturer, screencast, noiseSupression, e2e, isConference);\n"),
+    (NATIVE_INSTANCE,
+     "    private static native long makeGroupNativeInstance(NativeInstance instance, String persistentStateFilePath, boolean highQuality, long videoCapturer, boolean screencast, boolean noiseSupression, boolean conference);\n",
+     "    private static native long makeGroupNativeInstance(NativeInstance instance, String persistentStateFilePath, boolean highQuality, long videoCapturer, boolean screencast, boolean noiseSupression, boolean e2e, boolean conference);\n"),
+    (NATIVE_INSTANCE,
+     "    public native void setConferenceCallId(long call_id);\n",
+     "    public native void setConferenceCallId(long call_id);\n"
+     "    // pluma: the E2E status report (ADR 0060): the frame counters since the last call as JSON,\n"
+     "    // null without frame encryption; a message to the SFU over the data channel.\n"
+     "    public native String takeE2EStats();\n"
+     "    public native void sendDataChannelMessage(String message);\n"
+     "    public native boolean isDataChannelOpen();\n"),
+    # The emoji of the key in every end-to-end call. The drawable is made
+    # lazily by the list (VIEW_TYPE_ENCRYPTION) when the row comes later.
+    (GROUP_CALL_ACTIVITY,
+     "        } else if (id == NotificationCenter.conferenceEmojiUpdated) {\n",
+     "        } else if (id == NotificationCenter.conferenceEmojiUpdated && encryptionDrawable != null) { // pluma: ADR 0060\n"),
+    (GROUP_CALL_ACTIVITY,
+     "        if (isConference()) {\n"
+     "            encryptionDrawable = new CallEncryptionCellDrawable(context);\n",
+     "        if (isE2E()) { // pluma: every group call is end-to-end (ADR 0060)\n"
+     "            encryptionDrawable = new CallEncryptionCellDrawable(context);\n"),
+    (GROUP_CALL_ACTIVITY,
+     "            if (isConference()/* && call.participants.size() > 1*/) {\n"
+     "                encryptionRow = rowsCount++;\n",
+     "            if (isE2E()) { // pluma: every group call is end-to-end (ADR 0060)\n"
+     "                encryptionRow = rowsCount++;\n"),
+    (GROUP_CALL_ACTIVITY,
+     "    public boolean isConference() {\n"
+     "        final VoIPService voip = VoIPService.getSharedInstance();\n"
+     "        return voip != null && voip.isConference();\n"
+     "    }\n",
+     "    public boolean isConference() {\n"
+     "        final VoIPService voip = VoIPService.getSharedInstance();\n"
+     "        return voip != null && voip.isConference();\n"
+     "    }\n"
+     "\n"
+     "    // pluma: the call carries the tde2e call object: every group call (ADR 0060).\n"
+     "    public boolean isE2E() {\n"
+     "        final VoIPService voip = VoIPService.getSharedInstance();\n"
+     "        return voip != null && voip.conference != null;\n"
+     "    }\n"),
+    (CHAT_OBJECT,
+     "            req.limit = isConference ? currentAccount.getMessagesController().conferenceCallSizeLimit : 20;\n",
+     "            // pluma: an end-to-end call loads all its participants at once: who has left the\n"
+     "            // call's chain is known from the whole list only (ADR 0060).\n"
+     "            final VoIPService plumaVoip = VoIPService.getSharedInstance();\n"
+     "            final boolean plumaE2E = plumaVoip != null && plumaVoip.groupCall == this && plumaVoip.conference != null;\n"
+     "            req.limit = isConference || plumaE2E ? currentAccount.getMessagesController().conferenceCallSizeLimit : 20;\n"),
+    (CHAT_OBJECT,
+     "            if (call != null && voip != null && voip.isConference() && voip.groupCall == this) {\n",
+     "            if (call != null && voip != null && voip.conference != null && voip.groupCall == this) { // pluma: every end-to-end call\n"),
+    # No recording: phone.toggleGroupCallRecord is not served (ADR 0060 §4), and a
+    # call encrypted end to end cannot be recorded on the server. Upstream already
+    # hides the item in a conference.
+    (GROUP_CALL_ACTIVITY,
+     "            if (isRtmpStream()) {\n"
+     "                recordItem.setVisibility(View.VISIBLE);\n"
+     "                screenItem.setVisibility(View.GONE);\n"
+     "            } else {\n"
+     "                if (call.isScheduled()) {\n"
+     "                    recordItem.setVisibility(View.GONE);\n"
+     "                    screenItem.setVisibility(View.GONE);\n"
+     "                } else {\n"
+     "                    recordItem.setVisibility(View.VISIBLE);\n"
+     "                }\n"
+     "            }\n",
+     "            // pluma: no recording (ADR 0060 §4): the server does not record calls.\n"
+     "            if (isRtmpStream()) {\n"
+     "                recordItem.setVisibility(View.GONE);\n"
+     "                screenItem.setVisibility(View.GONE);\n"
+     "            } else {\n"
+     "                if (call.isScheduled()) {\n"
+     "                    recordItem.setVisibility(View.GONE);\n"
+     "                    screenItem.setVisibility(View.GONE);\n"
+     "                } else {\n"
+     "                    recordItem.setVisibility(View.GONE);\n"
+     "                }\n"
+     "            }\n"),
+    # No join-as list: the user alone.
+    (JOIN_CALL_ALERT,
+     "    public static void checkFewUsers(Context context, long did, AccountInstance accountInstance, MessagesStorage.BooleanCallback callback) {\n"
+     "        if (lastCachedAccount == accountInstance.getCurrentAccount() && lastCacheDid == did && cachedChats != null && SystemClock.elapsedRealtime() - lastCacheTime < 4 * 60 * 1000) {\n"
+     "            callback.run(cachedChats.size() == 1);\n"
+     "            return;\n"
+     "        }\n"
+     "        final AlertDialog progressDialog = new AlertDialog(context, AlertDialog.ALERT_TYPE_SPINNER);\n"
+     "        TL_phone.getGroupCallJoinAs req = new TL_phone.getGroupCallJoinAs();\n"
+     "        req.peer = accountInstance.getMessagesController().getInputPeer(did);\n"
+     "        int reqId = accountInstance.getConnectionsManager().sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {\n"
+     "            try {\n"
+     "                progressDialog.dismiss();\n"
+     "            } catch (Exception e) {\n"
+     "                FileLog.e(e);\n"
+     "            }\n"
+     "            if (response != null) {\n"
+     "                TL_phone.joinAsPeers res = (TL_phone.joinAsPeers) response;\n"
+     "                cachedChats = res.peers;\n"
+     "                lastCacheDid = did;\n"
+     "                lastCacheTime = SystemClock.elapsedRealtime();\n"
+     "                lastCachedAccount = accountInstance.getCurrentAccount();\n"
+     "                accountInstance.getMessagesController().putChats(res.chats, false);\n"
+     "                accountInstance.getMessagesController().putUsers(res.users, false);\n"
+     "                callback.run(res.peers.size() == 1);\n"
+     "            }\n"
+     "        }));\n"
+     "        progressDialog.setOnCancelListener(dialog -> accountInstance.getConnectionsManager().cancelRequest(reqId, true));\n"
+     "        try {\n"
+     "            progressDialog.showDelayed(500);\n"
+     "        } catch (Exception ignore) {\n"
+     "\n"
+     "        }\n"
+     "    }\n",
+     "    public static void checkFewUsers(Context context, long did, AccountInstance accountInstance, MessagesStorage.BooleanCallback callback) {\n"
+     "        // pluma: a group call is joined as the user only (ADR 0060): one peer, nothing to ask.\n"
+     "        callback.run(true);\n"
+     "    }\n"),
+    (JOIN_CALL_ALERT,
+     "    public static void open(Context context, long did, AccountInstance accountInstance, BaseFragment fragment, int type, TLRPC.Peer scheduledPeer, JoinCallAlertDelegate delegate) {\n"
+     "        if (context == null || delegate == null) {\n"
+     "            return;\n"
+     "        }\n"
+     "        if (lastCachedAccount == accountInstance.getCurrentAccount() && lastCacheDid == did && cachedChats != null && SystemClock.elapsedRealtime() - lastCacheTime < 5 * 60 * 1000) {\n"
+     "            if (cachedChats.size() == 1 && type != TYPE_CREATE) {\n"
+     "                TLRPC.InputPeer peer = accountInstance.getMessagesController().getInputPeer(MessageObject.getPeerId(cachedChats.get(0)));\n"
+     "                delegate.didSelectChat(peer, false, false, false);\n"
+     "            } else {\n"
+     "                showAlert(context, did, cachedChats, fragment, type, scheduledPeer, delegate);\n"
+     "            }\n"
+     "        } else {\n"
+     "            final AlertDialog progressDialog = new AlertDialog(context, AlertDialog.ALERT_TYPE_SPINNER);\n"
+     "            TL_phone.getGroupCallJoinAs req = new TL_phone.getGroupCallJoinAs();\n"
+     "            req.peer = accountInstance.getMessagesController().getInputPeer(did);\n"
+     "            int reqId = accountInstance.getConnectionsManager().sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {\n"
+     "                try {\n"
+     "                    progressDialog.dismiss();\n"
+     "                } catch (Exception e) {\n"
+     "                    FileLog.e(e);\n"
+     "                }\n"
+     "                if (response != null) {\n"
+     "                    TL_phone.joinAsPeers res = (TL_phone.joinAsPeers) response;\n"
+     "                    if (res.peers.size() == 1) {\n"
+     "                        TLRPC.InputPeer peer = accountInstance.getMessagesController().getInputPeer(MessageObject.getPeerId(res.peers.get(0)));\n"
+     "                        delegate.didSelectChat(peer, false, false, false);\n"
+     "                        return;\n"
+     "                    }\n"
+     "                    cachedChats = res.peers;\n"
+     "                    lastCacheDid = did;\n"
+     "                    lastCacheTime = SystemClock.elapsedRealtime();\n"
+     "                    lastCachedAccount = accountInstance.getCurrentAccount();\n"
+     "                    accountInstance.getMessagesController().putChats(res.chats, false);\n"
+     "                    accountInstance.getMessagesController().putUsers(res.users, false);\n"
+     "                    showAlert(context, did, res.peers, fragment, type, scheduledPeer, delegate);\n"
+     "                }\n"
+     "            }));\n"
+     "            progressDialog.setOnCancelListener(dialog -> accountInstance.getConnectionsManager().cancelRequest(reqId, true));\n"
+     "            try {\n"
+     "                progressDialog.showDelayed(500);\n"
+     "            } catch (Exception ignore) {\n"
+     "\n"
+     "            }\n"
+     "        }\n"
+     "    }\n",
+     "    public static void open(Context context, long did, AccountInstance accountInstance, BaseFragment fragment, int type, TLRPC.Peer scheduledPeer, JoinCallAlertDelegate delegate) {\n"
+     "        if (context == null || delegate == null) {\n"
+     "            return;\n"
+     "        }\n"
+     "        // pluma: a group call is started and joined as the user only (ADR 0060): the key in the\n"
+     "        // call's chain is the user's. Starting a call still shows the sheet to start or schedule it.\n"
+     "        final long selfId = accountInstance.getUserConfig().getClientUserId();\n"
+     "        if (type == TYPE_CREATE) {\n"
+     "            final ArrayList<TLRPC.Peer> peers = new ArrayList<>();\n"
+     "            peers.add(accountInstance.getMessagesController().getPeer(selfId));\n"
+     "            showAlert(context, did, peers, fragment, type, scheduledPeer, delegate);\n"
+     "        } else {\n"
+     "            delegate.didSelectChat(accountInstance.getMessagesController().getInputPeer(selfId), false, false, false);\n"
+     "        }\n"
+     "    }\n"),
+    # No RTMP: the sheet that starts a call loses its "stream with another app".
+    (CREATE_GROUP_CALL_SHEET,
+     "        this.canRtmpStream = ChatObject.canManageCalls(chat);\n",
+     "        this.canRtmpStream = false; // pluma: no RTMP streams (ADR 0060)\n"),
+    (CREATE_GROUP_CALL_SHEET,
+     "                    TextInfoPrivacyCell cell = (TextInfoPrivacyCell) holder.itemView;\n"
+     "                    CharSequence text = AndroidUtilities.replaceArrows(AndroidUtilities.replaceSingleTag(LocaleController.getString(R.string.VoipChatStreamWithAnotherApp), Theme.key_windowBackgroundWhiteBlueHeader, AndroidUtilities.REPLACING_TAG_TYPE_LINK, () -> {\n"
+     "                        CreateRtmpStreamBottomSheet.show(selectedPeer, fragment, dialogId, chats.size() > 1, joinCallDelegate);\n"
+     "                    }), true, dp(1), dp(1f));\n"
+     "                    cell.setText(text);\n",
+     "                    TextInfoPrivacyCell cell = (TextInfoPrivacyCell) holder.itemView;\n"
+     "                    cell.setText(null); // pluma: no RTMP streams (ADR 0060); the row offered one\n"),
+    (CREATE_GROUP_CALL_SHEET,
+     "                return needSelector ? CONTENT_VIEWS_COUNT + chats.size() : (canRtmpStream ? 2 : 1);\n",
+     "                return 1; // pluma: the header only: no join-as list, no RTMP stream (ADR 0060)\n"),
+    # No live stories: the Live tab of the story camera and the RTMP rows of
+    # its settings.
+    (STORY_MODE_TABS,
+     "        layout.addView(liveLayout, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.MATCH_PARENT, Gravity.FILL_VERTICAL, 0, 0, 6.66f, 0));\n"
+     "        liveLayout.setOnClickListener(v -> switchModeInternal(-1));\n",
+     "        // pluma: no live stories (ADR 0060): a live story is a group call streamed without\n"
+     "        // end-to-end encryption, and the server does not serve it.\n"),
+    (STORY_PRIVACY_SHEET,
+     "                    if (isLive && !liveSettings) {\n"
+     "                        if (isRtmpStream) {\n"
+     '                            items.add(ItemInner.asButton(5, getString(R.string.LiveStoryRTMPSettings), ""));\n'
+     "                            pad.subtractHeight += dp(50);\n"
+     '                            items.add(ItemInner.asButton(6, getString(R.string.LiveStoryRTMPDisable), ""));\n'
+     "                            pad.subtractHeight += dp(50);\n"
+     "                            items.add(ItemInner.asShadow(null));\n"
+     "                            pad.subtractHeight += dp(12);\n"
+     "                        } else {\n"
+     '                            items.add(ItemInner.asButton(5, getString(R.string.LiveStoryRTMPEnable), ""));\n'
+     "                            pad.subtractHeight += dp(50);\n"
+     "                            items.add(ItemInner.asShadow(getString(R.string.LiveStoryRTMPEnableInfo)));\n"
+     "                            pad.subtractHeight += dp(30);\n"
+     "                        }\n"
+     "                    }\n",
+     "                    // pluma: no RTMP streams (ADR 0060).\n"),
+    (STORY_PRIVACY_SHEET,
+     "                if (liveSettings) {\n"
+     '                    items.add(ItemInner.asButton(5, getString(R.string.LiveStoryRTMPSettings), ""));\n'
+     "                    pad.subtractHeight += dp(50);\n"
+     "                    items.add(ItemInner.asShadow(null));\n"
+     "                    pad.subtractHeight += dp(12 + 40);\n"
+     "                }\n",
+     "                // pluma: no RTMP settings of a live story (ADR 0060).\n"),
+    # The link to the story camera in the live mode opens it for a photo.
+    (LINK_MANAGER,
+     '            if ("live".equalsIgnoreCase(second))\n'
+     "                mode = StoryRecorder.MODE_LIVE;\n",
+     "            // pluma: no live stories (ADR 0060): the link to the live camera opens the photo one.\n"),
+)
+
+GROUP_CALLS_E2E_EDITS = (
+    tuple((VOIP_SERVICE, _tabbed(old), _tabbed(new)) for old, new in _VOIP_EDITS)
+    + tuple((CONFERENCE_CALL, old, new) for old, new in _CONFERENCE_EDITS)
+    + _NATIVE_EDITS
+    + _UI_EDITS
+)
+# The places that may name the RTMP sheet once the patch has run: the class
+# itself, and the handler of a live story row no list adds any more.
+RTMP_SHEET_USES = {
+    "ui/Components/CreateRtmpStreamBottomSheet.java",
+    "ui/Stories/recorder/StoryPrivacyBottomSheet.java",
+}
+
+
+def _e2e_failed_line(folder):
+    return f'    <string name="{E2E_FAILED_KEY}">{E2E_FAILED_TEXT[folder]}</string>\n'
+
+
+def group_calls_e2e(tree):
+    # Every anchor first: several edits keep their anchor in the new text, and a
+    # tree that is already patched must fail before anything is written twice.
+    for rel, old, _ in GROUP_CALLS_E2E_EDITS:
+        tree.expect(rel, old)
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    if set(files) != set(E2E_FAILED_TEXT):
+        raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, expected {', '.join(sorted(E2E_FAILED_TEXT))}")
+    for rel in files.values():
+        if f'<string name="{E2E_FAILED_KEY}">' in tree.read(rel):
+            raise PatchError(f"{rel}: upstream has a string {E2E_FAILED_KEY}")
+    for rel, old, new in GROUP_CALLS_E2E_EDITS:
+        tree.replace(rel, old, new)
+    for folder, rel in files.items():
+        tree.replace(rel, "</resources>", _e2e_failed_line(folder) + "</resources>")
+
+
+def _java_files_naming(tree, name):
+    found = set()
+    for p in sorted((tree.root / JAVA).rglob("*.java")):
+        if name in p.read_text(encoding="utf-8"):
+            found.add(p.relative_to(tree.root / JAVA).as_posix())
+    return found
+
+
+def verify_group_calls_e2e(tree):
+    for rel, old, new in GROUP_CALLS_E2E_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or text.count(old) != new.count(old):
+            changed = next(line for line in new.splitlines() if line not in old.splitlines())
+            raise PatchError(f"{rel}: the group call edit {changed.strip()!r} is not there")
+    voip = tree.read(VOIP_SERVICE)
+    # Nothing joins a group call without a key, enters the stream mode or asks for RTMP.
+    for gone in ('optBoolean("stream")', 'getBooleanExtra("isRtmpStream"', "startGroupCall(ssrc, json, true);",
+                 "}, conference != null);"):
+        if gone in voip:
+            raise PatchError(f"{VOIP_SERVICE}: upstream's {gone!r} is still there")
+    if voip.count("new TL_phone.joinGroupCall()") != 2 or voip.count("req.public_key = conference.getMyPublicKey();") != 2:
+        raise PatchError(f"{VOIP_SERVICE}: a group call is joined without the user's key")
+    if voip.count(f"R.string.{E2E_FAILED_KEY}") != 1:
+        raise PatchError(f"{VOIP_SERVICE}: the message of a failed self-recovery is not there")
+    if "getGroupCallJoinAs" in tree.read(JOIN_CALL_ALERT):
+        raise PatchError(f"{JOIN_CALL_ALERT}: the join-as list is asked for again")
+    # The record item never shows, and nothing but its handler starts a recording.
+    shown = re.findall(r"recordItem\.setVisibility\((?!View\.GONE\))", tree.read(GROUP_CALL_ACTIVITY))
+    if shown:
+        raise PatchError(f"{GROUP_CALL_ACTIVITY}: the record item is shown again")
+    recording = _java_files_naming(tree, ".toggleRecord(")
+    if recording - {"ui/GroupCallActivity.java"}:
+        raise PatchError(f"{JAVA}: a call is recorded from {sorted(recording)}; a way into recording is open")
+    uses = _java_files_naming(tree, "CreateRtmpStreamBottomSheet")
+    if uses != RTMP_SHEET_USES:
+        raise PatchError(f"{JAVA}: the RTMP sheet is named in {sorted(uses)}, expected {sorted(RTMP_SHEET_USES)}; a way into it is open")
+    if "ItemInner.asButton(5," in tree.read(STORY_PRIVACY_SHEET):
+        raise PatchError(f"{STORY_PRIVACY_SHEET}: a live story row leads to RTMP again")
+    modes = set(re.findall(r"switchModeInternal\((-?\d+)\)", tree.read(STORY_MODE_TABS)))
+    if modes != {"0", "1"}:
+        raise PatchError(f"{STORY_MODE_TABS}: the camera switches to the modes {sorted(modes)}; the Live tab is back")
+    # The live mode is only compared with, never set: no tab, link or caller leads the camera there.
+    live = _java_files_naming(tree, "MODE_LIVE")
+    if live != {"ui/Stories/recorder/StoryRecorder.java"}:
+        raise PatchError(f"{JAVA}: the live story mode is named in {sorted(live)}; a way into it is open")
+    if re.search(r"(?<![=!<>])=\s*MODE_LIVE\b|\(\s*MODE_LIVE\s*\)", tree.read(STORY_RECORDER)):
+        raise PatchError(f"{STORY_RECORDER}: the camera is set to the live story mode")
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        xml = p.read_text(encoding="utf-8")
+        folder = p.parent.name
+        if (folder not in E2E_FAILED_TEXT or xml.count(_e2e_failed_line(folder)) != 1
+                or xml.count(f'<string name="{E2E_FAILED_KEY}">') != 1):
+            raise PatchError(f"{p.relative_to(tree.root)}: {E2E_FAILED_KEY} is not the text of task 094")
+
+
+# --- Call colours (the owner's decision of 2026-11-12) -------------------------
+# The call screens take variant A "Sage" instead of Telegram's colours. Telegram
+# iOS draws three four-point gradients (CallBackgroundLayer.swift:108-124):
+# connecting 568FD6/626ED5/A667D5/7664DA, connected ACBD65/459F8D/53A4D1/3E917A,
+# weak signal C0508D/F09536/CE5081/FC7C4C. Pluma's, in the same order of points,
+# are CALL_CONNECTING, CALL_CONNECTED and CALL_WEAK. Android has gradients of its
+# own for the same states (VoIpGradientLayout: blue-violet and blue-green while
+# calling, green when connected, orange-red on a weak signal, each with a darker
+# variant the buttons are tinted from and a lighter one), and the group call
+# paints its states from the voipgroup_* colour keys and from literals. Every
+# such colour is mapped by meaning: Telegram's blue and purple take the
+# connecting set, its green the connected set, its red and orange the weak set;
+# the accents of the dark call screens (checks, progress, the listening text,
+# selectors) the dark accent of the palette (docs/tasks/017-rebranding.md of the
+# server repository), links its dark link colour, and the bluish greys of the
+# panels the sage grey of the same lightness. The darker and lighter variants of
+# VoIpGradientLayout are derived from the sets as upstream's are from its own:
+# value x0.82, and value x1.22 with saturation x0.8.
+# Kept as Telegram has them, being actions rather than states (decisions to
+# confirm with the owner): the green accept and red decline and end-call
+# buttons of a private call and the red "end" and green "answer" of its
+# notification, the red leave button and leave item of a group call, the red of
+# dragging the call bubble away to close it, the recording dot
+# of the record item (hidden, ADR 0060 §4) and the red of a message over its
+# length limit.
+CALL_CONNECTING = (0xFF3A4A3C, 0xFF4F6E52, 0xFF2C3A2D, 0xFF5B7A5E)
+CALL_CONNECTED = (0xFF5B7A5E, 0xFF6F8F72, 0xFF4F6E52, 0xFF7FA082)
+CALL_WEAK = (0xFF8A5A44, 0xFFA86B4C, 0xFF7A4E3B, 0xFFB97A55)
+CALL_ACCENT = 0xFF9DBB9F
+CALL_LINK = 0xFFB2CEB4
+CALL_SAGE_HUE = 125  # the hue of the accent #5B7A5E, in degrees
+CALL_DARK = 0.82
+CALL_LIGHT = 1.22
+
+
+def _rgb(c):
+    return (c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255
+
+
+def _argb(alpha, rgb):
+    r, g, b = (round(x * 255) for x in rgb)
+    return alpha & 0xFF000000 | r << 16 | g << 8 | b
+
+
+def call_neutral(c):
+    """The sage grey of the lightness of c, with its alpha."""
+    _, lightness, saturation = colorsys.rgb_to_hls(*_rgb(c))
+    return _argb(c, colorsys.hls_to_rgb(CALL_SAGE_HUE / 360, lightness, min(saturation, 0.1)))
+
+
+def call_darker(c):
+    h, s, v = colorsys.rgb_to_hsv(*_rgb(c))
+    return _argb(c, colorsys.hsv_to_rgb(h, s, v * CALL_DARK))
+
+
+def call_lighter(c):
+    h, s, v = colorsys.rgb_to_hsv(*_rgb(c))
+    return _argb(c, colorsys.hsv_to_rgb(h, s * 0.8, min(v * CALL_LIGHT, 1)))
+
+
+def telegram_call_colour(c):
+    """A colour of Telegram's call screens: a blue, cyan, purple or pink, even a
+    bluish grey (the muted icon and the grey texts of the group call, #6F7980 and
+    the like, are 0.1 saturated); a vivid green; a bright red, orange or yellow,
+    or a light coral red (#EC7777). The sage sets, neutral greys and the
+    terracotta of the weak set (hue 18-22) are none of them."""
+    if c >> 24 < 0x20:
+        return False
+    h, s, v = _hsv(c)
+    return (170 <= h < 345 and s >= 0.08 and v >= 0.08
+            or 70 <= h < 170 and s >= 0.4 and v >= 0.3
+            or (h >= 345 or h < 70) and s >= 0.5 and v >= 0.75
+            or (h >= 345 or h < 12) and s >= 0.35 and v >= 0.6)
+
+
+def jhex(c):
+    return f"0x{c:08X}"
+
+
+C1, C2, C3, C4 = CALL_CONNECTING
+G1, G2, G3, G4 = CALL_CONNECTED
+W1, W2, W3, W4 = CALL_WEAK
+
+# The defaults of the colour keys of the group call (ThemeColors), by meaning.
+# The keys are dark whatever the theme; the accent engine leaves them alone
+# (Theme.themeAccentExclusionKeys). Some of them colour dark sheets elsewhere
+# (sharing, the photo viewer), which take the sage greys with them.
+VOIPGROUP_COLOURS = {
+    "voipgroup_checkMenu": CALL_ACCENT,
+    # "Tap to mute": speaking, the connected set (radial: centre, middle, edge).
+    "voipgroup_muteButton": G4,
+    "voipgroup_muteButton2": G2,
+    "voipgroup_muteButton3": G1,
+    "voipgroup_searchBackground": call_neutral(0xFF303B47),
+    "voipgroup_scrollUp": call_neutral(0xFF394654),
+    "voipgroup_soundButton": call_neutral(0x7D2C414D),
+    "voipgroup_soundButtonActive": 0x7D000000 | C2 & 0xFFFFFF,
+    "voipgroup_soundButtonActiveScrolled": 0x82000000 | C4 & 0xFFFFFF,
+    "voipgroup_soundButton2": 0x7D000000 | G3 & 0xFFFFFF,
+    "voipgroup_soundButtonActive2": 0x7D000000 | G2 & 0xFFFFFF,
+    "voipgroup_soundButtonActive2Scrolled": 0x82000000 | G4 & 0xFFFFFF,
+    "voipgroup_connectingProgress": CALL_ACCENT,
+    "voipgroup_disabledButton": call_neutral(0xFF1C2229),
+    "voipgroup_rtmpButton": call_neutral(0xFF2A3853),
+    "voipgroup_disabledButtonActive": call_neutral(0xFF2C3A45),
+    "voipgroup_disabledButtonActiveScrolled": 0x82000000 | C4 & 0xFFFFFF,
+    # "Tap to unmute": muted, the connecting set (radial: edge, centre).
+    "voipgroup_unmuteButton": C2,
+    "voipgroup_unmuteButton2": C4,
+    "voipgroup_actionBarUnscrolled": call_neutral(0xFF191F26),
+    "voipgroup_listViewBackgroundUnscrolled": call_neutral(0xFF222A33),
+    "voipgroup_actionBar": call_neutral(0xFF0F1317),
+    "voipgroup_actionBarItemsSelector": 0x1E000000 | CALL_LINK & 0xFFFFFF,
+    "voipgroup_mutedByAdminIcon": W4,
+    "voipgroup_listViewBackground": call_neutral(0xFF1C2229),
+    "voipgroup_dialogBackground": call_neutral(0xFF1C2229),
+    "voipgroup_listeningText": CALL_ACCENT,
+    "voipgroup_speakingText": G4,
+    "voipgroup_inviteMembersBackground": call_neutral(0xFF222A33),
+    "voipgroup_overlayBlue1": C4,
+    "voipgroup_overlayBlue2": C2,
+    "voipgroup_overlayGreen1": G4,
+    "voipgroup_overlayGreen2": G2,
+    "voipgroup_topPanelBlue1": C4,
+    "voipgroup_topPanelBlue2": C2,
+    "voipgroup_topPanelGreen1": G4,
+    "voipgroup_topPanelGreen2": G1,
+    "voipgroup_topPanelGray": call_neutral(0xFF8599AA),
+    "voipgroup_overlayAlertGradientMuted": C2,
+    "voipgroup_overlayAlertGradientMuted2": C3,
+    "voipgroup_overlayAlertGradientUnmuted": G1,
+    "voipgroup_overlayAlertGradientUnmuted2": C1,
+    # Muted by an admin, a raised hand, a scheduled call: Telegram's blue, red
+    # and purple gradient, by colour.
+    "voipgroup_mutedByAdminGradient": C4,
+    "voipgroup_mutedByAdminGradient2": W2,
+    "voipgroup_mutedByAdminGradient3": C2,
+    "voipgroup_overlayAlertMutedByAdmin": C2,
+    "voipgroup_overlayAlertMutedByAdmin2": C3,
+    "voipgroup_mutedByAdminMuteButton": 0x7F000000 | C4 & 0xFFFFFF,
+    "voipgroup_mutedByAdminMuteButtonDisabled": 0x33000000 | C4 & 0xFFFFFF,
+    "voipgroup_windowBackgroundWhiteInputFieldActivated": CALL_ACCENT,
+    # The muted icon and the grey texts: Telegram's bluish greys, the sage grey of
+    # the same lightness.
+    "voipgroup_mutedIcon": call_neutral(0xFF6F7980),
+    "voipgroup_mutedIconUnscrolled": call_neutral(0xFF7E868C),
+    "voipgroup_lastSeenText": call_neutral(0xFF79838A),
+    "voipgroup_lastSeenTextUnscrolled": call_neutral(0xFF858D94),
+    "voipgroup_searchPlaceholder": call_neutral(0xFF858D94),
+}
+# The keys kept as Telegram has them: the leave button and the leave item.
+VOIPGROUP_KEPT = ("voipgroup_leaveCallMenu", "voipgroup_leaveButton", "voipgroup_leaveButtonScrolled")
+# darkblue.attheme ("Dark Blue") sets one of the keys itself, a darker grey:
+# (theme file, key, upstream value, Pluma's).
+VOIPGROUP_THEME_FILE = ("darkblue.attheme", "voipgroup_topPanelGray", -10521727, call_neutral(0xFF5F7381))
+
+THEME_COLORS = f"{JAVA}/ui/ActionBar/ThemeColors.java"
+UI = f"{JAVA}/ui"
+VOIP_UI = f"{UI}/Components/voip"
+GRADIENT_LAYOUT = f"{VOIP_UI}/VoIpGradientLayout.java"
+PREVIEW_DIALOG = f"{VOIP_UI}/PrivateVideoPreviewDialog.java"
+PREVIEW_DIALOG_NEW = f"{VOIP_UI}/PrivateVideoPreviewDialogNew.java"
+RECORD_ALERT = f"{UI}/Components/GroupCallRecordAlert.java"
+NO_VIDEO = ("0xff212E3A", "0xff2B5B4D", "0xff245863", "0xff274558")
+
+# The background of a private call, VoIpGradientLayout's constructor. Each
+# line: the drawable, whether "black" (the call without the user's photo
+# behind) replaces it with a plain colour, upstream's four points, Pluma's.
+_GRADIENTS = (
+    ("bgBlueViolet", True, ("0xFFB456D8", "0xFF8148EC", "0xFF20A4D7", "0xFF3F8BEA"), CALL_CONNECTING),
+    ("bgBlueGreen", True, ("0xFF4576E9", "0xFF3B7AF1", "0xFF08B0A3", "0xFF17AAE4"), CALL_CONNECTING),
+    ("bgGreen", False, ("0xFF07A9AC", "0xFF07BA63", "0xFFA9CC66", "0xFF5AB147"), CALL_CONNECTED),
+    ("bgOrangeRed", False, ("0xFFE86958", "0xFFE7618F", "0xFFDB904C", "0xFFDE7238"), CALL_WEAK),
+    None,
+    ("bgBlueVioletDark", True, ("0xFFA736D0", "0xFF6A2BDD", "0xFF0F95C9", "0xFF287AE1"), tuple(map(call_darker, CALL_CONNECTING))),
+    ("bgBlueGreenDark", True, ("0xFF2D60D6", "0xFF2C6ADF", "0xFF009595", "0xFF0291C9"), tuple(map(call_darker, CALL_CONNECTING))),
+    ("bgGreenDark", False, ("0xFF008B8E", "0xFF01934C", "0xFF8FBD37", "0xFF319D27"), tuple(map(call_darker, CALL_CONNECTED))),
+    ("bgOrangeRedDark", False, ("0xFFE23F29", "0xFFE6306F", "0xFFC77616", "0xFFD75A16"), tuple(map(call_darker, CALL_WEAK))),
+    None,
+    ("bgBlueVioletLight", True, ("0xFFD664FF", "0xFF9258FD", "0xFF2DC0F9", "0xFF57A1FF"), tuple(map(call_lighter, CALL_CONNECTING))),
+    ("bgBlueGreenLight", True, ("0xFF558BFF", "0xFF5FABFF", "0xFF04DCCC", "0xFF28C2FF"), tuple(map(call_lighter, CALL_CONNECTING))),
+    ("bgGreenLight", False, ("0xFF00D2D5", "0xFF09E279", "0xFFC7EF60", "0xFF6DD957"), tuple(map(call_lighter, CALL_CONNECTED))),
+    ("bgOrangeRedLight", False, ("0xFFFF7866", "0xFFFF82A5", "0xFFFEB055", "0xFFFF8E51"), tuple(map(call_lighter, CALL_WEAK))),
+    ("bgGreenLightReveal", False, ("0xFF00D2D5", "0xFF09E279", "0xFFC7EF60", "0xFF6DD957"), tuple(map(call_lighter, CALL_CONNECTED))),
+    ("bgGreenDarkReveal", False, ("0xFF008B8E", "0xFF01934C", "0xFF8FBD37", "0xFF319D27"), tuple(map(call_darker, CALL_CONNECTED))),
+)
+
+
+def _gradient_lines(black, upstream):
+    lines = []
+    for g in _GRADIENTS:
+        if g is None:
+            lines.append("\n")
+            continue
+        name, plain, old, new = g
+        points = ", ".join(old if upstream else map(jhex, new))
+        motion = f"new MotionBackgroundDrawable({points}, 0, false, true)"
+        lines.append(f"        {name} = black ? new PureColorDrawable({black}) : {motion};\n" if plain
+                     else f"        {name} = {motion};\n")
+    return "".join(lines)
+
+
+_GRADIENT_EDIT = (GRADIENT_LAYOUT, _gradient_lines("0xFF191F26", True),
+                  "        // pluma: the call background of Pluma, variant A \"Sage\" (owner, 2026-11-12).\n"
+                  + _gradient_lines(jhex(call_neutral(0xFF191F26)), False))
+
+
+def _recoloured(text, colours):
+    """text with each literal of colours (by its exact spelling) in Pluma's colour."""
+    def one(m):
+        return jhex(colours[m.group(0)]) if m.group(0) in colours else m.group(0)
+    out = re.sub(r"0x[0-9A-Fa-f]{8}\b", one, text)
+    for literal in colours:
+        if literal not in text:
+            raise PatchError(f"call colours: {literal} is not in {text!r}")
+    return out
+
+
+# The literals of the call screens, by meaning: (file, the upstream text, its
+# literals and their new colours, how many times the text is there).
+_CALL_LITERALS = (
+    (f"{UI}/VoIPFragment.java",
+     "new BackgroundGradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{0xFF1b354e, 0xFF255b7d});",
+     {"0xFF1b354e": C3, "0xFF255b7d": C2}, 1),
+    (f"{UI}/VoIPFragment.java", "            backgroundPaint.setColor(0xFF222A33);\n",
+     {"0xFF222A33": call_neutral(0xFF222A33)}, 1),
+    (f"{UI}/GroupCallActivity.java",
+     "                currentColor = 0xffCC5757;\n"
+     "            } else if (currentProgress > 0.25f && currentProgress < 0.5f) {\n"
+     "                currentColor = 0xffC9A53B;\n"
+     "            } else if (currentProgress >= 0.5f && currentProgress <= 0.75f) {\n"
+     "                currentColor = 0xff57BC6B;\n"
+     "            } else {\n"
+     "                currentColor = 0xff4DA6DF;\n",
+     {"0xffCC5757": W2, "0xffC9A53B": W4, "0xff57BC6B": G4, "0xff4DA6DF": CALL_ACCENT}, 1),
+    (f"{UI}/GroupCallActivity.java", "        liveLabelPaint.setColor(0xff3d4657);\n",
+     {"0xff3d4657": call_neutral(0xFF3D4657)}, 1),
+    (f"{UI}/GroupCallActivity.java", "isLive ? 0xffee3e4c : 0xff3d4657;",
+     {"0xffee3e4c": W2, "0xff3d4657": call_neutral(0xFF3D4657)}, 1),
+    (f"{UI}/GroupCallActivity.java", "VoIPService.STATE_ESTABLISHED ? 0xffee3e4c : 0xff3d4657);",
+     {"0xffee3e4c": W2, "0xff3d4657": call_neutral(0xFF3D4657)}, 2),
+    (f"{UI}/GroupCallActivity.java", "callMessageEnterView.getEditText().setLinkTextColor(0xFF4db8ff);",
+     {"0xFF4db8ff": CALL_LINK}, 1),
+    (f"{UI}/GroupCallActivity.java", "backgroundPaint.setColor(0xFF1c2229);",
+     {"0xFF1c2229": call_neutral(0xFF1C2229)}, 2),
+    (f"{UI}/GroupCallActivity.java", "ColorUtils.compositeColors(0x0DFFFFFF, 0xFF1c2229)",
+     {"0xFF1c2229": call_neutral(0xFF1C2229)}, 1),
+    (f"{UI}/GroupCallActivity.java", "Picker.setSelectorColor(0xff6D89ED);",
+     {"0xff6D89ED": CALL_ACCENT}, 3),
+    (f"{UI}/GroupCallActivity.java", "setTextColor(0xff7B8389);",
+     {"0xff7B8389": call_neutral(0xFF7B8389)}, 2),
+    (f"{UI}/CreateGroupCallSheet.java", "closeButton.setColorFilter(new PorterDuffColorFilter(0xFF848D94, PorterDuff.Mode.SRC_IN));",
+     {"0xFF848D94": call_neutral(0xFF848D94)}, 1),
+    (f"{UI}/GroupCallActivity.java", "tmpPaint.setColor(0xFF00FF00);",
+     {"0xFF00FF00": G1}, 2),
+    (f"{UI}/GroupCallActivity.java", "otherItem.redrawPopup(0xff232A33);",
+     {"0xff232A33": call_neutral(0xFF232A33)}, 1),
+    (f"{UI}/GroupCallActivity.java", "HintView.setBackgroundColor(0xea272f38, 0xffffffff);",
+     {"0xea272f38": call_neutral(0xEA272F38)}, 2),
+    (f"{UI}/GroupCallActivity.java", "bgPaint.setColor(0xFF212b35);",
+     {"0xFF212b35": call_neutral(0xFF212B35)}, 1),
+    (f"{UI}/GroupCallSheet.java", "separator.setBackgroundColor(0xFF2A3036);",
+     {"0xFF2A3036": call_neutral(0xFF2A3036)}, 1),
+    (f"{VOIP_UI}/CallPipSelfView.java", "frame.setBackgroundColor(0xFF1B1F23);",
+     {"0xFF1B1F23": call_neutral(0xFF1B1F23)}, 1),
+    (f"{VOIP_UI}/CallSystemPipView.java", "setBackgroundColor(0xFF1B1F23);",
+     {"0xFF1B1F23": call_neutral(0xFF1B1F23)}, 1),
+    (f"{VOIP_UI}/GroupCallPipContent.java", "setBackgroundColor(0xFF1B1F23);",
+     {"0xFF1B1F23": call_neutral(0xFF1B1F23)}, 1),
+    (f"{VOIP_UI}/RtmpStreamPipContent.java", "canvas.drawColor(0xFF1B1F23);",
+     {"0xFF1B1F23": call_neutral(0xFF1B1F23)}, 1),
+    (f"{VOIP_UI}/VoIPTextureView.java", "backgroundView.setBackgroundColor(0xff1b1f23);\n",
+     {"0xff1b1f23": call_neutral(0xFF1B1F23)}, 1),
+    # The tile of a participant without video and of a screencast.
+    (f"{VOIP_UI}/VoIPTextureView.java", "new MotionBackgroundDrawable(0xff212E3A, 0xff2B5B4D, 0xff245863, 0xff274558, true)",
+     dict(zip(NO_VIDEO, CALL_CONNECTING)), 1),
+    (f"{VOIP_UI}/GroupCallMiniTextureView.java", "new MotionBackgroundDrawable(0xff212E3A, 0xff2B5B4D, 0xff245863, 0xff274558, true)",
+     dict(zip(NO_VIDEO, CALL_CONNECTING)), 1),
+    (PREVIEW_DIALOG, "new MotionBackgroundDrawable(0xff212E3A, 0xff2B5B4D, 0xff245863, 0xff274558, true)",
+     dict(zip(NO_VIDEO, CALL_CONNECTING)), 1),
+    (PREVIEW_DIALOG_NEW, "new MotionBackgroundDrawable(0xff212E3A, 0xff2B5B4D, 0xff245863, 0xff274558, true)",
+     dict(zip(NO_VIDEO, CALL_CONNECTING)), 1),
+    # The camera preview of a private call: connected and calling.
+    (PREVIEW_DIALOG_NEW, "bgGreen = new MotionBackgroundDrawable(0xFF5FD051, 0xFF00B48E, 0xFFA9CC66, 0xFF5AB147, 0, false, true);",
+     dict(zip(("0xFF5FD051", "0xFF00B48E", "0xFFA9CC66", "0xFF5AB147"), CALL_CONNECTED)), 1),
+    (PREVIEW_DIALOG_NEW, "bgBlueViolet = new MotionBackgroundDrawable(0xFF00A3E6, 0xFF296EF7, 0xFF18CEE2, 0xFF3FB2FF, 0, false, true);",
+     dict(zip(("0xFF00A3E6", "0xFF296EF7", "0xFF18CEE2", "0xFF3FB2FF"), CALL_CONNECTING)), 1),
+    # The pages of the camera preview of a group call and of the record alert:
+    # green and cyan, blue and purple, purple, red and yellow.
+    (PREVIEW_DIALOG,
+     "                        color1 = 0xff77E55C;\n"
+     "                        color2 = 0xff56C7FE;\n",
+     {"0xff77E55C": G4, "0xff56C7FE": G1}, 1),
+    (PREVIEW_DIALOG,
+     "                        color1 = 0xff57A4FE;\n"
+     "                        color2 = 0xff766EE9;\n",
+     {"0xff57A4FE": C4, "0xff766EE9": C2}, 1),
+    (PREVIEW_DIALOG,
+     "                        color1 = 0xff766EE9;\n"
+     "                        color2 = 0xffF05459;\n"
+     "                        color3 = 0xffE4A756;\n",
+     {"0xff766EE9": C2, "0xffF05459": W2, "0xffE4A756": W4}, 1),
+    (RECORD_ALERT,
+     "                        color1 = 0xff77E55C;\n"
+     "                        color2 = 0xff56C7FE;\n",
+     {"0xff77E55C": G4, "0xff56C7FE": G1}, 1),
+    (RECORD_ALERT,
+     "                        color1 = 0xff57A4FE;\n"
+     "                        color2 = 0xff766EE9;\n",
+     {"0xff57A4FE": C4, "0xff766EE9": C2}, 1),
+    (RECORD_ALERT,
+     "                        color1 = 0xff766EE9;\n"
+     "                        color2 = 0xffF05459;\n"
+     "                        color3 = 0xffE4A756;\n",
+     {"0xff766EE9": C2, "0xffF05459": W2, "0xffE4A756": W4}, 1),
+    # The tint of a call's avatar when the photo gives no dark colour of its own.
+    (f"{VOIP_UI}/VoIPOverlayBackground.java", "palette.getDarkMutedColor(0xFF547499)",
+     {"0xFF547499": C2}, 1),
+    # The call bubble over the app while it is dragged.
+    (f"{UI}/Components/GroupCallPip.java", "ColorUtils.blendARGB(0x66050D15, 0x66350C12, prepareToRemoveProgress)",
+     {"0x66050D15": call_neutral(0x66050D15)}, 1),
+    # The chat's call panel: the waves before the theme colours are read, the
+    # "notify me" button of a scheduled call.
+    (f"{UI}/Components/CapsuleBlobDrawable.java", "        int color = 0xFF534AB7;\n",
+     {"0xFF534AB7": C4}, 1),
+    (f"{UI}/Components/FragmentContextView.java", "new int[]{0xff658ffe, 0xff956ffd}",
+     {"0xff658ffe": C4, "0xff956ffd": C2}, 1),
+    # The notification of a call: Android 8 and later colour it with this.
+    (VOIP_SERVICE, "builder.setColor(0xff282e31);", {"0xff282e31": call_neutral(0xFF282E31)}, 1),
+)
+
+CALL_COLOUR_EDITS = (
+    tuple((rel, old, _recoloured(old, colours), count) for rel, old, colours, count in _CALL_LITERALS)
+    + ((_GRADIENT_EDIT[0], _GRADIENT_EDIT[1], _GRADIENT_EDIT[2], 1),
+       (f"{RES}/drawable/call_notification_bg.xml", '<solid android:color="#282e31"/>',
+        f'<solid android:color="#{call_neutral(0xFF282E31) & 0xFFFFFF:06x}"/>', 1))
+)
+
+# The files of the call screens the check reads in full: the private call, the
+# group call with its sheets, cells, bubble and alerts, the chat's call panel,
+# the notifications of a call.
+CALL_UI_FILES = (
+    f"{UI}/VoIPFragment.java", f"{UI}/GroupCallActivity.java", f"{UI}/GroupCallSheet.java",
+    f"{UI}/CreateGroupCallSheet.java", f"{UI}/GroupCallTabletGridAdapter.java",
+    f"{UI}/Components/GroupVoipInviteAlert.java", f"{UI}/Components/JoinCallAlert.java",
+    f"{UI}/Components/JoinCallByUrlAlert.java", f"{UI}/Components/CreateGroupCallBottomSheet.java",
+    f"{UI}/Components/CapsuleBlobDrawable.java", f"{UI}/Components/FragmentContextView.java",
+    f"{UI}/Components/FragmentContextViewWavesDrawable.java", f"{RES}/drawable/call_notification_bg.xml",
+    VOIP_SERVICE, f"{VOIP}/VoIPGroupNotification.java", f"{VOIP}/VoIPPreNotificationService.java",
+)
+CALL_UI_GLOBS = (f"{VOIP_UI}/*.java", f"{UI}/Cells/GroupCall*.java", f"{UI}/Components/GroupCall*.java")
+# The literals kept as Telegram has them (see above), with how many times.
+CALL_COLOURS_KEPT = {
+    (f"{UI}/VoIPFragment.java", "0xfff01d2c"): 2,
+    (f"{VOIP_UI}/AcceptDeclineView.java", "0xff40c749"): 1,
+    (f"{VOIP_UI}/AcceptDeclineView.java", "0xfff01d2c"): 2,
+    (f"{VOIP_UI}/AcceptDeclineView.java", "0xffff3846"): 1,
+    (f"{VOIP_UI}/AcceptDeclineView.java", "0xff4dd156"): 1,
+    (f"{VOIP_UI}/EndCloseLayout.java", "0xfff4606c"): 1,
+    (f"{UI}/Components/GroupCallPipAlertView.java", "0xffce4a4a"): 1,
+    (f"{UI}/Components/GroupCallPipButton.java", "0xffd54141"): 1,
+    (f"{UI}/Components/GroupCallPipButton.java", "0xfff76e7e"): 1,
+    (f"{UI}/GroupCallActivity.java", "0xffee7d79"): 2,
+    (f"{UI}/GroupCallActivity.java", "0xffec7777"): 1,
+    # The red "end" and green "answer" actions of a call's notification.
+    (VOIP_SERVICE, "0xfff44336"): 1,
+    (VOIP_SERVICE, "0xff00aa00"): 1,
+    (f"{VOIP}/VoIPGroupNotification.java", "0xfff44336"): 1,
+    (f"{VOIP}/VoIPGroupNotification.java", "0xff00aa00"): 1,
+    (f"{VOIP}/VoIPPreNotificationService.java", "0xfff44336"): 1,
+    (f"{VOIP}/VoIPPreNotificationService.java", "0xff00aa00"): 1,
+}
+
+
+def _call_ui_files(tree):
+    files = set(CALL_UI_FILES)
+    for pattern in CALL_UI_GLOBS:
+        files.update(str(p.relative_to(tree.root)) for p in tree.root.glob(pattern))
+    return sorted(files)
+
+
+def _colour_literals(text):
+    """The colour literals of a Java or XML file outside line comments, lower-case."""
+    found = []
+    for line in text.split("\n"):
+        code = line.split("//", 1)[0] if not line.lstrip().startswith("<!--") else ""
+        found += [m.lower() for m in re.findall(r"\b0x[0-9A-Fa-f]{8}\b", code)]
+        found += ["0xff" + m.lower() for m in re.findall(r'"#([0-9A-Fa-f]{6})"', code)]
+        found += ["0x" + m.lower() for m in re.findall(r'"#([0-9A-Fa-f]{8})"', code)]
+    return found
+
+
+def _voipgroup_line(key, colour):
+    return f"        defaultColors[key_{key}] = {colour};\n"
+
+
+def call_colours(tree):
+    # Every anchor first, so that a changed upstream fails before anything is written.
+    colours = tree.read(THEME_COLORS)
+    for rel, old, _, count in CALL_COLOUR_EDITS:
+        tree.expect(rel, old, count)
+    asset, theme_key, theme_old, theme_new = VOIPGROUP_THEME_FILE
+    theme_file = f"{MAIN}/assets/{asset}"
+    tree.expect(theme_file, f"\n{theme_key}={theme_old}\n")
+    names, defaults = theme_defaults(colours)
+    keys = {k[4:]: v for k, v in defaults.items() if k.startswith("key_voipgroup_")}
+    for key in VOIPGROUP_COLOURS:
+        if key not in keys or len(re.findall(rf"        defaultColors\[key_{key}\] = [^;]+;\n", colours)) != 1:
+            raise PatchError(f"{THEME_COLORS}: no colour key {key}, or more than one; upstream changed it")
+    missed = sorted(k for k, v in keys.items() if telegram_call_colour(v) and k not in VOIPGROUP_COLOURS and k not in VOIPGROUP_KEPT)
+    if missed:
+        raise PatchError(f"{THEME_COLORS}: Telegram's call colours in {', '.join(missed)}, which the patch does not map")
+    for rel, old, new, count in CALL_COLOUR_EDITS:
+        tree.replace(rel, old, new, count)
+    for key, colour in VOIPGROUP_COLOURS.items():
+        line = re.search(rf"        defaultColors\[key_{key}\] = ([^;]+);\n", tree.read(THEME_COLORS))
+        tree.replace(THEME_COLORS, line.group(0), _voipgroup_line(key, jhex(colour)))
+    tree.replace(theme_file, f"\n{theme_key}={theme_old}\n", f"\n{theme_key}={_signed(theme_new)}\n")
+
+
+def _signed(c):
+    """A colour as the signed int of a .attheme file."""
+    return c - (1 << 32) if c & 0x80000000 else c
+
+
+def verify_call_colours(tree):
+    for rel, old, new, count in CALL_COLOUR_EDITS:
+        text = tree.read(rel)
+        if old in text or text.count(new) != count:
+            raise PatchError(f"{rel}: the call colour edit {new.strip().splitlines()[-1][:80]!r} is not there")
+    # Every colour key of the group call, in ThemeColors and in each default theme.
+    names, defaults = theme_defaults(tree.read(THEME_COLORS))
+    keys = {k[4:]: v for k, v in defaults.items() if k.startswith("key_voipgroup_")}
+    for key, colour in VOIPGROUP_COLOURS.items():
+        if keys.get(key) != colour:
+            raise PatchError(f"{THEME_COLORS}: {key} is not the call colour of Pluma")
+    asset, key, old, new = VOIPGROUP_THEME_FILE
+    if f"\n{key}={_signed(new)}\n" not in tree.read(f"{MAIN}/assets/{asset}"):
+        raise PatchError(f"{asset}: {key} is not the call colour of Pluma")
+    for asset, _, _ in DEFAULT_THEMES.values():
+        theme = dict(keys)
+        for name, value in theme_file_values(tree.read(f"{MAIN}/assets/{asset}")).items():
+            if name.startswith("voipgroup_"):
+                theme[name] = value
+        left = sorted(k for k, v in theme.items() if telegram_call_colour(v) and k not in VOIPGROUP_KEPT)
+        if left:
+            raise PatchError(f"{asset}: Telegram's call colours are left in {', '.join(left)}")
+    # Every colour literal of the call screens.
+    for rel in _call_ui_files(tree):
+        if not (tree.root / rel).is_file():
+            raise PatchError(f"{rel}: the call screen is gone; upstream changed it")
+        found = collections.Counter(_colour_literals(tree.read(rel)))
+        for literal, n in found.items():
+            if telegram_call_colour(int(literal, 16)) and CALL_COLOURS_KEPT.get((rel, literal)) != n:
+                raise PatchError(f"{rel}: Telegram's call colour {literal} is still there ({n} times)")
+        for (kept_rel, literal), n in CALL_COLOURS_KEPT.items():
+            if kept_rel == rel and found[literal] != n:
+                raise PatchError(f"{rel}: {literal}, which the call keeps, is there {found[literal]} times, expected {n}")
 
 
 def main(argv=None):

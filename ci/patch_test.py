@@ -3,6 +3,7 @@ import hashlib
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1949,6 +1950,704 @@ class ServiceAccountTest(unittest.TestCase):
                 patch.verify_service_account(tree)
             tree.write(patch.SERVICE_ACCOUNT_LOCALE, java)
             patch.verify_service_account(tree)
+
+
+# The checkout ci/fetch-upstream.sh makes, with its submodules; the CI's check
+# job has none and skips the tests that need it.
+UPSTREAM = ROOT / "upstream"
+
+
+def upstream_env():
+    return patch.load_env(ROOT / "upstream.env")
+
+
+class GroupCallsE2ETest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect, with the places
+    # that name the RTMP sheet after the patch, the conference's join with its
+    # key, the camera tabs upstream keeps, and every strings.xml.
+    EXTRA = {
+        patch.VOIP_SERVICE: "final TL_phone.joinGroupCall req = new TL_phone.joinGroupCall();\n"
+                            "req.public_key = conference.getMyPublicKey();\n",
+        patch.CREATE_RTMP_SHEET: "public class CreateRtmpStreamBottomSheet {\n}\n",
+        patch.STORY_PRIVACY_SHEET: "final CreateRtmpStreamBottomSheet[] sheet = new CreateRtmpStreamBottomSheet[1];\n",
+        patch.STORY_MODE_TABS: "photoLayout.setOnClickListener(v -> switchModeInternal(0));\n"
+                               "videoLayout.setOnClickListener(v -> switchModeInternal(1));\n",
+        patch.STORY_RECORDER: "public static final int MODE_LIVE = -1;\n"
+                              "livePeerView.setShowing(mode == MODE_LIVE, true);\n"
+                              "setActionBarButtonVisible(flashButton, mode != MODE_LIVE, animated);\n",
+    }
+
+    def tree(self, root, edits=patch.GROUP_CALLS_E2E_EDITS):
+        files = dict(self.EXTRA)
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "\nx();\n"
+        for folder in patch.E2E_FAILED_TEXT:
+            files[f"{patch.RES}/{folder}/strings.xml"] = "<resources>\n</resources>\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        (root / "TMessagesProj").mkdir(exist_ok=True)
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_group_calls_e2e(tree)
+            patch.group_calls_e2e(tree)
+            patch.verify_group_calls_e2e(tree)
+            voip = tree.read(patch.VOIP_SERVICE)
+            # A chat call joins with the user's key on the chain's last block, and the interface's
+            # conference is one without a chat.
+            self.assertIn("return joinConference != null || conference != null && chat == null;", voip)
+            self.assertIn("\t\t\treq.flags |= 8; // pluma: the key and the join block (ADR 0060)\n", voip)
+            self.assertIn("\t\t\t\tconference = plumaChatConference();", voip)
+            self.assertIn("}, conference != null, isConference());", voip)
+            # VoIPService indents with tabs, and so do the edits.
+            for rel, _, new in patch.GROUP_CALLS_E2E_EDITS:
+                if rel == patch.VOIP_SERVICE:
+                    self.assertNotRegex(new, r"(?m)^ ")
+            native = tree.read(patch.NATIVE_INSTANCE)
+            self.assertIn("noiseSupression, e2e, isConference);", native)
+            jni = tree.read(patch.NATIVE_GROUP_JNI)
+            self.assertIn("    if (e2e) { // pluma", jni)
+            for folder, text in patch.E2E_FAILED_TEXT.items():
+                self.assertIn(f'<string name="{patch.E2E_FAILED_KEY}">{text}</string>',
+                              tree.read(f"{patch.RES}/{folder}/strings.xml"))
+
+    def test_second_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.group_calls_e2e(tree)
+            rels = {rel for rel, _, _ in patch.GROUP_CALLS_E2E_EDITS}
+            patched = {rel: tree.read(rel) for rel in rels}
+            with self.assertRaises(patch.PatchError):
+                patch.group_calls_e2e(tree)
+            # Several edits keep their anchor; a second run writes nothing.
+            for rel, text in patched.items():
+                self.assertEqual(tree.read(rel), text)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.GROUP_CALLS_E2E_EDITS):
+            changed = old[:len(old) // 2] + "added();" + old[len(old) // 2:]
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.GROUP_CALLS_E2E_EDITS)]
+            with self.subTest(edit=i, file=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = {r: tree.read(r) for r, _, _ in edits}
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.group_calls_e2e(tree)
+                for r, text in before.items():
+                    self.assertEqual(tree.read(r), text)
+        # An anchor upstream uses twice.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), patch.GROUP_CALLS_E2E_EDITS + patch.GROUP_CALLS_E2E_EDITS[2:3])
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.group_calls_e2e(tree)
+        # A string of the key upstream already has.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values-de/strings.xml"
+            tree.write(rel, f'<resources>\n    <string name="{patch.E2E_FAILED_KEY}">x</string>\n</resources>\n')
+            with self.assertRaisesRegex(patch.PatchError, "upstream has a string"):
+                patch.group_calls_e2e(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.group_calls_e2e(tree)
+            for rel, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old), patched.replace(new, ""), patched + new):
+                    with self.subTest(file=rel, edit=new.strip().splitlines()[0][:80]):
+                        self.assertNotEqual(text, patched)
+                        tree.write(rel, text)
+                        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                            patch.verify_group_calls_e2e(tree)
+                tree.write(rel, patched)
+            patch.verify_group_calls_e2e(tree)
+            # What upstream could bring back next to the edits.
+            for rel, extra, error in (
+                (patch.VOIP_SERVICE, 'newModeStreaming = object.optBoolean("stream");\n', "still there"),
+                (patch.VOIP_SERVICE, 'isRtmpStream = intent.getBooleanExtra("isRtmpStream", false);\n', "still there"),
+                (patch.VOIP_SERVICE, "startGroupCall(ssrc, json, true);\n", "still there"),
+                (patch.VOIP_SERVICE, "final TL_phone.joinGroupCall req = new TL_phone.joinGroupCall();\n", "without the user's key"),
+                (patch.VOIP_SERVICE, "x(R.string.PlumaCallEncryptionFailed);\n", "self-recovery"),
+                (patch.JOIN_CALL_ALERT, "TL_phone.getGroupCallJoinAs req;\n", "join-as list"),
+                (patch.GROUP_CALL_ACTIVITY, "recordItem.setVisibility(View.VISIBLE);\n", "record item is shown again"),
+                (patch.GROUP_CALL_ACTIVITY, "recordItem.setVisibility(visible ? View.VISIBLE : View.GONE);\n", "record item is shown again"),
+                (patch.JOIN_CALL_ALERT, "call.toggleRecord(null, 0);\n", "a way into recording is open"),
+                (patch.GROUP_CALL_ACTIVITY, "CreateRtmpStreamBottomSheet.show(null, null, 0, false, null);\n", "a way into it is open"),
+                (patch.STORY_PRIVACY_SHEET, 'items.add(ItemInner.asButton(5, "", ""));\n', "leads to RTMP"),
+                (patch.STORY_MODE_TABS, "liveLayout.setOnClickListener(v -> switchModeInternal(-1));\n", "Live tab is back"),
+                (patch.LINK_MANAGER, "mode = StoryRecorder.MODE_LIVE;\n", "a way into it is open"),
+                (patch.STORY_RECORDER, "mode = MODE_LIVE;\n", "set to the live story mode"),
+                (patch.STORY_RECORDER, "setMode(MODE_LIVE);\n", "set to the live story mode"),
+            ):
+                text = tree.read(rel)
+                with self.subTest(extra=extra):
+                    tree.write(rel, text + extra)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_group_calls_e2e(tree)
+                tree.write(rel, text)
+            # A language without the text, or with another one.
+            rel = f"{patch.RES}/values-uk/strings.xml"
+            xml = tree.read(rel)
+            for damaged in (xml.replace(patch._e2e_failed_line("values-uk"), ""),
+                            xml.replace(patch.E2E_FAILED_TEXT["values-uk"], "x")):
+                tree.write(rel, damaged)
+                with self.assertRaisesRegex(patch.PatchError, "not the text of task 094"):
+                    patch.verify_group_calls_e2e(tree)
+            tree.write(rel, xml)
+            patch.verify_group_calls_e2e(tree)
+
+    # PlumaE2EStatus v1 as ADR 0060 §5 of the server repository writes it: every field
+    # required, no other allowed.
+    V1_FIELDS = {"colibriClass", "v", "seq", "height", "lastBlock", "offset0", "offset1", "error",
+                 "sendEpochs", "decryptEpochs", "unknownEpochs", "encrypted", "encryptFailed", "senders"}
+    V1_SENDER_FIELDS = {"user", "ok", "unknownEpoch", "tooOld", "duplicate", "failed", "lastOkMs"}
+
+    @staticmethod
+    def written(*rels):
+        # VoIPService's edits are indented with tabs, the others with spaces.
+        return "".join(new for rel, _, new in patch.GROUP_CALLS_E2E_EDITS if rel in rels).replace("\t", "    ")
+
+    def test_report_fields(self):
+        self.assertEqual(len(patch.E2E_STATUS_FIELDS), len(self.V1_FIELDS))
+        self.assertEqual(set(patch.E2E_STATUS_FIELDS), self.V1_FIELDS)
+        self.assertEqual(set(patch.E2E_STATUS_SENDER_FIELDS), self.V1_SENDER_FIELDS)
+        # The fields the code writes are the ones of v1, none of them carries a key, a nonce, an
+        # emoji or a frame, and nothing else is written into the report.
+        native = self.written(patch.NATIVE_GROUP_JNI)
+        written = set(re.findall(r'\\"(\w+)\\":', native))
+        self.assertEqual(written, set(patch.E2E_STATUS_NATIVE_FIELDS) | self.V1_SENDER_FIELDS)
+        java = self.written(patch.CONFERENCE_CALL, patch.VOIP_SERVICE)
+        self.assertEqual(set(re.findall(r'status\.put\("(\w+)", ', java)),
+                         set(patch.E2E_STATUS_JAVA_FIELDS) | {"encrypted", "encryptFailed", "senders"})
+        self.assertNotIn("broadcasts", java)
+        self.assertIn(f'\\"colibriClass\\":\\"{patch.E2E_STATUS_CLASS}\\",\\"v\\":1', native)
+        for field in patch.E2E_STATUS_FIELDS + patch.E2E_STATUS_SENDER_FIELDS:
+            with self.subTest(field=field):
+                self.assertNotRegex(field.lower(), r"key|nonce|emoji|secret|frame|payload")
+
+    def test_report_semantics(self):
+        native = self.written(patch.NATIVE_GROUP_JNI)
+        java = self.written(patch.CONFERENCE_CALL, patch.VOIP_SERVICE)
+        # List limits and the 8-byte hash prefixes.
+        for limit in ("kHashPrefix = 8;", "kMaxSendEpochs = 15;", "kMaxDecryptEpochs = 15;", "kMaxUnknownEpochs = 8;"):
+            self.assertIn(limit, native)
+        self.assertIn("PLUMA_E2E_STATUS_MAX_SENDERS = 100;", java)
+        self.assertIn("PLUMA_E2E_STATUS_MAX_BYTES = 16 * 1024;", java)
+        self.assertIn("PLUMA_E2E_STATUS_INTERVAL_MS = 5000;", java)
+        # Deltas: every frame counter and the epochs of the interval start again at each take;
+        # sendEpochs and the time of the last decrypted frame are kept.
+        take = native[native.index("    std::string take() {"):]
+        for reset in ("decryptEpochs.clear();", "unknownEpochs.clear();", "encrypted = 0;", "encryptFailed = 0;",
+                      "sender.ok = sender.unknownEpoch = sender.tooOld = sender.duplicate = sender.failed = 0;"):
+            self.assertIn(reset, take)
+        self.assertNotIn("sendEpochs.clear()", take)
+        self.assertNotIn("lastOkAt = ", take)
+        # Senders without frames in the interval are left out; lastOkMs is -1 for never.
+        self.assertIn("sender.ok + sender.unknownEpoch + sender.tooOld + sender.duplicate + sender.failed == 0", take)
+        self.assertIn("sender.lastOkAt < 0 ? -1 : now - sender.lastOkAt", take)
+        # seq from 1 at every join, the counters before it dropped; only over an open data
+        # channel of the main connection, and a report not sent leaves its counters.
+        start = java[java.index("    private void plumaStartE2EStatus() {"):java.index("    private void plumaSendE2EStatus() {")]
+        self.assertIn("plumaE2EStatusSeq = 0;", start)
+        self.assertIn("tgVoip[a].takeE2EStats();", start)
+        send = java[java.index("    private void plumaSendE2EStatus() {"):java.index("    private void plumaCheckDecryption(")]
+        self.assertLess(send.index("if (instance.isDataChannelOpen()) {"), send.index("instance.takeE2EStats()"))
+        self.assertIn('status.put("seq", ++plumaE2EStatusSeq);', send)
+        self.assertIn("final NativeInstance instance = tgVoip[CAPTURE_DEVICE_CAMERA];", send)
+        # height from tde2e, -1 without a state; lastBlock "" then.
+        put = java[java.index("    public void putE2EStatus("):]
+        self.assertIn("height = call_get_height(call_id);", put)
+        self.assertIn('height >= 0 && lastAppliedBlock != null ? blockHashPrefix(lastAppliedBlock) : ""', put)
+        self.assertIn('status.put("offset0", last_offset[0]);', put)
+        self.assertIn('status.put("offset1", last_offset[1]);', put)
+
+    def test_self_recovery(self):
+        java = self.written(patch.CONFERENCE_CALL, patch.VOIP_SERVICE)
+        # At most 3 rejoins in a rolling 5 minutes, after 0, 2 and 5 s plus 0-1 s at random.
+        for rule in ("PLUMA_E2E_REJOINS = 3;", "PLUMA_E2E_REJOIN_WINDOW_MS = 5 * 60 * 1000;",
+                     "PLUMA_E2E_REJOIN_DELAYS_MS = {0, 2000, 5000};", "PLUMA_E2E_REJOIN_JITTER_MS = 1000;",
+                     "PLUMA_E2E_REJOIN_DELAYS_MS[plumaE2ERejoins.size()] + Utilities.random.nextInt(PLUMA_E2E_REJOIN_JITTER_MS + 1)",
+                     # rule 2: behind the server's chain for more than 12 s
+                     "BEHIND_LIMIT_MS = 12_000;",
+                     # rule 4: 15 s without a decrypted frame while the own chain is current
+                     "PLUMA_E2E_UNDECRYPTED_LIMIT_MS = 15_000;", "conference.chainBehind()",
+                     # rule 1: the sticky error, at every tick too
+                     "conference.checkError();"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, java)
+        # Rule 3: GROUPCALL_FORBIDDEN on any answer of the chain, reads and writes alike.
+        conference = self.written(patch.CONFERENCE_CALL)
+        process = conference[conference.index("    private boolean processUpdates("):]
+        self.assertIn('"GROUPCALL_FORBIDDEN".equals(err.text)', process.split("\n        boolean hadBlocks = false;\n", 1)[1][:300])
+        # A rejoin waits for its delay and no condition is checked meanwhile.
+        failed = java[java.index("    public void plumaE2EFailed() {"):]
+        self.assertIn("|| plumaRejoinPending", failed.split("{", 1)[1][:400])
+        self.assertIn("AndroidUtilities.runOnUIThread(plumaRejoinRunnable, delay);", failed)
+        self.assertIn("AndroidUtilities.cancelRunOnUIThread(plumaE2EStatusRunnable);", failed)
+        self.assertNotIn("createGroupInstance", failed[:failed.index("    // pluma: the E2E status report")])
+        # One failing sender alone does not rejoin: every sender of the interval must have none.
+        check = java[java.index("    private void plumaCheckDecryption("):]
+        self.assertIn('undecrypted &= sender.getLong("ok") == 0 && sender.getLong("unknownEpoch") + sender.getLong("failed") > 0;', check)
+        self.assertIn("if (!undecrypted || conference.chainBehind()) {", check)
+
+    def test_chain_retries(self):
+        java = self.written(patch.VOIP_SERVICE)
+        # ADR 0060 §5: 10 refusals in a row after which the last block did not change, at most
+        # 100 attempts per join while it changes.
+        self.assertIn("PLUMA_CHAIN_STALLED_RETRIES = 10;", java)
+        self.assertIn("PLUMA_CHAIN_JOIN_ATTEMPTS = 100;", java)
+        retry = java[java.index("    private boolean plumaChainRetry() {"):java.index("    private boolean plumaChainJoinBase() {")]
+        self.assertIn("if (plumaChainRetries + 1 >= PLUMA_CHAIN_JOIN_ATTEMPTS) {", retry)
+        self.assertLess(retry.index("return false;"), retry.index("plumaChainRetries++;"))
+        # Moved: the block read is neither the one the refused join was made on nor the refused
+        # join block itself (a read that brought nothing leaves that one); only a stall counts.
+        base = java[java.index("    private boolean plumaChainJoinBase() {"):java.index("    private void plumaChainJoinReset() {")]
+        self.assertIn("if (plumaChainRetries > 0) {", base)
+        self.assertIn("!Arrays.equals(base, plumaChainJoinBase) && !Arrays.equals(base, plumaChainJoinBlock)", base)
+        self.assertIn("plumaChainStalledRetries = moved ? 0 : plumaChainStalledRetries + 1;", base)
+        self.assertIn("if (plumaChainStalledRetries >= PLUMA_CHAIN_STALLED_RETRIES) {", base)
+        self.assertNotIn("PLUMA_CHAIN_JOIN_ATTEMPTS", base)
+        reset = java[java.index("    private void plumaChainJoinReset() {"):]
+        reset = reset[:reset.index("\n    }\n")]
+        for field in ("plumaChainRetries = 0;", "plumaChainStalledRetries = 0;",
+                      "plumaChainJoinBase = null;", "plumaChainJoinBlock = null;"):
+            self.assertIn(field, reset)
+        # Both joins check the chain on the block just read, before the join block is made on
+        # it, and remember the block they send.
+        for join in (java[java.index("    private void plumaJoinOnLastBlock("):java.index("    private static final int PLUMA_CHAIN_STALLED_RETRIES")],
+                     java[java.index("            conference.requestLastBlock(() -> {\n                if (conference == null) {"):]):
+            with self.subTest(join=join[:60]):
+                self.assertLess(join.index("if (!plumaChainJoinBase()) {"), join.index("plumaChainJoinBlock = conference.generateAddSelfBlock();"))
+        # Both refusals go through the cap; a join that went through or starts over counts anew.
+        self.assertEqual(java.count("plumaChainRetry()) {"), 2)
+        self.assertEqual(java.count('error.text.startsWith("CONF_WRITE_CHAIN_INVALID") && conference != null && plumaChainRetry()'), 1)
+        self.assertEqual(java.count("plumaChainJoinReset();"), 4)
+        self.assertNotIn("plumaChainRetries < ", java)
+
+    def test_texts(self):
+        self.assertEqual(set(patch.E2E_FAILED_TEXT), set(patch.STRING_RENAMES))
+        for folder, text in patch.E2E_FAILED_TEXT.items():
+            with self.subTest(folder=folder):
+                self.assertNotIn("Telegram", text)
+                self.assertNotRegex(text, r"(?<!\\)'")
+                self.assertNotRegex(text, r"[<>&\"]")
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        env = upstream_env()
+        if (UPSTREAM / ".git").exists():
+            head = subprocess.run(["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+            self.assertEqual(head.stdout.strip(), env["UPSTREAM_REF"], "./upstream is not the pinned commit")
+            # tgcalls, which the patch edits, at the commit the release records.
+            pinned = subprocess.run(["git", "-C", str(UPSTREAM), "ls-tree", "HEAD", "TMessagesProj/jni/tgcalls"],
+                                    capture_output=True, text=True, check=True).stdout.split()[2]
+            tgcalls = subprocess.run(["git", "-C", str(UPSTREAM / "TMessagesProj/jni/tgcalls"), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True, check=True)
+            self.assertEqual(tgcalls.stdout.strip(), pinned, "TMessagesProj/jni/tgcalls is not the pinned commit")
+        rels = sorted({rel for rel, _, _ in patch.GROUP_CALLS_E2E_EDITS}
+                      | {str(p.relative_to(UPSTREAM)) for p in (UPSTREAM / patch.RES).glob("values*/strings.xml")})
+        java = pathlib.Path(patch.JAVA)
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            # The whole Java tree: the patch checks every file of it for a way into RTMP.
+            shutil.copytree(UPSTREAM / java, root / java)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            others = {p: p.read_bytes() for p in sorted((root / java).rglob("*")) if p.is_file()
+                      and str(p.relative_to(root)) not in original}
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_group_calls_e2e(tree)
+            patch.group_calls_e2e(tree)
+            patch.verify_group_calls_e2e(tree)
+            patched = {rel: tree.read(rel) for rel in rels}
+            # Nothing else changed: each file is upstream's once its edits are taken back, and no
+            # other file of the Java tree was touched.
+            for rel in rels:
+                text = patched[rel]
+                for r, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                    if r == rel:
+                        self.assertEqual(text.count(new), 1, f"{rel}: {new[:60]!r}")
+                        text = text.replace(new, old)
+                if rel.endswith("strings.xml"):
+                    folder = pathlib.Path(rel).parent.name
+                    self.assertEqual(text.count(patch._e2e_failed_line(folder)), 1)
+                    text = text.replace(patch._e2e_failed_line(folder), "")
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            for p, data in others.items():
+                self.assertEqual(p.read_bytes(), data, p)
+            # DAMAGE: each edit taken back on the real tree fails the check.
+            for rel, old, new in patch.GROUP_CALLS_E2E_EDITS:
+                with self.subTest(damage=new.strip().splitlines()[0][:80]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_group_calls_e2e(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_group_calls_e2e(tree)
+            # The real upstream keeps what the verification relies on: the conference's join, the
+            # tabs of the camera, the handler of the RTMP row that no list adds, the live mode that
+            # the camera only compares with.
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("new TL_phone.joinGroupCall()"), 2)
+            # Both joins (a chat call's and a conference's) check whether the chain moved before
+            # the join block is made, and nowhere else is one made.
+            self.assertEqual(original[patch.VOIP_SERVICE].count("conference.generateAddSelfBlock();"), 1)
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("plumaChainJoinBlock = conference.generateAddSelfBlock();"), 2)
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("generateAddSelfBlock()"), 2)
+            self.assertEqual(patched[patch.VOIP_SERVICE].count("if (!plumaChainJoinBase()) {"), 2)
+            self.assertIn("mode == MODE_LIVE", (root / patch.STORY_RECORDER).read_text(encoding="utf-8"))
+            self.assertIn("ItemInner.asButton(OPTION_EDIT_COVER,", patched[patch.STORY_PRIVACY_SHEET])
+            # Upstream shows the record item to whoever manages the call; the patch never does, and
+            # the item's handler is the only place that starts a recording.
+            self.assertEqual(original[patch.GROUP_CALL_ACTIVITY].count("recordItem.setVisibility(View.VISIBLE);"), 2)
+            self.assertNotIn("recordItem.setVisibility(View.VISIBLE);", patched[patch.GROUP_CALL_ACTIVITY])
+            self.assertEqual(patched[patch.GROUP_CALL_ACTIVITY].count("call.toggleRecord("), 2)
+
+
+class CallColoursTest(unittest.TestCase):
+    # The colour keys of the group call as ThemeColors of 13.2.1 (7be672ea) defines them;
+    # test_real_upstream checks the table against the checkout.
+    VOIPGROUP_UPSTREAM = (
+    ("voipgroup_checkMenu", "0xff6BB6F9"),
+    ("voipgroup_muteButton", "0xff77E55C"),
+    ("voipgroup_muteButton2", "0xff7DDCAA"),
+    ("voipgroup_muteButton3", "0xff56C7FE"),
+    ("voipgroup_searchText", "0xffffffff"),
+    ("voipgroup_searchPlaceholder", "0xff858D94"),
+    ("voipgroup_searchBackground", "0xff303B47"),
+    ("voipgroup_leaveCallMenu", "0xffFF7575"),
+    ("voipgroup_scrollUp", "0xff394654"),
+    ("voipgroup_soundButton", "0x7d2C414D"),
+    ("voipgroup_soundButtonActive", "0x7d22A4EB"),
+    ("voipgroup_soundButtonActiveScrolled", "0x8233B4FF"),
+    ("voipgroup_soundButton2", "0x7d28593A"),
+    ("voipgroup_soundButtonActive2", "0x7d18B751"),
+    ("voipgroup_soundButtonActive2Scrolled", "0x8224BF46"),
+    ("voipgroup_leaveButton", "0x7dF75C5C"),
+    ("voipgroup_leaveButtonScrolled", "0x82D14D54"),
+    ("voipgroup_connectingProgress", "0xff28BAFF"),
+    ("voipgroup_disabledButton", "0xff1C2229"),
+    ("voipgroup_rtmpButton", "0xff2a3853"),
+    ("voipgroup_disabledButtonActive", "0xff2C3A45"),
+    ("voipgroup_disabledButtonActiveScrolled", "0x8277A1FC"),
+    ("voipgroup_unmuteButton", "0xff539EF8"),
+    ("voipgroup_unmuteButton2", "0xff66D4FB"),
+    ("voipgroup_actionBarUnscrolled", "0xff191F26"),
+    ("voipgroup_listViewBackgroundUnscrolled", "0xff222A33"),
+    ("voipgroup_lastSeenTextUnscrolled", "0xff858D94"),
+    ("voipgroup_mutedIconUnscrolled", "0xff7E868C"),
+    ("voipgroup_actionBar", "0xff0F1317"),
+    ("voipgroup_actionBarItems", "0xffffffff"),
+    ("voipgroup_actionBarItemsSelector", "0x1eBADBFF"),
+    ("voipgroup_mutedByAdminIcon", "0xffFF7070"),
+    ("voipgroup_mutedIcon", "0xff6F7980"),
+    ("voipgroup_lastSeenText", "0xff79838A"),
+    ("voipgroup_nameText", "0xffffffff"),
+    ("voipgroup_listViewBackground", "0xff1C2229"),
+    ("voipgroup_dialogBackground", "0xff1C2229"),
+    ("voipgroup_listeningText", "0xff4DB8FF"),
+    ("voipgroup_speakingText", "0xff77EE7D"),
+    ("voipgroup_listSelector", "0x0effffff"),
+    ("voipgroup_inviteMembersBackground", "0xff222A33"),
+    ("voipgroup_overlayBlue1", "0xff2BCEFF"),
+    ("voipgroup_overlayBlue2", "0xff0976E3"),
+    ("voipgroup_overlayGreen1", "0xff12B522"),
+    ("voipgroup_overlayGreen2", "0xff00D6C1"),
+    ("voipgroup_topPanelBlue1", "0xff60C7FB"),
+    ("voipgroup_topPanelBlue2", "0xff519FF9"),
+    ("voipgroup_topPanelGreen1", "0xff52CE5D"),
+    ("voipgroup_topPanelGreen2", "0xff00B1C0"),
+    ("voipgroup_topPanelGray", "0xff8599aa"),
+    ("voipgroup_overlayAlertGradientMuted", "0xff236D92"),
+    ("voipgroup_overlayAlertGradientMuted2", "0xff2C4D6B"),
+    ("voipgroup_overlayAlertGradientUnmuted", "0xff0C8A8C"),
+    ("voipgroup_overlayAlertGradientUnmuted2", "0xff284C75"),
+    ("voipgroup_mutedByAdminGradient", "0xff57A4FE"),
+    ("voipgroup_mutedByAdminGradient2", "0xffF05459"),
+    ("voipgroup_mutedByAdminGradient3", "0xff766EE9"),
+    ("voipgroup_overlayAlertMutedByAdmin", "0xff67709E"),
+    ("voipgroup_overlayAlertMutedByAdmin2", "0xff2F5078"),
+    ("voipgroup_mutedByAdminMuteButton", "0x7F78A3FF"),
+    ("voipgroup_mutedByAdminMuteButtonDisabled", "0x3378A3FF"),
+    ("voipgroup_windowBackgroundWhiteInputField", "0xffdbdbdb"),
+    ("voipgroup_windowBackgroundWhiteInputFieldActivated", "TELEGRAM_COLOR"),
+    )
+    # Telegram's colours of a call: iOS (CallBackgroundLayer.swift:108-124 at the pinned
+    # release) and Android (VoIpGradientLayout, the voipgroup keys).
+    TELEGRAM_IOS = (0xFF568FD6, 0xFF626ED5, 0xFFA667D5, 0xFF7664DA, 0xFFACBD65, 0xFF459F8D, 0xFF53A4D1,
+                    0xFF3E917A, 0xFFC0508D, 0xFFF09536, 0xFFCE5081, 0xFFFC7C4C)
+
+    def theme_colors(self, table=None):
+        lines = ["public class ThemeColors {\n", "    public static final int TELEGRAM_COLOR = 0xFF229AF0;\n"]
+        for key, value in table or self.VOIPGROUP_UPSTREAM:
+            lines.append(f"        defaultColors[key_{key}] = {value};\n")
+        return "".join(lines) + "}\n"
+
+    def tree(self, root, edits=patch.CALL_COLOUR_EDITS, theme_colors=None):
+        files = {rel: "" for rel in patch.CALL_UI_FILES}
+        for rel, old, _, count in edits:
+            files[rel] = files.get(rel, "") + (old + "\nx();\n") * count
+        for (rel, literal), count in patch.CALL_COLOURS_KEPT.items():
+            files[rel] = files.get(rel, "") + f"x({literal});\n" * count
+        files[patch.THEME_COLORS] = theme_colors or self.theme_colors()
+        for asset, _, _ in patch.DEFAULT_THEMES.values():
+            files[f"{patch.MAIN}/assets/{asset}"] = "actionBarDefault=-1\n"
+        asset, key, old, _ = patch.VOIPGROUP_THEME_FILE
+        files[f"{patch.MAIN}/assets/{asset}"] += f"{key}={old}\nchats_name=-1\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_palette(self):
+        # The owner's variant A, in the order of the points of Telegram iOS.
+        self.assertEqual(patch.CALL_CONNECTING, (0xFF3A4A3C, 0xFF4F6E52, 0xFF2C3A2D, 0xFF5B7A5E))
+        self.assertEqual(patch.CALL_CONNECTED, (0xFF5B7A5E, 0xFF6F8F72, 0xFF4F6E52, 0xFF7FA082))
+        self.assertEqual(patch.CALL_WEAK, (0xFF8A5A44, 0xFFA86B4C, 0xFF7A4E3B, 0xFFB97A55))
+        # The dark accent and link of docs/tasks/017-rebranding.md.
+        self.assertEqual((patch.CALL_ACCENT, patch.CALL_LINK), (0xFF9DBB9F, 0xFFB2CEB4))
+
+    def test_classifier(self):
+        # Telegram's colours of a call are caught, Pluma's are not.
+        names, defaults = patch.theme_defaults(self.theme_colors())
+        telegram = [c for k, c in defaults.items() if k[4:] in patch.VOIPGROUP_COLOURS and patch.telegram_call_colour(c)]
+        self.assertGreaterEqual(len(telegram), 45)
+        for c in self.TELEGRAM_IOS:
+            self.assertTrue(patch.telegram_call_colour(c), f"{c:08X}")
+        # The bluish greys of the muted icon and the texts, and the coral reds of the group call.
+        for c in (0xFF6F7980, 0xFF79838A, 0xFF7E868C, 0xFF858D94, 0xFF7B8389, 0xFF848D94, 0xFFEC7777, 0xFFEE7D79):
+            self.assertTrue(patch.telegram_call_colour(c), f"{c:08X}")
+        # Neutral greys are not.
+        for c in (0xFF8A8A8A, 0xFF1A1A1A, 0xFFDBDBDB):
+            self.assertFalse(patch.telegram_call_colour(c), f"{c:08X}")
+        for _, _, old, _ in filter(None, patch._GRADIENTS):
+            for literal in old:
+                self.assertTrue(patch.telegram_call_colour(int(literal, 16)), literal)
+        derived = [f(c) for c in patch.CALL_CONNECTING + patch.CALL_CONNECTED + patch.CALL_WEAK
+                   for f in (lambda c: c, patch.call_darker, patch.call_lighter)]
+        for c in derived + list(patch.VOIPGROUP_COLOURS.values()) + [patch.CALL_ACCENT, patch.CALL_LINK]:
+            self.assertFalse(patch.telegram_call_colour(c), f"{c:08X}")
+
+    def test_mapping(self):
+        # Every new colour is one of the sets, the accent or the link of the dark palette, a
+        # shade the gradients derive from the sets, or a sage grey; alpha as upstream's.
+        sets = set(patch.CALL_CONNECTING + patch.CALL_CONNECTED + patch.CALL_WEAK + (patch.CALL_ACCENT, patch.CALL_LINK))
+        shades = {f(c) for c in sets for f in (patch.call_darker, patch.call_lighter)}
+
+        def allowed(c):
+            rgb = 0xFF000000 | c & 0xFFFFFF
+            h, s, v = patch._hsv(rgb)
+            return rgb in sets | shades or abs(h - patch.CALL_SAGE_HUE) < 10 and s <= 0.25
+
+        upstream = dict(self.VOIPGROUP_UPSTREAM)
+        for key, colour in patch.VOIPGROUP_COLOURS.items():
+            with self.subTest(key=key):
+                self.assertTrue(allowed(colour), f"{colour:08X}")
+                old = upstream[key]
+                if old.startswith("0x"):
+                    self.assertEqual(colour >> 24, int(old, 16) >> 24)
+        for rel, old, new, _ in patch.CALL_COLOUR_EDITS:
+            for literal in set(re.findall(r"0x[0-9A-F]{8}\b", new)) - set(re.findall(r"0x[0-9A-Fa-f]{8}\b", old)):
+                with self.subTest(file=rel, literal=literal):
+                    self.assertTrue(allowed(int(literal, 16)), literal)
+        # By meaning: the states of the group call's button.
+        self.assertIn(patch.VOIPGROUP_COLOURS["voipgroup_muteButton"], patch.CALL_CONNECTED)
+        self.assertIn(patch.VOIPGROUP_COLOURS["voipgroup_unmuteButton"], patch.CALL_CONNECTING)
+        self.assertIn(patch.VOIPGROUP_COLOURS["voipgroup_mutedByAdminGradient2"], patch.CALL_WEAK)
+        self.assertIn(patch.VOIPGROUP_COLOURS["voipgroup_mutedByAdminIcon"], patch.CALL_WEAK)
+        # The private call: calling, connected, weak signal, in the order of the points.
+        layout = patch._GRADIENT_EDIT[2]
+        sets = {"bgBlueViolet": patch.CALL_CONNECTING, "bgBlueGreen": patch.CALL_CONNECTING,
+                "bgGreen": patch.CALL_CONNECTED, "bgOrangeRed": patch.CALL_WEAK}
+        for name, colours in sets.items():
+            points = ", ".join(map(patch.jhex, colours))
+            self.assertIn(f"        {name} = " + ("black ? new PureColorDrawable(0xFF1C231D) : " if "Blue" in name else "")
+                          + f"new MotionBackgroundDrawable({points}, 0, false, true);\n", layout)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_call_colours(tree)
+            patch.call_colours(tree)
+            patch.verify_call_colours(tree)
+            colours = tree.read(patch.THEME_COLORS)
+            self.assertIn("        defaultColors[key_voipgroup_muteButton] = 0xFF7FA082;\n", colours)
+            self.assertIn("        defaultColors[key_voipgroup_windowBackgroundWhiteInputFieldActivated] = 0xFF9DBB9F;\n", colours)
+            # The muted icon is no longer Telegram's bluish grey.
+            self.assertNotIn("        defaultColors[key_voipgroup_mutedIcon] = 0xff6F7980;\n", colours)
+            # The leave button stays Telegram's red.
+            self.assertIn("        defaultColors[key_voipgroup_leaveButton] = 0x7dF75C5C;\n", colours)
+            asset, key, _, new = patch.VOIPGROUP_THEME_FILE
+            self.assertIn(f"\n{key}={new - (1 << 32)}\n", tree.read(f"{patch.MAIN}/assets/{asset}"))
+            # A second run finds no upstream text and writes nothing.
+            before = {rel: tree.read(rel) for rel, _, _, _ in patch.CALL_COLOUR_EDITS}
+            with self.assertRaises(patch.PatchError):
+                patch.call_colours(tree)
+            for rel, text in before.items():
+                self.assertEqual(tree.read(rel), text)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _, _) in enumerate(patch.CALL_COLOUR_EDITS):
+            changed = old[:len(old) // 2] + "added();" + old[len(old) // 2:]
+            edits = [(r, changed if j == i else o, n, c) for j, (r, o, n, c) in enumerate(patch.CALL_COLOUR_EDITS)]
+            with self.subTest(edit=i, file=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = {r: tree.read(r) for r, _, _, _ in edits}
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.call_colours(tree)
+                for r, text in before.items():
+                    self.assertEqual(tree.read(r), text)
+        # A colour key upstream dropped, and a Telegram colour in a key the patch does not map.
+        for table, error in (
+            (self.VOIPGROUP_UPSTREAM[1:], "no colour key voipgroup_checkMenu"),
+            (self.VOIPGROUP_UPSTREAM + (("voipgroup_newButton", "0xff3D8EFF"),), "does not map"),
+        ):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), theme_colors=self.theme_colors(table))
+                with self.assertRaisesRegex(patch.PatchError, error):
+                    patch.call_colours(tree)
+        # The theme file's value changed.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            asset, key, old, _ = patch.VOIPGROUP_THEME_FILE
+            rel = f"{patch.MAIN}/assets/{asset}"
+            tree.write(rel, tree.read(rel).replace(f"{key}={old}", f"{key}=-1"))
+            with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                patch.call_colours(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_colours(tree)
+            # DAMAGE: each edit taken back, or written twice.
+            for rel, old, new, _ in patch.CALL_COLOUR_EDITS:
+                patched = tree.read(rel)
+                for text in (patched.replace(new, old, 1), patched + new):
+                    with self.subTest(file=rel, edit=new.strip()[:60]):
+                        tree.write(rel, text)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_call_colours(tree)
+                tree.write(rel, patched)
+            patch.verify_call_colours(tree)
+            # A key back at Telegram's colour, in ThemeColors or in a theme file.
+            colours = tree.read(patch.THEME_COLORS)
+            for key, old in self.VOIPGROUP_UPSTREAM:
+                if key not in patch.VOIPGROUP_COLOURS:
+                    continue
+                with self.subTest(key=key):
+                    tree.write(patch.THEME_COLORS, re.sub(rf"(defaultColors\[key_{key}\] = )[^;]+;", rf"\g<1>{old};", colours))
+                    with self.assertRaisesRegex(patch.PatchError, key):
+                        patch.verify_call_colours(tree)
+            tree.write(patch.THEME_COLORS, colours)
+            rel = f"{patch.MAIN}/assets/night.attheme"
+            night = tree.read(rel)
+            tree.write(rel, night + "voipgroup_overlayBlue1=-13906177\n")
+            with self.assertRaisesRegex(patch.PatchError, "night.attheme: Telegram's call colours are left in voipgroup_overlayBlue1"):
+                patch.verify_call_colours(tree)
+            tree.write(rel, night)
+            # A Telegram colour anywhere in the call screens, a new file of them included; a kept
+            # colour used once more; a commented-out one is not code.
+            for rel, extra, error in (
+                (f"{patch.VOIP_UI}/VoIpCoverView.java", "paint.setColor(0xFF3F8BEA);\n", "0xff3f8bea is still there"),
+                (f"{patch.VOIP_UI}/VoIpNewView.java", "int c = 0xff07BA63;\n", "0xff07ba63 is still there"),
+                (f"{patch.UI}/Cells/GroupCallNewCell.java", 'Color.parseColor("#E86958");\n', "0xffe86958 is still there"),
+                (f"{patch.UI}/GroupCallActivity.java", "x(0x7D22A4EB);\n", "0x7d22a4eb is still there"),
+                (f"{patch.UI}/Cells/GroupCallNewCell.java", "textView.setTextColor(0xff79838A);\n", "0xff79838a is still there"),
+                (patch.VOIP_SERVICE, "builder.setColor(0xff2ca5e0);\n", "0xff2ca5e0 is still there"),
+                (f"{patch.RES}/drawable/call_notification_bg.xml", '<solid android:color="#2ca5e0"/>\n', "0xff2ca5e0"),
+                (f"{patch.VOIP_UI}/AcceptDeclineView.java", "declineDrawable.setColor(0xFFF01D2C);\n", "expected 2|is still there"),
+            ):
+                with self.subTest(extra=extra):
+                    existed = (tree.root / rel).exists()
+                    text = tree.read(rel) if existed else ""
+                    (tree.root / rel).parent.mkdir(parents=True, exist_ok=True)
+                    tree.write(rel, text + extra)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_call_colours(tree)
+                    if existed:
+                        tree.write(rel, text)
+                    else:
+                        (tree.root / rel).unlink()
+            patch.verify_call_colours(tree)
+            rel = f"{patch.UI}/VoIPFragment.java"
+            text = tree.read(rel)
+            tree.write(rel, text + "//        backgroundView.setBackgroundColor(0xff1b1f23);\n")
+            patch.verify_call_colours(tree)
+            tree.write(rel, text)
+            # A call screen upstream dropped.
+            (tree.root / f"{patch.UI}/GroupCallTabletGridAdapter.java").unlink()
+            with self.assertRaisesRegex(patch.PatchError, "the call screen is gone"):
+                patch.verify_call_colours(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        java = pathlib.Path(patch.JAVA)
+        rels = sorted({rel for rel, _, _, _ in patch.CALL_COLOUR_EDITS} | set(patch.CALL_UI_FILES) | {patch.THEME_COLORS}
+                      | {f"{patch.MAIN}/assets/{asset}" for asset, _, _ in patch.DEFAULT_THEMES.values()})
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            shutil.copytree(UPSTREAM / java, root / java)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            # The table of this test is upstream's.
+            self.assertEqual(re.findall(r"defaultColors\[key_(voipgroup_\w+)\] = ([^;]+);", tree.read(patch.THEME_COLORS)),
+                             list(self.VOIPGROUP_UPSTREAM))
+            # Every key the accent engine of a theme could shift is left alone by it.
+            _, excluded = patch.theme_engine(tree.read(f"{patch.JAVA}/ui/ActionBar/Theme.java"))
+            self.assertEqual({k for k in excluded if k.startswith("key_voipgroup_")},
+                             {"key_" + k for k, _ in self.VOIPGROUP_UPSTREAM})
+            files = patch._call_ui_files(tree)
+            original = {rel: tree.read(rel) for rel in set(rels) | set(files)}
+            others = {p: p.read_bytes() for p in sorted((root / java).rglob("*")) if p.is_file()
+                      and str(p.relative_to(root)) not in original}
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_call_colours(tree)
+            patch.call_colours(tree)
+            # The verified badge of the participant list is brand's (BRAND_COLOURS), which runs later.
+            for rel, old, new, count in patch.BRAND_COLOURS:
+                if rel in files:
+                    tree.replace(rel, old, new, count)
+            patch.verify_call_colours(tree)
+            patched = {rel: tree.read(rel) for rel in original}
+            # Nothing else changed: each file is upstream's once its edits are taken back.
+            for rel in original:
+                text = patched[rel]
+                for r, old, new, _ in patch.CALL_COLOUR_EDITS + tuple((r, o, n, c) for r, o, n, c in patch.BRAND_COLOURS):
+                    if r == rel:
+                        text = text.replace(new, old)
+                if rel == patch.THEME_COLORS:
+                    for key, old in self.VOIPGROUP_UPSTREAM:
+                        text = re.sub(rf"(defaultColors\[key_{key}\] = )[^;]+;", lambda m: f"{m.group(1)}{old};", text)
+                asset, key, old, new = patch.VOIPGROUP_THEME_FILE
+                text = text.replace(f"\n{key}={patch._signed(new)}\n", f"\n{key}={old}\n")
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            for p, data in others.items():
+                self.assertEqual(p.read_bytes(), data, p)
+            # Upstream has Telegram's call colours in the files the check reads, and the patch
+            # leaves only those kept on purpose.
+            before = sum(patch.telegram_call_colour(int(l, 16)) for rel in files for l in patch._colour_literals(original[rel]))
+            self.assertGreater(before, 120)
+            # DAMAGE on the real tree: each edit taken back fails the check.
+            for rel, old, new, _ in patch.CALL_COLOUR_EDITS:
+                with self.subTest(damage=new.strip()[:60]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_call_colours(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_call_colours(tree)
+            # The theme check of the brand still reads enough of Telegram's blue.
+            names, defaults = patch.theme_defaults(patched[patch.THEME_COLORS])
+            self.assertGreaterEqual(sum(map(patch.telegram_blue, defaults.values())), 100)
 
 
 if __name__ == "__main__":
