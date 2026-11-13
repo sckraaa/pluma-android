@@ -183,6 +183,8 @@ A signed build of `main` goes to the releases service of the server right after 
 
 Without them the `sign` job of `main` fails. Installs of a build before self-update (version `12.9.1`, three parts) do not see updates: Android compares only the parts both versions have. Install the app from the site once.
 
+A push publishes an optional update: the app offers it in a sheet the person may close. A manual run of `main` with *mandatory* ticked (and no *abis* or *dev_address*) publishes a mandatory one (`can_not_skip`): a full-screen update without Skip. The flag goes with the upload, not after it: the app does not look again at a version it was offered (`LaunchActivity.java:6153-6155` of DrKLO/Telegram `7be672ea`), so `pluma-admin release mandatory android <build>` after the upload misses the apps that checked in between (task 095 of the server repository). *mandatory* on a run that publishes nothing fails the run at once. A build published optional is not made mandatory by running its job again: the server answers 422 and the job fails.
+
 A bad release is withdrawn on the server (`pluma-admin release withdraw android <build>`, `docs/ops/releases.md` of the server repository); the next build replaces it.
 
 ## When it builds
