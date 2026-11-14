@@ -397,6 +397,7 @@ def patch(tree, c):
     birthdays(tree)
     sticker_sets(tree)
     saved_tags(tree)
+    round_video(tree)
     premium_stickers(tree)
     premium_for_everyone(tree)
     not_served(tree)
@@ -4145,6 +4146,7 @@ def verify(tree, c):
     verify_birthdays(tree)
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
+    verify_round_video(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
     verify_not_served(tree)
@@ -4156,6 +4158,41 @@ def verify(tree, c):
     verify_login_screens(tree)
 
 
+
+# --- Round videos across chats -------------------------------------------------
+# A round video of a channel plays on, item after item, while its comments
+# (the discussion group's chat) are open. Upstream's messagePlayingDidStart
+# makes the chat on top take the video's texture for any round video: the
+# comments chat takes the channel's, does not find the message in its list,
+# hides the video (setCurrentVideoVisible(false)) and keeps doing so on every
+# scroll update, also while the channel comes back; the channel's round video
+# then plays with its picture frozen and the sound going on
+# (ChatActivity.java 23658, 16480-16488, 16989-17005; MediaController.java
+# 3279-3355). The chat takes the texture only for a message of its own, the
+# rule its onAttachedToWindow already follows (18124), with the history of a
+# migrated group (mergeDialogId) as its own.
+ROUND_VIDEO_EDITS = (
+    (CHAT_ACTIVITY,
+     "            if ((messageObject.isRoundVideo() || messageObject.isVideo()) && fragmentView != null && fragmentView.getParent() != null) {\n"
+     "                if (!messageObject.isVoiceTranscriptionOpen()) {\n",
+     "            // pluma: only a message of this chat takes its texture; the comments of a channel\n"
+     "            // post would take the channel's round video and freeze its picture.\n"
+     "            if ((messageObject.isRoundVideo() || messageObject.isVideo()) && fragmentView != null && fragmentView.getParent() != null\n"
+     "                    && (messageObject.getDialogId() == dialog_id || mergeDialogId != 0 && messageObject.getDialogId() == mergeDialogId)) {\n"
+     "                if (!messageObject.isVoiceTranscriptionOpen()) {\n"),
+)
+
+
+def round_video(tree):
+    for rel, old, new in ROUND_VIDEO_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_round_video(tree):
+    for rel, old, new in ROUND_VIDEO_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text:
+            raise PatchError(f"{rel}: the round video edit is not there")
 
 # --- Premium for everyone -----------------------------------------------------
 # Task 071 (ADR 0041): every user has Premium and every boost-gated feature is

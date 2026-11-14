@@ -1535,6 +1535,38 @@ class GoogleServicesTest(unittest.TestCase):
                          ["chat.pluma.app", "chat.pluma.app.beta"])
 
 
+class RoundVideoTest(unittest.TestCase):
+    """The chat on top takes a round video's texture only for its own message."""
+
+    def tree(self, root, old=None):
+        rel, upstream, _ = patch.ROUND_VIDEO_EDITS[0]
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("class X {\n" + (old or upstream) + "        x();\n}\n", encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_patch_and_check(self):
+        rel = patch.ROUND_VIDEO_EDITS[0][0]
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_round_video(tree)
+            patch.round_video(tree)
+            patch.verify_round_video(tree)
+            text = tree.read(rel)
+            self.assertIn("&& (messageObject.getDialogId() == dialog_id || mergeDialogId != 0 "
+                          "&& messageObject.getDialogId() == mergeDialogId)) {\n", text)
+            # A second run finds no upstream text.
+            with self.assertRaises(patch.PatchError):
+                patch.round_video(tree)
+
+    def test_upstream_changed(self):
+        _, upstream, _ = patch.ROUND_VIDEO_EDITS[0]
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), upstream.replace("fragmentView != null", "fragmentView  != null"))
+            with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                patch.round_video(tree)
+
+
 class PremiumForEveryoneTest(unittest.TestCase):
     # The upstream files, made of the texts the edits expect.
     def tree(self, root, edits=patch.PREMIUM_FOR_EVERYONE_EDITS):
