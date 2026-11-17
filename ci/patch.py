@@ -17,7 +17,8 @@ Messages that ask for no Premium, premium stickers sent without Premium,
 no way into the AI message editor, no group call joined without its key, no
 way into RTMP streams, live stories or call recording, none of Telegram's
 colours on the call screens, the server's HTTPS CDN reached over https://
-only in a server build).
+only in a server build, maps drawn by MapLibre from the server's tiles with
+no source on Google's maps and no key for them in a manifest).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -408,6 +409,7 @@ def patch(tree, c):
     saved_tags(tree)
     round_video(tree)
     cdn_https(tree, c)
+    maps(tree)
     premium_stickers(tree)
     premium_for_everyone(tree)
     business(tree)
@@ -2398,10 +2400,12 @@ SCHEME_JAVA = {
     "utils/proxy/ProxySettings.java": (7, 1),
 }
 # What stays: the tg:// URIs ExoPlayer streams files through (internal, never
-# a link) and the language code of Tajik.
+# a link) and the language code of Tajik (TranslateController, and PlumaMapsProvider
+# for the language of map labels).
 SCHEME_KEEP = {
     "messenger/FileStreamLoadOperation.java": 1,
     "messenger/MediaController.java": 2,
+    "messenger/PlumaMapsProvider.java": 1,
     "messenger/TranslateController.java": 1,
     "messenger/secretmedia/ExtendedDefaultDataSource.java": 1,
     "ui/Components/Premium/VideoScreenPreview.java": 1,
@@ -4159,6 +4163,7 @@ def verify(tree, c):
     verify_saved_tags(tree)
     verify_round_video(tree)
     verify_cdn_https(tree, c)
+    verify_maps(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
     verify_business(tree)
@@ -8018,6 +8023,1556 @@ def verify_cdn_https(tree, c):
     # A server build reaches the CDN over https:// only.
     if c.target == "server" and CDN_HTTPS_DEV_HOSTS_LINE not in java.read_text(encoding="utf-8"):
         raise PatchError(f"{CDN_HTTPS_FILE}: a server build takes http://")
+
+
+# --- Maps on MapLibre (task 112 of the server repository) -----------------------
+# The location screens (the attachment, live locations, a group's place, a
+# business address, a story's place) draw their map through IMapsProvider
+# (messenger/IMapsProvider.java), made by ApplicationLoader.onCreateMapsProvider
+# (ApplicationLoader 105-107). Upstream's GoogleMapsProvider takes Google's tiles
+# with Telegram's key from the manifests, which do not serve another package: the
+# map stays empty. PlumaMapsProvider draws it with MapLibre Native from the
+# vector tiles, styles, fonts and icons of the Pluma server, whose address the
+# server gives in the app config (pluma_maps_url, pluma_maps_styles; kept by
+# AppGlobalConfig). So:
+# - onCreateMapsProvider makes PlumaMapsProvider; GoogleMapsProvider and the key
+#   of the five manifests are gone, and no source names com.google.android.gms.maps
+#   (play-services-wallet 19.1.0 still pulls play-services-maps into the APK,
+#   unused);
+# - the library depends on MapLibre's OpenGL ES build, android-sdk-opengl 13.7.1:
+#   android-sdk 13.7.1 is the Vulkan build, which requires Vulkan 1.0
+#   (uses-feature android.hardware.vulkan.version, required, in its manifest);
+#   Gradle checks the MapLibre artifacts against their SHA-256
+#   (gradle/verification-metadata.xml, Maven Central's .sha256 files, recomputed);
+# - R8 keeps MapLibre's classes whole: libmaplibre.so finds classes, fields and
+#   methods by name, and the release build runs R8 in full mode;
+# - the satellite and hybrid choice is hidden (ChatAttachAlertLocationLayout 330-357,
+#   LocationActivity 451-455): the server has no imagery;
+# - AndroidUtilities.isMapsInstalled (1864-1886) is left as it is: the provider
+#   names the app itself as the map app, always installed.
+# Lines are those of upstream 13.2.1.
+MAPS_PROVIDER_FILE = f"{JAVA}/messenger/PlumaMapsProvider.java"
+GOOGLE_MAPS_PROVIDER = f"{JAVA}/messenger/GoogleMapsProvider.java"
+APP_GLOBAL_CONFIG = f"{JAVA}/messenger/AppGlobalConfig.java"
+ATTACH_LOCATION = f"{JAVA}/ui/Components/ChatAttachAlertLocationLayout.java"
+LOCATION_ACTIVITY = f"{JAVA}/ui/LocationActivity.java"
+LIBRARY_GRADLE = "TMessagesProj/build.gradle"
+PROGUARD_RULES = "TMessagesProj/proguard-rules.pro"
+VERIFICATION_METADATA = "gradle/verification-metadata.xml"
+GOOGLE_MAPS_DEPENDENCY = "    implementation 'com.google.android.gms:play-services-maps:18.1.0'\n"
+MAPLIBRE_DEPENDENCY = "    implementation 'org.maplibre.gl:android-sdk-opengl:13.7.1'\n"
+# The manifests that carry Telegram's key for Google's maps, the line and the empty line after it.
+MAPS_KEY_MANIFESTS = (
+    "TMessagesProj/config/debug/AndroidManifest.xml",
+    "TMessagesProj/config/debug/AndroidManifest_SDK23.xml",
+    "TMessagesProj/config/release/AndroidManifest.xml",
+    "TMessagesProj/config/release/AndroidManifest_SDK23.xml",
+    "TMessagesProj/config/release/AndroidManifest_standalone.xml",
+)
+MAPS_KEY_NAME = "com.google.android.maps.v2.API_KEY"
+MAPS_KEY_LINE = re.compile(r'        <meta-data android:name="com\.google\.android\.maps\.v2\.API_KEY" android:value="[^"\n]*" />\n\n')
+GOOGLE_MAPS_PACKAGE = "com.google.android.gms.maps"
+MAPS_EDITS = (
+    (APPLICATION_LOADER,
+     "    protected IMapsProvider onCreateMapsProvider() {\n"
+     "        return new GoogleMapsProvider();\n"
+     "    }\n",
+     "    protected IMapsProvider onCreateMapsProvider() {\n"
+     "        return new PlumaMapsProvider(); // pluma: MapLibre with the server's maps (task 112)\n"
+     "    }\n"),
+    (APP_GLOBAL_CONFIG,
+     '    public final ConfigBoolean widgetsDisabled = ofBoolean("widgets_disabled", false);\n',
+     '    public final ConfigBoolean widgetsDisabled = ofBoolean("widgets_disabled", false);\n'
+     "\n"
+     "    // pluma: the server's maps (PlumaMapsProvider): https://<host>/<key> and the label languages it has styles for.\n"
+     '    public final ConfigString plumaMapsUrl = ofString("pluma_maps_url", null);\n'
+     '    public final ConfigStringSet plumaMapsStyles = ofStringSet("pluma_maps_styles", Collections.emptySet());\n'),
+    (ATTACH_LOCATION,
+     "        mapViewClip.addView(mapTypeButton, LayoutHelper.createFrame(40, 40, Gravity.RIGHT | Gravity.TOP, 0, 12, 12, 0));\n",
+     "        mapViewClip.addView(mapTypeButton, LayoutHelper.createFrame(40, 40, Gravity.RIGHT | Gravity.TOP, 0, 12, 12, 0));\n"
+     "        mapTypeButton.setVisibility(GONE); // pluma: one map type, the server has no satellite imagery\n"),
+    (LOCATION_ACTIVITY,
+     "        mapTypeButton.setContentDescription(getString(R.string.AccDescrMoreOptions));\n",
+     "        mapTypeButton.setContentDescription(getString(R.string.AccDescrMoreOptions));\n"
+     "        mapTypeButton.setVisibility(View.GONE); // pluma: one map type, the server has no satellite imagery\n"),
+    (LIBRARY_GRADLE,
+     GOOGLE_MAPS_DEPENDENCY,
+     "    // pluma: maps on MapLibre Native, its OpenGL ES build (task 112 of the server repository).\n"
+     + MAPLIBRE_DEPENDENCY),
+    (PROGUARD_RULES,
+     "# Use -keep to explicitly keep any other classes shrinking would remove\n",
+     "# pluma: MapLibre Native (PlumaMapsProvider). libmaplibre.so finds its classes, fields and methods by\n"
+     "# name across the SDK; R8's full mode would drop or rename what the library's own rules leave out,\n"
+     "# which fails only on a device.\n"
+     "-keep class org.maplibre.android.** { *; }\n"
+     "\n"
+     "# Use -keep to explicitly keep any other classes shrinking would remove\n"),
+)
+# What PlumaMapsProvider relies on in upstream: the interface it implements (with
+# the snapshot method a provider without a GL view need not have), the night
+# style the screens ask for, the account's app config and the session's language.
+MAPS_USES = (
+    (f"{JAVA}/messenger/IMapsProvider.java", "        default GLSurfaceView getGlSurfaceView() {\n"),
+    (f"{JAVA}/messenger/IMapsProvider.java", "    IMapStyleOptions loadRawResourceStyle(Context context, int resId);\n"),
+    (ATTACH_LOCATION,
+     "                                IMapsProvider.IMapStyleOptions style = ApplicationLoader.getMapsProvider()"
+     ".loadRawResourceStyle(ApplicationLoader.applicationContext, R.raw.mapstyle_night);\n"),
+    (LOCATION_ACTIVITY, "            return R.raw.mapstyle_night;\n        }\n        return 0;\n"),
+    (MESSAGES_CONTROLLER, "    public final AppGlobalConfig config = new AppGlobalConfig();\n"),
+    (APP_GLOBAL_CONFIG, "    private ConfigStringSet ofStringSet(String name, Set<String> defaultValue) {\n"),
+    (f"{JAVA}/messenger/LocaleController.java", "    public static String getLocaleStringIso639() {\n"),
+    (f"{JAVA}/messenger/AndroidUtilities.java",
+     "        String pkg = ApplicationLoader.getMapsProvider().getMapsAppPackageName();\n"
+     "        try {\n"
+     "            ApplicationLoader.applicationContext.getPackageManager().getApplicationInfo(pkg, 0);\n"
+     "            return true;\n"),
+)
+
+MAPS_JAVA = r"""package org.telegram.messenger;
+
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.graphics.Point;
+import android.graphics.PointF;
+import android.location.Location;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Looper;
+import android.text.TextUtils;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+
+import androidx.core.util.Consumer;
+
+import org.maplibre.android.MapLibre;
+import org.maplibre.android.camera.CameraUpdate;
+import org.maplibre.android.camera.CameraUpdateFactory;
+import org.maplibre.android.geometry.LatLngBounds;
+import org.maplibre.android.location.LocationComponent;
+import org.maplibre.android.location.LocationComponentActivationOptions;
+import org.maplibre.android.location.engine.LocationEngine;
+import org.maplibre.android.location.engine.LocationEngineCallback;
+import org.maplibre.android.location.engine.LocationEngineDefault;
+import org.maplibre.android.location.engine.LocationEngineRequest;
+import org.maplibre.android.location.engine.LocationEngineResult;
+import org.maplibre.android.location.modes.CameraMode;
+import org.maplibre.android.location.modes.RenderMode;
+import org.maplibre.android.log.Logger;
+import org.maplibre.android.maps.MapLibreMap;
+import org.maplibre.android.maps.MapLibreMapOptions;
+import org.maplibre.android.maps.MapView;
+import org.maplibre.android.maps.Style;
+import org.maplibre.android.maps.UiSettings;
+import org.maplibre.android.style.layers.FillLayer;
+import org.maplibre.android.style.layers.LineLayer;
+import org.maplibre.android.style.layers.Property;
+import org.maplibre.android.style.layers.PropertyFactory;
+import org.maplibre.android.style.layers.PropertyValue;
+import org.maplibre.android.style.layers.SymbolLayer;
+import org.maplibre.android.style.sources.GeoJsonSource;
+import org.maplibre.geojson.Polygon;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
+
+// pluma: maps on MapLibre Native with the vector tiles, styles, fonts and icons of the Pluma server
+// (task 112 of the server repository). The server gives their address in the app config: pluma_maps_url,
+// https://<host>/<key>, and the label languages it has styles for in pluma_maps_styles; a style is
+// <url>/styles/<language>[-dark]/style.json. Without the address no map is made: the location screens
+// work without one, as with no map service on the phone.
+public class PlumaMapsProvider implements IMapsProvider {
+
+    // The screens ask for getMaxZoomLevel() - 4 (a street) and getMinZoomLevel() + 4 (a country), as with
+    // zoom levels of 256-pixel tiles; MapLibre's levels are of 512-pixel tiles, one lower for the same scale.
+    private static final double MIN_ZOOM = 1;
+    private static final double MAX_ZOOM = 20;
+    // The languages that see Russian labels when the server has no style of their own: the bff's rule
+    // (pkg/staticmap/params.go of the server repository, StyleFor).
+    private static final Set<String> RUSSIAN_LABELS = new HashSet<>(Arrays.asList("be", "kk", "ky", "tg", "uz", "hy", "az"));
+    private static final Pattern STYLE_ID = Pattern.compile("[a-z0-9]+(-[a-z0-9]+)*");
+    private static final double EARTH_RADIUS = 6371009;
+    private static final int CIRCLE_POINTS = 72;
+    private static final long LOCATION_INTERVAL = 1000;
+
+    private static boolean initialized;
+
+    @Override
+    public void initializeMaps(Context context) {
+        initialize(context);
+    }
+
+    private static void initialize(Context context) {
+        if (initialized) {
+            return;
+        }
+        MapLibre.getInstance(context.getApplicationContext());
+        // The addresses of tiles and styles carry the server's key and where the user looks: nothing of the
+        // map engine goes to the system log.
+        Logger.setVerbosity(Logger.NONE);
+        initialized = true;
+    }
+
+    @Override
+    public IMapView onCreateMapView(Context context) {
+        String base = mapsUrl();
+        String language = base == null ? null : styleLanguage(LocaleController.getLocaleStringIso639(), mapsStyles());
+        if (base == null || language == null) {
+            return new PlumaMapView(context, null);
+        }
+        initialize(context);
+        return new PlumaMapView(context, base + "/styles/" + language);
+    }
+
+    // The address of the server's maps, or null: https only, a host, no query or fragment, no slash at the end.
+    private static String mapsUrl() {
+        String url = MessagesController.getInstance(UserConfig.selectedAccount).config.plumaMapsUrl.get();
+        if (TextUtils.isEmpty(url) || !url.startsWith("https://") || url.endsWith("/")
+                || url.indexOf('?') >= 0 || url.indexOf('#') >= 0) {
+            return null;
+        }
+        Uri uri = Uri.parse(url);
+        if (TextUtils.isEmpty(uri.getHost())) {
+            return null;
+        }
+        return url;
+    }
+
+    private static Set<String> mapsStyles() {
+        Set<String> styles = MessagesController.getInstance(UserConfig.selectedAccount).config.plumaMapsStyles.get();
+        Set<String> out = new TreeSet<>();
+        if (styles != null) {
+            for (String style : styles) {
+                if (style != null && STYLE_ID.matcher(style).matches()) {
+                    out.add(style);
+                }
+            }
+        }
+        return out;
+    }
+
+    // The style of the interface language, as the bff picks one for a session's lang_code: the language's own
+    // (by the full code, then by its base language), Russian for RUSSIAN_LABELS, otherwise English, otherwise
+    // the first; null when the server names none.
+    static String styleLanguage(String langCode, Set<String> styles) {
+        if (styles.isEmpty()) {
+            return null;
+        }
+        String code = langCode == null ? "" : langCode.toLowerCase(Locale.ROOT).replace('_', '-');
+        int dash = code.indexOf('-');
+        String base = dash < 0 ? code : code.substring(0, dash);
+        if (!code.isEmpty() && styles.contains(code)) {
+            return code;
+        }
+        if (!base.isEmpty() && styles.contains(base)) {
+            return base;
+        }
+        if (RUSSIAN_LABELS.contains(base) && styles.contains("ru")) {
+            return "ru";
+        }
+        if (styles.contains("en")) {
+            return "en";
+        }
+        return new TreeSet<>(styles).first();
+    }
+
+    @Override
+    public IMarkerOptions onCreateMarkerOptions() {
+        return new PlumaMarkerOptions();
+    }
+
+    @Override
+    public ICircleOptions onCreateCircleOptions() {
+        return new PlumaCircleOptions();
+    }
+
+    @Override
+    public ILatLngBoundsBuilder onCreateLatLngBoundsBuilder() {
+        return new PlumaLatLngBoundsBuilder();
+    }
+
+    @Override
+    public ICameraUpdate newCameraUpdateLatLng(LatLng latLng) {
+        return new PlumaCameraUpdate(CameraUpdateFactory.newLatLng(toMapLibre(latLng)), false);
+    }
+
+    @Override
+    public ICameraUpdate newCameraUpdateLatLngZoom(LatLng latLng, float zoom) {
+        return new PlumaCameraUpdate(CameraUpdateFactory.newLatLngZoom(toMapLibre(latLng), zoom), false);
+    }
+
+    @Override
+    public ICameraUpdate newCameraUpdateLatLngBounds(ILatLngBounds bounds, int padding) {
+        return new PlumaCameraUpdate(CameraUpdateFactory.newLatLngBounds(((PlumaLatLngBounds) bounds).bounds, padding), true);
+    }
+
+    // The screens ask for the night style by its resource; any other resource and setMapStyle(null) are the day style.
+    @Override
+    public IMapStyleOptions loadRawResourceStyle(Context context, int resId) {
+        return new PlumaMapStyle(resId == R.raw.mapstyle_night);
+    }
+
+    // The map is in the app itself: the check before the location screens always finds it installed.
+    @Override
+    public String getMapsAppPackageName() {
+        return ApplicationLoader.applicationContext.getPackageName();
+    }
+
+    @Override
+    public int getInstallMapsString() {
+        return R.string.InstallGoogleMaps;
+    }
+
+    private static org.maplibre.android.geometry.LatLng toMapLibre(LatLng latLng) {
+        return new org.maplibre.android.geometry.LatLng(latLng.latitude, latLng.longitude);
+    }
+
+    private static LatLng fromMapLibre(org.maplibre.android.geometry.LatLng latLng) {
+        return latLng == null ? new LatLng(0, 0) : new LatLng(latLng.getLatitude(), latLng.getLongitude());
+    }
+
+    private static org.maplibre.geojson.Point toPoint(LatLng latLng) {
+        return org.maplibre.geojson.Point.fromLngLat(latLng.longitude, latLng.latitude);
+    }
+
+    // A circle of radius metres around center on the sphere, as a polygon.
+    private static Polygon circlePolygon(LatLng center, double radius) {
+        double lat = Math.toRadians(center.latitude);
+        double lng = Math.toRadians(center.longitude);
+        double d = radius / EARTH_RADIUS;
+        List<org.maplibre.geojson.Point> ring = new ArrayList<>(CIRCLE_POINTS + 1);
+        for (int i = 0; i < CIRCLE_POINTS; i++) {
+            double bearing = 2 * Math.PI * i / CIRCLE_POINTS;
+            double lat2 = Math.asin(Math.sin(lat) * Math.cos(d) + Math.cos(lat) * Math.sin(d) * Math.cos(bearing));
+            double lng2 = lng + Math.atan2(Math.sin(bearing) * Math.sin(d) * Math.cos(lat), Math.cos(d) - Math.sin(lat) * Math.sin(lat2));
+            ring.add(org.maplibre.geojson.Point.fromLngLat(Math.toDegrees(lng2), Math.toDegrees(lat2)));
+        }
+        ring.add(ring.get(0));
+        return Polygon.fromLngLats(Collections.singletonList(ring));
+    }
+
+    // A bitmap shown pixel for pixel, as the screens draw them: MapLibre takes an image's scale from its density.
+    private static Bitmap screenBitmap(Bitmap bitmap) {
+        int dpi = ApplicationLoader.applicationContext.getResources().getDisplayMetrics().densityDpi;
+        if (bitmap.getDensity() == dpi) {
+            return bitmap;
+        }
+        Bitmap copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+        if (copy == null) {
+            return bitmap;
+        }
+        copy.setDensity(dpi);
+        return copy;
+    }
+
+    public final static class PlumaMapView implements IMapView {
+        private final FrameLayout view;
+        private final MapView mapView;
+        private final String styleBase;
+
+        private ITouchInterceptor dispatchInterceptor;
+        private ITouchInterceptor interceptInterceptor;
+        private Runnable onLayoutListener;
+
+        private PlumaMap map;
+        private boolean created;
+        private boolean started;
+        private boolean resumed;
+        private boolean destroyed;
+
+        private PlumaMapView(Context context, String styleBase) {
+            this.styleBase = styleBase;
+            view = new FrameLayout(context) {
+                @Override
+                public boolean dispatchTouchEvent(MotionEvent ev) {
+                    if (dispatchInterceptor != null) {
+                        return dispatchInterceptor.onInterceptTouchEvent(ev, super::dispatchTouchEvent);
+                    }
+                    return super.dispatchTouchEvent(ev);
+                }
+
+                @Override
+                public boolean onInterceptTouchEvent(MotionEvent ev) {
+                    if (interceptInterceptor != null) {
+                        return interceptInterceptor.onInterceptTouchEvent(ev, super::onInterceptTouchEvent);
+                    }
+                    return super.onInterceptTouchEvent(ev);
+                }
+
+                @Override
+                protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+                    super.onLayout(changed, left, top, right, bottom);
+                    if (map != null) {
+                        map.onLayout();
+                    }
+                    if (onLayoutListener != null) {
+                        onLayoutListener.run();
+                    }
+                }
+            };
+            if (styleBase == null) {
+                mapView = null;
+                return;
+            }
+            // A texture, not a surface: the map moves, fades and is clipped with the sheets over it, and the
+            // glass of the location screen draws it from its texture (LocationActivity, attachMapSurface).
+            MapLibreMapOptions options = MapLibreMapOptions.createFromAttributes(context)
+                    .textureMode(true)
+                    .foregroundLoadColor(Color.TRANSPARENT)
+                    .minZoomPreference(MIN_ZOOM)
+                    .maxZoomPreference(MAX_ZOOM)
+                    .compassEnabled(false)
+                    .logoEnabled(false)
+                    // The data is OpenStreetMap's: its attribution stays on the map (ODbL).
+                    .attributionEnabled(true);
+            mapView = new MapView(context, options);
+            view.addView(mapView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+
+        private String styleUrl(boolean dark) {
+            return styleBase + (dark ? "-dark" : "") + "/style.json";
+        }
+
+        @Override
+        public void setOnDispatchTouchEventInterceptor(ITouchInterceptor touchInterceptor) {
+            dispatchInterceptor = touchInterceptor;
+        }
+
+        @Override
+        public void setOnInterceptTouchEventInterceptor(ITouchInterceptor touchInterceptor) {
+            interceptInterceptor = touchInterceptor;
+        }
+
+        @Override
+        public void setOnLayoutListener(Runnable callback) {
+            onLayoutListener = callback;
+        }
+
+        @Override
+        public View getView() {
+            return view;
+        }
+
+        // Without the server's maps the callback never comes, as with no map service: the screens keep no map.
+        @Override
+        public void getMapAsync(Consumer<IMap> callback) {
+            if (mapView == null || destroyed) {
+                return;
+            }
+            mapView.getMapAsync(maplibreMap -> {
+                if (destroyed) {
+                    return;
+                }
+                if (map == null) {
+                    map = new PlumaMap(this, maplibreMap);
+                }
+                callback.accept(map);
+                map.start();
+            });
+        }
+
+        // The screens call onCreate once off the main thread to warm up the map service; MapLibre's views
+        // are made on the main thread only, once.
+        @Override
+        public void onCreate(Bundle savedInstance) {
+            if (mapView == null || created || destroyed || Looper.myLooper() != Looper.getMainLooper()) {
+                return;
+            }
+            created = true;
+            mapView.onCreate(savedInstance);
+        }
+
+        // MapLibre also has onStart and onStop, which the screens do not call: tiles load only between them.
+        @Override
+        public void onResume() {
+            if (mapView == null || destroyed || resumed) {
+                return;
+            }
+            if (!started) {
+                started = true;
+                mapView.onStart();
+            }
+            resumed = true;
+            mapView.onResume();
+            if (map != null) {
+                map.onResume();
+            }
+        }
+
+        @Override
+        public void onPause() {
+            if (mapView == null || destroyed) {
+                return;
+            }
+            if (resumed) {
+                resumed = false;
+                if (map != null) {
+                    map.onPause();
+                }
+                mapView.onPause();
+            }
+            if (started) {
+                started = false;
+                mapView.onStop();
+            }
+        }
+
+        @Override
+        public void onDestroy() {
+            if (mapView == null || destroyed) {
+                return;
+            }
+            onPause();
+            destroyed = true;
+            if (map != null) {
+                map.onDestroy();
+            }
+            mapView.onDestroy();
+        }
+
+        @Override
+        public void onLowMemory() {
+            if (mapView != null && !destroyed) {
+                mapView.onLowMemory();
+            }
+        }
+    }
+
+    public final static class PlumaMap implements IMap {
+        private final PlumaMapView owner;
+        private final MapLibreMap map;
+        private final int[] attributionMargins;
+
+        private boolean started;
+        private boolean dark;
+        private String styleUrl;
+        private CameraUpdate pendingBounds;
+        private Style style;
+        private boolean rendered;
+        private Runnable onMapLoaded;
+
+        private final ArrayList<PlumaMarker> markers = new ArrayList<>();
+        private final ArrayList<PlumaCircle> circles = new ArrayList<>();
+        private int lastId;
+
+        private Runnable onCameraIdle;
+        private Runnable onCameraMove;
+        private OnCameraMoveStartedListener onCameraMoveStarted;
+        private OnMarkerClickListener onMarkerClick;
+
+        private boolean myLocation;
+        private boolean locationUpdates;
+        private Consumer<Location> onMyLocationChange;
+        private LocationEngine locationEngine;
+        private final LocationEngineRequest locationRequest = new LocationEngineRequest.Builder(LOCATION_INTERVAL)
+                .setPriority(LocationEngineRequest.PRIORITY_HIGH_ACCURACY)
+                .build();
+        private final LocationEngineCallback<LocationEngineResult> locationCallback = new LocationEngineCallback<LocationEngineResult>() {
+            @Override
+            public void onSuccess(LocationEngineResult result) {
+                Location location = result == null ? null : result.getLastLocation();
+                if (location != null && onMyLocationChange != null && locationUpdates) {
+                    onMyLocationChange.accept(location);
+                }
+            }
+
+            @Override
+            public void onFailure(Exception exception) {
+                FileLog.e(exception);
+            }
+        };
+
+        private PlumaMap(PlumaMapView owner, MapLibreMap map) {
+            this.owner = owner;
+            this.map = map;
+            UiSettings ui = map.getUiSettings();
+            attributionMargins = new int[]{ui.getAttributionMarginLeft(), ui.getAttributionMarginTop(),
+                    ui.getAttributionMarginRight(), ui.getAttributionMarginBottom()};
+            map.addOnCameraIdleListener(() -> {
+                if (onCameraIdle != null) {
+                    onCameraIdle.run();
+                }
+            });
+            map.addOnCameraMoveListener(() -> {
+                if (onCameraMove != null) {
+                    onCameraMove.run();
+                }
+            });
+            // The reasons are matched by name: MapLibre numbers them differently.
+            map.addOnCameraMoveStartedListener(reason -> {
+                if (onCameraMoveStarted == null) {
+                    return;
+                }
+                int outReason;
+                switch (reason) {
+                    default:
+                    case MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE:
+                        outReason = OnCameraMoveStartedListener.REASON_GESTURE;
+                        break;
+                    case MapLibreMap.OnCameraMoveStartedListener.REASON_API_ANIMATION:
+                        outReason = OnCameraMoveStartedListener.REASON_API_ANIMATION;
+                        break;
+                    case MapLibreMap.OnCameraMoveStartedListener.REASON_DEVELOPER_ANIMATION:
+                        outReason = OnCameraMoveStartedListener.REASON_DEVELOPER_ANIMATION;
+                        break;
+                }
+                onCameraMoveStarted.onCameraMoveStarted(outReason);
+            });
+            map.addOnMapClickListener(this::onMapClick);
+            owner.mapView.addOnDidFinishRenderingMapListener(fully -> {
+                if (!fully || rendered || style == null) {
+                    return;
+                }
+                rendered = true;
+                if (onMapLoaded != null) {
+                    onMapLoaded.run();
+                }
+            });
+        }
+
+        // After the screen's own setup in the callback of getMapAsync, so that a night style it sets there is
+        // the first one loaded.
+        private void start() {
+            if (started) {
+                return;
+            }
+            started = true;
+            loadStyle();
+        }
+
+        private void loadStyle() {
+            if (!started || owner.destroyed) {
+                return;
+            }
+            String url = owner.styleUrl(dark);
+            if (url.equals(styleUrl)) {
+                return;
+            }
+            styleUrl = url;
+            style = null;
+            for (PlumaMarker marker : markers) {
+                marker.attached = false;
+            }
+            for (PlumaCircle circle : circles) {
+                circle.attached = false;
+            }
+            map.setStyle(new Style.Builder().fromUri(url), this::onStyleLoaded);
+        }
+
+        // A new style has none of the map's own sources, layers and images: they are added again, the circles
+        // under the markers, each in the order it was added.
+        private void onStyleLoaded(Style loaded) {
+            if (owner.destroyed) {
+                return;
+            }
+            style = loaded;
+            for (PlumaCircle circle : circles) {
+                circle.attach();
+            }
+            for (PlumaMarker marker : markers) {
+                marker.attach();
+            }
+            updateMyLocation();
+        }
+
+        private boolean ready() {
+            return style != null && style.isFullyLoaded() && !owner.destroyed;
+        }
+
+        private String nextId(String kind) {
+            return "pluma-" + kind + "-" + (++lastId);
+        }
+
+        private void onResume() {
+            updateLocationUpdates();
+        }
+
+        private void onPause() {
+            updateLocationUpdates();
+        }
+
+        private void onDestroy() {
+            myLocation = false;
+            updateLocationUpdates();
+        }
+
+        private boolean onMapClick(org.maplibre.android.geometry.LatLng point) {
+            if (onMarkerClick == null || !ready()) {
+                return false;
+            }
+            PointF screen = map.getProjection().toScreenLocation(point);
+            for (int i = markers.size() - 1; i >= 0; i--) {
+                PlumaMarker marker = markers.get(i);
+                if (marker.attached && !map.queryRenderedFeatures(screen, marker.id).isEmpty()) {
+                    return onMarkerClick.onClick(marker);
+                }
+            }
+            return false;
+        }
+
+        // Satellite and hybrid maps need imagery the server does not have: always the map.
+        @Override
+        public void setMapType(int mapType) {
+        }
+
+        @Override
+        public float getMaxZoomLevel() {
+            return (float) map.getMaxZoomLevel();
+        }
+
+        @Override
+        public float getMinZoomLevel() {
+            return (float) map.getMinZoomLevel();
+        }
+
+        @Override
+        public void setMyLocationEnabled(boolean enabled) {
+            myLocation = enabled;
+            updateMyLocation();
+        }
+
+        private static boolean hasLocationPermission(Context context) {
+            return context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    || context.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        }
+
+        // The location dot and its updates come from the system's location service, only with the permission;
+        // without it the map shows no location and nothing is asked.
+        @SuppressLint("MissingPermission")
+        private void updateMyLocation() {
+            if (!ready()) {
+                updateLocationUpdates();
+                return;
+            }
+            Context context = owner.view.getContext();
+            LocationComponent component = map.getLocationComponent();
+            boolean show = myLocation && hasLocationPermission(context);
+            try {
+                if (show && !component.isLocationComponentActivated()) {
+                    if (locationEngine == null) {
+                        locationEngine = LocationEngineDefault.INSTANCE.getDefaultLocationEngine(context);
+                    }
+                    component.activateLocationComponent(LocationComponentActivationOptions.builder(context, style)
+                            .locationEngine(locationEngine)
+                            .locationEngineRequest(locationRequest)
+                            .build());
+                }
+                if (component.isLocationComponentActivated()) {
+                    component.setLocationComponentEnabled(show);
+                    if (show) {
+                        component.setCameraMode(CameraMode.NONE);
+                        component.setRenderMode(RenderMode.NORMAL);
+                    }
+                }
+            } catch (SecurityException e) {
+                FileLog.e(e);
+            }
+            updateLocationUpdates();
+        }
+
+        // The screens' own listener gets the updates while the map is on screen.
+        @SuppressLint("MissingPermission")
+        private void updateLocationUpdates() {
+            boolean want = myLocation && onMyLocationChange != null && owner.resumed && !owner.destroyed
+                    && locationEngine != null && hasLocationPermission(owner.view.getContext());
+            if (want == locationUpdates) {
+                return;
+            }
+            locationUpdates = want;
+            if (want) {
+                try {
+                    // The last known location first, as the screens place their marker by the first one.
+                    locationEngine.getLastLocation(locationCallback);
+                    locationEngine.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper());
+                } catch (SecurityException e) {
+                    locationUpdates = false;
+                    FileLog.e(e);
+                }
+            } else {
+                locationEngine.removeLocationUpdates(locationCallback);
+            }
+        }
+
+        @Override
+        public IUISettings getUiSettings() {
+            return new PlumaUISettings(map.getUiSettings());
+        }
+
+        @Override
+        public void setOnCameraMoveStartedListener(OnCameraMoveStartedListener onCameraMoveStartedListener) {
+            onCameraMoveStarted = onCameraMoveStartedListener;
+        }
+
+        @Override
+        public void setOnCameraIdleListener(Runnable callback) {
+            onCameraIdle = callback;
+        }
+
+        @Override
+        public void setOnCameraMoveListener(Runnable callback) {
+            onCameraMove = callback;
+        }
+
+        @Override
+        public CameraPosition getCameraPosition() {
+            org.maplibre.android.camera.CameraPosition position = map.getCameraPosition();
+            return new CameraPosition(fromMapLibre(position.target), (float) position.zoom);
+        }
+
+        // Called once the map has drawn its first full frame of the style.
+        @Override
+        public void setOnMapLoadedCallback(Runnable callback) {
+            onMapLoaded = callback;
+            if (rendered && callback != null) {
+                callback.run();
+            }
+        }
+
+        @Override
+        public IProjection getProjection() {
+            return latLng -> {
+                PointF point = map.getProjection().toScreenLocation(toMapLibre(latLng));
+                return new Point(Math.round(point.x), Math.round(point.y));
+            };
+        }
+
+        // The padding moves the camera's centre, not the map: the point under the new centre becomes the
+        // target, as the screens expect (ChatAttachAlertLocationLayout, applyMapSpace). The attribution keeps
+        // clear of the padding.
+        @Override
+        public void setPadding(int left, int top, int right, int bottom) {
+            View view = owner.mapView;
+            if (view.getWidth() > 0 && view.getHeight() > 0) {
+                PointF center = new PointF((left + view.getWidth() - right) / 2f, (top + view.getHeight() - bottom) / 2f);
+                org.maplibre.android.geometry.LatLng target = map.getProjection().fromScreenLocation(center);
+                map.moveCamera(CameraUpdateFactory.newLatLngPadding(target, left, top, right, bottom));
+            } else {
+                map.moveCamera(CameraUpdateFactory.paddingTo(left, top, right, bottom));
+            }
+            map.getUiSettings().setAttributionMargins(attributionMargins[0] + left, attributionMargins[1] + top,
+                    attributionMargins[2] + right, attributionMargins[3] + bottom);
+        }
+
+        @Override
+        public void setMapStyle(IMapStyleOptions style) {
+            boolean night = style instanceof PlumaMapStyle && ((PlumaMapStyle) style).dark;
+            if (night == dark) {
+                return;
+            }
+            dark = night;
+            loadStyle();
+        }
+
+        @Override
+        public IMarker addMarker(IMarkerOptions markerOptions) {
+            PlumaMarker marker = new PlumaMarker(nextId("marker"), (PlumaMarkerOptions) markerOptions);
+            markers.add(marker);
+            marker.attach();
+            return marker;
+        }
+
+        @Override
+        public ICircle addCircle(ICircleOptions circleOptions) {
+            PlumaCircle circle = new PlumaCircle(nextId("circle"), (PlumaCircleOptions) circleOptions);
+            circles.add(circle);
+            circle.attach();
+            return circle;
+        }
+
+        @Override
+        public void setOnMyLocationChangeListener(Consumer<Location> callback) {
+            onMyLocationChange = callback;
+            updateLocationUpdates();
+        }
+
+        @Override
+        public void setOnMarkerClickListener(OnMarkerClickListener markerClickListener) {
+            onMarkerClick = markerClickListener;
+        }
+
+        @Override
+        public void animateCamera(ICameraUpdate update) {
+            if (!deferred(update, null)) {
+                map.animateCamera(((PlumaCameraUpdate) update).update);
+            }
+        }
+
+        @Override
+        public void animateCamera(ICameraUpdate update, ICancelableCallback callback) {
+            if (!deferred(update, callback)) {
+                map.animateCamera(((PlumaCameraUpdate) update).update, cancelable(callback));
+            }
+        }
+
+        @Override
+        public void animateCamera(ICameraUpdate update, int duration, ICancelableCallback callback) {
+            if (!deferred(update, callback)) {
+                map.animateCamera(((PlumaCameraUpdate) update).update, duration, cancelable(callback));
+            }
+        }
+
+        @Override
+        public void moveCamera(ICameraUpdate update) {
+            if (!deferred(update, null)) {
+                map.moveCamera(((PlumaCameraUpdate) update).update);
+            }
+        }
+
+        // Bounds are fitted to the map's size. Before the map is laid out they would be fitted to nothing, and
+        // the screens move to them as soon as they have their markers (LocationActivity 2518-2524), so the
+        // camera keeps them and moves there at the first layout with a size; a later camera move replaces them.
+        // An animation put off this way is cancelled for its callback.
+        private boolean deferred(ICameraUpdate update, ICancelableCallback callback) {
+            PlumaCameraUpdate camera = (PlumaCameraUpdate) update;
+            View view = owner.mapView;
+            if (camera.bounds && (view.getWidth() == 0 || view.getHeight() == 0)) {
+                pendingBounds = camera.update;
+                if (callback != null) {
+                    callback.onCancel();
+                }
+                return true;
+            }
+            pendingBounds = null;
+            return false;
+        }
+
+        private void onLayout() {
+            View view = owner.mapView;
+            if (pendingBounds != null && view.getWidth() > 0 && view.getHeight() > 0 && !owner.destroyed) {
+                CameraUpdate update = pendingBounds;
+                pendingBounds = null;
+                map.moveCamera(update);
+            }
+        }
+
+        private static MapLibreMap.CancelableCallback cancelable(ICancelableCallback callback) {
+            return callback == null ? null : new MapLibreMap.CancelableCallback() {
+                @Override
+                public void onCancel() {
+                    callback.onCancel();
+                }
+
+                @Override
+                public void onFinish() {
+                    callback.onFinish();
+                }
+            };
+        }
+
+        // A marker is a source with its point and a symbol layer of its own, so that it is drawn over the
+        // markers added before it; its icon is an image of the style under the same id.
+        public final class PlumaMarker implements IMarker {
+            private final String id;
+            private Object tag;
+            private LatLng position;
+            private Bitmap icon;
+            private float anchorU;
+            private float anchorV;
+            private boolean flat;
+            private int rotation;
+            private boolean attached;
+            private boolean removed;
+
+            private PlumaMarker(String id, PlumaMarkerOptions options) {
+                this.id = id;
+                position = options.position == null ? new LatLng(0, 0) : options.position;
+                icon = options.icon;
+                anchorU = options.anchorU;
+                anchorV = options.anchorV;
+                flat = options.flat;
+            }
+
+            private void attach() {
+                if (removed || attached || icon == null || icon.isRecycled() || !ready()) {
+                    return;
+                }
+                style.addImage(id, icon);
+                style.addSource(new GeoJsonSource(id, toPoint(position)));
+                SymbolLayer layer = new SymbolLayer(id, id);
+                layer.setProperties(properties());
+                style.addLayer(layer);
+                attached = true;
+            }
+
+            private PropertyValue<?>[] properties() {
+                float ratio = icon.getDensity() / 160f;
+                String alignment = flat ? Property.ICON_ROTATION_ALIGNMENT_MAP : Property.ICON_ROTATION_ALIGNMENT_VIEWPORT;
+                return new PropertyValue<?>[]{
+                        PropertyFactory.iconImage(id),
+                        PropertyFactory.iconAllowOverlap(true),
+                        PropertyFactory.iconIgnorePlacement(true),
+                        PropertyFactory.iconAnchor(Property.ICON_ANCHOR_CENTER),
+                        PropertyFactory.iconOffset(new Float[]{(0.5f - anchorU) * icon.getWidth() / ratio, (0.5f - anchorV) * icon.getHeight() / ratio}),
+                        PropertyFactory.iconRotate((float) rotation),
+                        PropertyFactory.iconRotationAlignment(alignment),
+                        PropertyFactory.iconPitchAlignment(flat ? Property.ICON_PITCH_ALIGNMENT_MAP : Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
+                };
+            }
+
+            private void updateLayer() {
+                if (!attached || !ready()) {
+                    return;
+                }
+                SymbolLayer layer = style.getLayerAs(id);
+                if (layer != null) {
+                    layer.setProperties(properties());
+                }
+            }
+
+            @Override
+            public Object getTag() {
+                return tag;
+            }
+
+            @Override
+            public void setTag(Object tag) {
+                this.tag = tag;
+            }
+
+            @Override
+            public LatLng getPosition() {
+                return position;
+            }
+
+            @Override
+            public void setPosition(LatLng latLng) {
+                position = latLng;
+                if (!attached || !ready()) {
+                    return;
+                }
+                GeoJsonSource source = style.getSourceAs(id);
+                if (source != null) {
+                    source.setGeoJson(toPoint(latLng));
+                }
+            }
+
+            @Override
+            public void setRotation(int rotation) {
+                this.rotation = rotation;
+                updateLayer();
+            }
+
+            @Override
+            public void setIcon(Bitmap bitmap) {
+                if (bitmap == null || bitmap.isRecycled()) {
+                    return;
+                }
+                icon = screenBitmap(bitmap);
+                if (!attached) {
+                    attach();
+                    return;
+                }
+                if (ready()) {
+                    style.addImage(id, icon);
+                    updateLayer();
+                }
+            }
+
+            @Override
+            public void setIcon(int resId) {
+                Bitmap bitmap = BitmapFactory.decodeResource(ApplicationLoader.applicationContext.getResources(), resId);
+                if (bitmap != null) {
+                    setIcon(bitmap);
+                }
+            }
+
+            @Override
+            public void remove() {
+                if (removed) {
+                    return;
+                }
+                removed = true;
+                markers.remove(this);
+                if (attached && ready()) {
+                    style.removeLayer(id);
+                    style.removeSource(id);
+                    style.removeImage(id);
+                }
+                attached = false;
+            }
+        }
+
+        // A circle is a polygon of its points on the sphere, filled by one layer and outlined by another.
+        public final class PlumaCircle implements ICircle {
+            private final String id;
+            private LatLng center;
+            private double radius;
+            private int strokeColor;
+            private int fillColor;
+            private int strokeWidth;
+            private Float[] dashes;
+            private boolean attached;
+            private boolean removed;
+
+            private PlumaCircle(String id, PlumaCircleOptions options) {
+                this.id = id;
+                center = options.center == null ? new LatLng(0, 0) : options.center;
+                radius = options.radius;
+                strokeColor = options.strokeColor;
+                fillColor = options.fillColor;
+                strokeWidth = options.strokeWidth;
+                dashes = dashArray(options.pattern, strokeWidth);
+            }
+
+            private String fillId() {
+                return id + "-fill";
+            }
+
+            private String lineId() {
+                return id + "-line";
+            }
+
+            private void attach() {
+                if (removed || attached || !ready()) {
+                    return;
+                }
+                style.addSource(new GeoJsonSource(id, circlePolygon(center, radius)));
+                FillLayer fill = new FillLayer(fillId(), id);
+                fill.setProperties(PropertyFactory.fillColor(fillColor));
+                LineLayer line = new LineLayer(lineId(), id);
+                line.setProperties(lineProperties());
+                String below = firstMarkerLayer();
+                if (below == null) {
+                    style.addLayer(fill);
+                    style.addLayer(line);
+                } else {
+                    style.addLayerBelow(fill, below);
+                    style.addLayerBelow(line, below);
+                }
+                attached = true;
+            }
+
+            private String firstMarkerLayer() {
+                for (PlumaMarker marker : markers) {
+                    if (marker.attached) {
+                        return marker.id;
+                    }
+                }
+                return null;
+            }
+
+            private PropertyValue<?>[] lineProperties() {
+                float density = ApplicationLoader.applicationContext.getResources().getDisplayMetrics().density;
+                ArrayList<PropertyValue<?>> out = new ArrayList<>();
+                out.add(PropertyFactory.lineColor(strokeColor));
+                out.add(PropertyFactory.lineWidth(strokeWidth / density));
+                if (dashes != null) {
+                    out.add(PropertyFactory.lineDasharray(dashes));
+                }
+                return out.toArray(new PropertyValue<?>[0]);
+            }
+
+            private void updateShape() {
+                if (!attached || !ready()) {
+                    return;
+                }
+                GeoJsonSource source = style.getSourceAs(id);
+                if (source != null) {
+                    source.setGeoJson(circlePolygon(center, radius));
+                }
+            }
+
+            @Override
+            public void setStrokeColor(int color) {
+                strokeColor = color;
+                if (attached && ready()) {
+                    LineLayer line = style.getLayerAs(lineId());
+                    if (line != null) {
+                        line.setProperties(lineProperties());
+                    }
+                }
+            }
+
+            @Override
+            public void setFillColor(int color) {
+                fillColor = color;
+                if (attached && ready()) {
+                    FillLayer fill = style.getLayerAs(fillId());
+                    if (fill != null) {
+                        fill.setProperties(PropertyFactory.fillColor(color));
+                    }
+                }
+            }
+
+            @Override
+            public void setRadius(double radius) {
+                this.radius = radius;
+                updateShape();
+            }
+
+            @Override
+            public double getRadius() {
+                return radius;
+            }
+
+            @Override
+            public void setCenter(LatLng latLng) {
+                center = latLng;
+                updateShape();
+            }
+
+            @Override
+            public void remove() {
+                if (removed) {
+                    return;
+                }
+                removed = true;
+                circles.remove(this);
+                if (attached && ready()) {
+                    style.removeLayer(lineId());
+                    style.removeLayer(fillId());
+                    style.removeSource(id);
+                }
+                attached = false;
+            }
+        }
+    }
+
+    // A stroke pattern of dashes and gaps in pixels as MapLibre's dash array: lengths in line widths, starting
+    // with a dash, in pairs.
+    private static Float[] dashArray(List<PatternItem> pattern, int strokeWidth) {
+        if (pattern == null || pattern.isEmpty() || strokeWidth <= 0) {
+            return null;
+        }
+        ArrayList<Float> out = new ArrayList<>();
+        for (PatternItem item : pattern) {
+            boolean dash = item instanceof PatternItem.Dash;
+            if (!dash && !(item instanceof PatternItem.Gap)) {
+                continue;
+            }
+            int length = dash ? ((PatternItem.Dash) item).length : ((PatternItem.Gap) item).length;
+            if (out.size() % 2 == (dash ? 1 : 0)) {
+                out.add(0f);
+            }
+            out.add(length / (float) strokeWidth);
+        }
+        if (out.size() % 2 == 1) {
+            out.add(0f);
+        }
+        return out.isEmpty() ? null : out.toArray(new Float[0]);
+    }
+
+    public final static class PlumaUISettings implements IUISettings {
+        private final UiSettings uiSettings;
+
+        private PlumaUISettings(UiSettings settings) {
+            uiSettings = settings;
+        }
+
+        // MapLibre draws no zoom buttons and no location button.
+        @Override
+        public void setZoomControlsEnabled(boolean enabled) {
+        }
+
+        @Override
+        public void setMyLocationButtonEnabled(boolean enabled) {
+        }
+
+        @Override
+        public void setCompassEnabled(boolean enabled) {
+            uiSettings.setCompassEnabled(enabled);
+        }
+    }
+
+    // A marker without an anchor stands on the middle of its bottom edge, as a pin does.
+    public final static class PlumaMarkerOptions implements IMarkerOptions {
+        private LatLng position;
+        private Bitmap icon;
+        private float anchorU = 0.5f;
+        private float anchorV = 1f;
+        private boolean flat;
+
+        private PlumaMarkerOptions() {
+        }
+
+        @Override
+        public IMarkerOptions position(LatLng latLng) {
+            position = latLng;
+            return this;
+        }
+
+        @Override
+        public IMarkerOptions icon(Bitmap bitmap) {
+            if (bitmap != null && !bitmap.isRecycled()) {
+                icon = screenBitmap(bitmap);
+            }
+            return this;
+        }
+
+        @Override
+        public IMarkerOptions icon(int resId) {
+            Bitmap bitmap = BitmapFactory.decodeResource(ApplicationLoader.applicationContext.getResources(), resId);
+            if (bitmap != null) {
+                icon = screenBitmap(bitmap);
+            }
+            return this;
+        }
+
+        @Override
+        public IMarkerOptions anchor(float lat, float lng) {
+            anchorU = lat;
+            anchorV = lng;
+            return this;
+        }
+
+        // The screens give no marker a title or a snippet to show: MapLibre's layers have no info windows.
+        @Override
+        public IMarkerOptions title(String title) {
+            return this;
+        }
+
+        @Override
+        public IMarkerOptions snippet(String snippet) {
+            return this;
+        }
+
+        @Override
+        public IMarkerOptions flat(boolean flat) {
+            this.flat = flat;
+            return this;
+        }
+    }
+
+    // The screens set every property of their circles; these are only the values of a circle that sets none.
+    public final static class PlumaCircleOptions implements ICircleOptions {
+        private LatLng center;
+        private double radius;
+        private int strokeColor = Color.BLACK;
+        private int fillColor = Color.TRANSPARENT;
+        private int strokeWidth = 10;
+        private List<PatternItem> pattern;
+
+        private PlumaCircleOptions() {
+        }
+
+        @Override
+        public ICircleOptions center(LatLng latLng) {
+            center = latLng;
+            return this;
+        }
+
+        @Override
+        public ICircleOptions radius(double radius) {
+            this.radius = radius;
+            return this;
+        }
+
+        @Override
+        public ICircleOptions strokeColor(int color) {
+            strokeColor = color;
+            return this;
+        }
+
+        @Override
+        public ICircleOptions fillColor(int color) {
+            fillColor = color;
+            return this;
+        }
+
+        @Override
+        public ICircleOptions strokePattern(List<PatternItem> patternItems) {
+            pattern = patternItems == null ? null : new ArrayList<>(patternItems);
+            return this;
+        }
+
+        @Override
+        public ICircleOptions strokeWidth(int width) {
+            strokeWidth = width;
+            return this;
+        }
+    }
+
+    // The bounds of the points included by their smallest and largest latitude and longitude (not across the
+    // 180th meridian); one point is bounds of no size.
+    public final static class PlumaLatLngBoundsBuilder implements ILatLngBoundsBuilder {
+        private double north = -90, south = 90, east = -Double.MAX_VALUE, west = Double.MAX_VALUE;
+        private boolean empty = true;
+
+        private PlumaLatLngBoundsBuilder() {
+        }
+
+        @Override
+        public ILatLngBoundsBuilder include(LatLng latLng) {
+            north = Math.max(north, latLng.latitude);
+            south = Math.min(south, latLng.latitude);
+            east = Math.max(east, latLng.longitude);
+            west = Math.min(west, latLng.longitude);
+            empty = false;
+            return this;
+        }
+
+        @Override
+        public ILatLngBounds build() {
+            if (empty) {
+                throw new IllegalStateException("no included points");
+            }
+            return new PlumaLatLngBounds(LatLngBounds.from(north, east, south, west));
+        }
+    }
+
+    public final static class PlumaLatLngBounds implements ILatLngBounds {
+        private final LatLngBounds bounds;
+
+        private PlumaLatLngBounds(LatLngBounds bounds) {
+            this.bounds = bounds;
+        }
+
+        @Override
+        public LatLng getCenter() {
+            return fromMapLibre(bounds.getCenter());
+        }
+    }
+
+    public final static class PlumaCameraUpdate implements ICameraUpdate {
+        private final CameraUpdate update;
+        private final boolean bounds;
+
+        private PlumaCameraUpdate(CameraUpdate update, boolean bounds) {
+            this.update = update;
+            this.bounds = bounds;
+        }
+    }
+
+    public final static class PlumaMapStyle implements IMapStyleOptions {
+        private final boolean dark;
+
+        private PlumaMapStyle(boolean dark) {
+            this.dark = dark;
+        }
+    }
+}
+"""
+
+# MapLibre's artifacts, by the SHA-256 Maven Central publishes for each (recomputed
+# from the files); every other group stays as upstream resolves it.
+MAPS_ARTIFACTS = (
+    ("android-sdk-opengl", "13.7.1", (
+        ("android-sdk-opengl-13.7.1.aar", "4a6762e878ae8f392a27d89138c19196a519121d1449f824e542058147a8a072"),
+        ("android-sdk-opengl-13.7.1.module", "8399f6b9b895477d234636af59768f1f416831d86e7abebea2da50c1469d0528"),
+        ("android-sdk-opengl-13.7.1.pom", "56349b4aae6f886c5a2befeaeb375e28c91cd457791555fd3a5851692d897de9"),
+    )),
+    ("android-sdk-geojson", "6.0.1", (
+        ("android-sdk-geojson-6.0.1.jar", "0c4e4258ce258da9740c17c76f3ae90f89fcfa5822a797f5d466b35410571363"),
+        ("android-sdk-geojson-6.0.1.module", "27df402a9eef70bb45ea077ba63084b6da62e97831dda124f466bedce68f81f3"),
+        ("android-sdk-geojson-6.0.1.pom", "c4c5d3ca85dc344e0fbdf2c40a22eb2e55bdc5892b44e94377e54fa7bd0c28e2"),
+    )),
+    ("android-sdk-turf", "6.0.1", (
+        ("android-sdk-turf-6.0.1.jar", "c0fd543d17fbd3b7c2e946515caf2d53b602f0eac1438ad4dca731d9a508af79"),
+        ("android-sdk-turf-6.0.1.module", "e36383ee48cfb210c4c6b3743fffb00aa119a5666ddf5ba2650e6b62e5b5e23c"),
+        ("android-sdk-turf-6.0.1.pom", "d1412707b1caac09be5bc25338189b9d89250806f7eb6be90655c0ff54b3f6f9"),
+    )),
+    ("maplibre-android-gestures", "0.0.4", (
+        ("maplibre-android-gestures-0.0.4-sources.jar", "155574301748bbae2aa39cac8a94865eb671e0215b1140a022d5c5bbe554d26b"),
+        ("maplibre-android-gestures-0.0.4.aar", "44ff4fc2dd8bfbcf54a06f219e7ab40a2062eb6b4a10dcbf1f4e02b4a30c61af"),
+        ("maplibre-android-gestures-0.0.4.module", "4cf75cda22d02ffb6ac43bc2f5bc54282bac1576df8cd9abbc0ead27b2fd80fc"),
+        ("maplibre-android-gestures-0.0.4.pom", "4f7f178c649295c89a4b5fa3927bc714ffb9e29866d66ca635c5f0415ea83f2e"),
+    )),
+)
+MAPS_GROUP = "org.maplibre.gl"
+
+
+def maps_verification_metadata():
+    """Gradle's dependency verification of the MapLibre group only: every other group is trusted."""
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        "<!-- pluma: the artifacts of MapLibre Native (task 112 of the server repository) are checked against",
+        "     their SHA-256; every other group is resolved as upstream resolves it. Written by ci/patch.py. -->",
+        '<verification-metadata xmlns="https://schema.gradle.org/dependency-verification"'
+        ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+        ' xsi:schemaLocation="https://schema.gradle.org/dependency-verification'
+        ' https://schema.gradle.org/dependency-verification/dependency-verification-1.3.xsd">',
+        "   <configuration>",
+        "      <verify-metadata>true</verify-metadata>",
+        "      <verify-signatures>false</verify-signatures>",
+        "      <trusted-artifacts>",
+        '         <trust group="^(?!org[.]maplibre[.]gl$).*$" regex="true"/>',
+        "      </trusted-artifacts>",
+        "   </configuration>",
+        "   <components>",
+    ]
+    for name, version, files in MAPS_ARTIFACTS:
+        lines.append(f'      <component group="{MAPS_GROUP}" name="{name}" version="{version}">')
+        for file, sha in files:
+            lines.append(f'         <artifact name="{file}">')
+            lines.append(f'            <sha256 value="{sha}" origin="Maven Central"/>')
+            lines.append("         </artifact>")
+        lines.append("      </component>")
+    lines += ["   </components>", "</verification-metadata>", ""]
+    return "\n".join(lines)
+
+
+def _maps_sources(tree):
+    for module in ("TMessagesProj/src", "TMessagesProj_App/src"):
+        root = tree.root / module
+        if root.is_dir():
+            yield from sorted(p for p in root.rglob("*.java") if p.is_file())
+
+
+def maps(tree):
+    # Every anchor first, and no PlumaMapsProvider or verification metadata yet:
+    # a tree that is already patched must fail before anything is written twice.
+    for rel in (MAPS_PROVIDER_FILE, VERIFICATION_METADATA):
+        if (tree.root / rel).exists():
+            raise PatchError(f"{rel}: the file is already there")
+    if not (tree.root / GOOGLE_MAPS_PROVIDER).is_file():
+        raise PatchError(f"{GOOGLE_MAPS_PROVIDER}: not there; upstream changed its maps")
+    for rel, old, _ in MAPS_EDITS:
+        tree.expect(rel, old)
+    for rel, text in MAPS_USES:
+        tree.expect(rel, text)
+    for rel in MAPS_KEY_MANIFESTS:
+        found = len(MAPS_KEY_LINE.findall(tree.read(rel)))
+        if found != 1:
+            raise PatchError(f"{rel}: {found} keys for Google's maps, expected 1; upstream changed it")
+    for rel, old, new in MAPS_EDITS:
+        tree.replace(rel, old, new)
+    for rel in MAPS_KEY_MANIFESTS:
+        tree.sub(rel, MAPS_KEY_LINE.pattern, "")
+    (tree.root / GOOGLE_MAPS_PROVIDER).unlink()
+    tree.write(MAPS_PROVIDER_FILE, MAPS_JAVA)
+    (tree.root / VERIFICATION_METADATA).parent.mkdir(exist_ok=True)
+    tree.write(VERIFICATION_METADATA, maps_verification_metadata())
+
+
+def verify_maps(tree):
+    for rel, old, new in MAPS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            changed = next(line for line in new.splitlines() if line not in old.splitlines())
+            raise PatchError(f"{rel}: the maps edit {changed.strip()!r} is not there")
+    for rel, text in MAPS_USES:
+        tree.expect(rel, text)
+    java = tree.root / MAPS_PROVIDER_FILE
+    if not java.is_file() or java.read_text(encoding="utf-8") != MAPS_JAVA:
+        raise PatchError(f"{MAPS_PROVIDER_FILE}: not the MapLibre provider")
+    if (tree.root / GOOGLE_MAPS_PROVIDER).exists():
+        raise PatchError(f"{GOOGLE_MAPS_PROVIDER}: Google's provider is still there")
+    meta = tree.root / VERIFICATION_METADATA
+    if not meta.is_file() or meta.read_text(encoding="utf-8") != maps_verification_metadata():
+        raise PatchError(f"{VERIFICATION_METADATA}: not the checksums of MapLibre")
+    gradle = tree.read(LIBRARY_GRADLE)
+    if "play-services-maps" in gradle or gradle.count(MAPLIBRE_DEPENDENCY) != 1:
+        raise PatchError(f"{LIBRARY_GRADLE}: the maps are not MapLibre's")
+    # No manifest carries the key, no source Google's maps.
+    for p in sorted((tree.root / "TMessagesProj").rglob("AndroidManifest*.xml")):
+        if MAPS_KEY_NAME in p.read_text(encoding="utf-8", errors="replace"):
+            raise PatchError(f"{p.relative_to(tree.root)}: the key for Google's maps is still there")
+    for p in _maps_sources(tree):
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if GOOGLE_MAPS_PACKAGE in text or "GoogleMapsProvider" in text:
+            raise PatchError(f"{p.relative_to(tree.root)}: Google's maps are still used")
 
 
 def main(argv=None):

@@ -3022,5 +3022,282 @@ class BusinessTest(unittest.TestCase):
             patch.verify_business(tree)
 
 
+class MapsTest(unittest.TestCase):
+    """Maps on MapLibre with the server's tiles (task 112 of the server repository)."""
+
+    KEY = '        <meta-data android:name="com.google.android.maps.v2.API_KEY" android:value="AIzaPlaceholder" />\n\n'
+
+    # The upstream files, made of the texts the edits expect, the places the new file uses, the
+    # manifests with the key and Google's provider.
+    def tree(self, root, edits=patch.MAPS_EDITS, uses=patch.MAPS_USES, key=KEY):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x();\n"
+        for rel, text in uses:
+            files[rel] = files.get(rel, "") + text + "x();\n"
+        for rel in patch.MAPS_KEY_MANIFESTS:
+            files[rel] = "<application>\n" + key + "        <service />\n"
+        files[patch.GOOGLE_MAPS_PROVIDER] = ("package org.telegram.messenger;\n"
+                                             "import com.google.android.gms.maps.MapView;\n"
+                                             "public class GoogleMapsProvider {}\n")
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    @staticmethod
+    def damaged(text):
+        """The text with a comment after its first letter: upstream changed that line."""
+        i = len(text) - len(text.lstrip()) + 1
+        return text[:i] + "/**/" + text[i:]
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_maps(tree)
+            patch.maps(tree)
+            patch.verify_maps(tree)
+            self.assertFalse((tree.root / patch.GOOGLE_MAPS_PROVIDER).exists())
+            self.assertEqual(tree.read(patch.MAPS_PROVIDER_FILE), patch.MAPS_JAVA)
+            self.assertIn("return new PlumaMapsProvider();", tree.read(patch.APPLICATION_LOADER))
+            self.assertIn(patch.MAPLIBRE_DEPENDENCY, tree.read(patch.LIBRARY_GRADLE))
+            self.assertNotIn("play-services-maps", tree.read(patch.LIBRARY_GRADLE))
+            for rel in patch.MAPS_KEY_MANIFESTS:
+                self.assertEqual(tree.read(rel), "<application>\n        <service />\n", rel)
+            # A second run stops before it writes anything twice.
+            with self.assertRaisesRegex(patch.PatchError, "already there"):
+                patch.maps(tree)
+
+    def test_upstream_changed(self):
+        # DAMAGE: each anchor of the edits (the provider's factory, the app config, the map type
+        # buttons, the dependency, the R8 rules) and each place the new file uses, changed in
+        # upstream, stops the patch with the file's name before anything is written.
+        for i, (rel, old, new) in enumerate(patch.MAPS_EDITS):
+            edits = [e if j != i else (rel, self.damaged(old), new) for j, e in enumerate(patch.MAPS_EDITS)]
+            with self.subTest(edit=new.strip().splitlines()[-1][:60]), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": 0 occurrences"):
+                    patch.maps(tree)
+                self.assertFalse((tree.root / patch.MAPS_PROVIDER_FILE).exists())
+                self.assertTrue((tree.root / patch.GOOGLE_MAPS_PROVIDER).exists())
+        for i, (rel, text) in enumerate(patch.MAPS_USES):
+            uses = [u if j != i else (rel, self.damaged(text)) for j, u in enumerate(patch.MAPS_USES)]
+            with self.subTest(uses=text.strip()[:60]), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), uses=uses)
+                with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": 0 occurrences"):
+                    patch.maps(tree)
+        # A manifest without the key, or with it twice; Google's provider gone; an anchor upstream has twice.
+        for key, found in (("", 0), (self.KEY * 2, 2)):
+            with self.subTest(keys=found), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), key=key)
+                with self.assertRaisesRegex(patch.PatchError, f"{found} keys for Google's maps"):
+                    patch.maps(tree)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            (tree.root / patch.GOOGLE_MAPS_PROVIDER).unlink()
+            with self.assertRaisesRegex(patch.PatchError, "upstream changed its maps"):
+                patch.maps(tree)
+        rel, old, _ = patch.MAPS_EDITS[2]
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            tree.write(rel, tree.read(rel) + old)
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.maps(tree)
+        # Upstream ships verification metadata of its own: it would be overwritten.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            (tree.root / "gradle").mkdir()
+            tree.write(patch.VERIFICATION_METADATA, "<verification-metadata/>\n")
+            with self.assertRaisesRegex(patch.PatchError, "already there"):
+                patch.maps(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.maps(tree)
+            # DAMAGE: each edit taken back, or written twice, fails the check.
+            for rel, old, new in patch.MAPS_EDITS:
+                patched = tree.read(rel)
+                for damaged in (patched.replace(new, old), patched + new):
+                    tree.write(rel, damaged)
+                    with self.subTest(edit=new.strip().splitlines()[-1][:60]), self.assertRaises(patch.PatchError):
+                        patch.verify_maps(tree)
+                tree.write(rel, patched)
+            patch.verify_maps(tree)
+            # The provider or the checksums changed, or gone.
+            for rel, ok in ((patch.MAPS_PROVIDER_FILE, patch.MAPS_JAVA),
+                            (patch.VERIFICATION_METADATA, patch.maps_verification_metadata())):
+                for damaged in (ok.replace("13.7.1", "13.7.2") if "13.7.1" in ok else ok.replace("MAX_ZOOM = 20", "MAX_ZOOM = 21"),
+                                ok + "\n"):
+                    self.assertNotEqual(damaged, ok)
+                    tree.write(rel, damaged)
+                    with self.subTest(file=rel), self.assertRaisesRegex(patch.PatchError, "not the"):
+                        patch.verify_maps(tree)
+                (tree.root / rel).unlink()
+                with self.subTest(gone=rel), self.assertRaisesRegex(patch.PatchError, "not the"):
+                    patch.verify_maps(tree)
+                tree.write(rel, ok)
+            patch.verify_maps(tree)
+            # Google's provider back, the key back in any manifest, a source on Google's maps.
+            tree.write(patch.GOOGLE_MAPS_PROVIDER, "class GoogleMapsProvider {}\n")
+            with self.assertRaisesRegex(patch.PatchError, "Google's provider is still there"):
+                patch.verify_maps(tree)
+            (tree.root / patch.GOOGLE_MAPS_PROVIDER).unlink()
+            manifest = "TMessagesProj/src/main/AndroidManifest.xml"
+            tree.write(manifest, self.KEY)
+            with self.assertRaisesRegex(patch.PatchError, "the key for Google's maps is still there"):
+                patch.verify_maps(tree)
+            (tree.root / manifest).unlink()
+            source = "TMessagesProj_App/src/main/java/org/telegram/messenger/Other.java"
+            (tree.root / source).parent.mkdir(parents=True)
+            for text in ("import com.google.android.gms.maps.MapView;\n", "new GoogleMapsProvider();\n"):
+                tree.write(source, text)
+                with self.subTest(source=text), self.assertRaisesRegex(patch.PatchError, "Google's maps are still used"):
+                    patch.verify_maps(tree)
+            (tree.root / source).unlink()
+            gradle = tree.read(patch.LIBRARY_GRADLE)
+            tree.write(patch.LIBRARY_GRADLE, gradle + "    implementation 'com.google.android.gms:play-services-maps:19.2.0'\n")
+            with self.assertRaisesRegex(patch.PatchError, "the maps are not MapLibre's"):
+                patch.verify_maps(tree)
+            tree.write(patch.LIBRARY_GRADLE, gradle)
+            patch.verify_maps(tree)
+
+    def test_contract(self):
+        # The provider follows the brief of task 112 ("Android: PlumaMapsProvider").
+        java = patch.MAPS_JAVA
+        for line in (
+            "public class PlumaMapsProvider implements IMapsProvider {",
+            'return new PlumaMapView(context, base + "/styles/" + language);',
+            'return styleBase + (dark ? "-dark" : "") + "/style.json";',
+            "return new PlumaMapStyle(resId == R.raw.mapstyle_night);",
+            "config.plumaMapsUrl.get();",
+            "config.plumaMapsStyles.get();",
+            '|| !url.startsWith("https://") || url.endsWith("/")',
+            "|| url.indexOf('?') >= 0 || url.indexOf('#') >= 0) {",
+            'private static final Set<String> RUSSIAN_LABELS = new HashSet<>(Arrays.asList("be", "kk", "ky", "tg", "uz", "hy", "az"));',
+            "styleLanguage(LocaleController.getLocaleStringIso639(), mapsStyles())",
+            "return ApplicationLoader.applicationContext.getPackageName();",
+            ".textureMode(true)",
+            ".compassEnabled(false)",
+            ".logoEnabled(false)",
+            ".attributionEnabled(true);",
+            "private static final double MAX_ZOOM = 20;",
+            "Logger.setVerbosity(Logger.NONE);",
+            "MapLibre.getInstance(context.getApplicationContext());",
+            "case MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE:",
+            "outReason = OnCameraMoveStartedListener.REASON_GESTURE;",
+            "LocationEngineDefault.INSTANCE.getDefaultLocationEngine(context);",
+            # Bounds before the first layout wait for it instead of being fitted to a map of no size.
+            "if (camera.bounds && (view.getWidth() == 0 || view.getHeight() == 0)) {",
+            "map.onLayout();",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(java.count(line), 1)
+        # MapLibre's views are made on the main thread only, once; the screens' warm-up call off it does nothing.
+        self.assertIn("created || destroyed || Looper.myLooper() != Looper.getMainLooper()", java)
+        # No map without the server's address: the callback of getMapAsync never comes.
+        self.assertIn("if (mapView == null || destroyed) {\n                return;\n            }\n            mapView.getMapAsync(", java)
+        # Satellite and hybrid do nothing; the deprecated annotations of MapLibre are not used.
+        self.assertIn("public void setMapType(int mapType) {\n        }\n", java)
+        for gone in (".addMarker(", ".addPolygon(", ".addPolyline(", "Telegram", "GoogleMapsProvider", "gms.maps"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, java)
+        # Logs carry no address, key or place.
+        logs = re.findall(r"FileLog\.\w\((.*)\);", java)
+        self.assertTrue(logs)
+        for log in logs:
+            with self.subTest(log=log):
+                self.assertRegex(log, r"^(e|exception)$")
+        # The checksums: every MapLibre artifact of the library and its MapLibre dependencies, SHA-256 each,
+        # and every other group trusted as upstream resolves it.
+        meta = patch.maps_verification_metadata()
+        names = [name for name, _, _ in patch.MAPS_ARTIFACTS]
+        self.assertEqual(names, ["android-sdk-opengl", "android-sdk-geojson", "android-sdk-turf", "maplibre-android-gestures"])
+        for name, version, files in patch.MAPS_ARTIFACTS:
+            kinds = {f.rsplit(".", 1)[1] for f, _ in files}
+            self.assertTrue({"pom", "module"} <= kinds and kinds & {"aar", "jar"}, name)
+            for file, sha in files:
+                self.assertTrue(file.startswith(f"{name}-{version}"), file)
+                self.assertRegex(sha, r"^[0-9a-f]{64}$")
+                self.assertEqual(meta.count(f'<sha256 value="{sha}"'), 1)
+        trust = re.search(r'<trust group="([^"]+)" regex="true"/>', meta).group(1)
+        for group, trusted in (("org.maplibre.gl", False), ("com.google.android.gms", True), ("org.jetbrains.kotlin", True),
+                               ("com.squareup.okhttp3", True), ("androidx.fragment", True)):
+            with self.subTest(group=group):
+                self.assertEqual(re.fullmatch(trust, group) is not None, trusted)
+        self.assertEqual(meta.count("<trust "), 1)
+        import xml.dom.minidom
+        xml.dom.minidom.parseString(meta)
+        # The dependency is the OpenGL ES build pinned in the checksums.
+        self.assertEqual(patch.MAPLIBRE_DEPENDENCY, f"    implementation '{patch.MAPS_GROUP}:android-sdk-opengl:13.7.1'\n")
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = sorted({rel for rel, _, _ in patch.MAPS_EDITS} | {rel for rel, _ in patch.MAPS_USES}
+                      | set(patch.MAPS_KEY_MANIFESTS) | {patch.GOOGLE_MAPS_PROVIDER})
+        self.assertFalse((UPSTREAM / patch.MAPS_PROVIDER_FILE).exists())
+        self.assertFalse((UPSTREAM / patch.VERIFICATION_METADATA).exists())
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_maps(tree)
+            patch.maps(tree)
+            patch.verify_maps(tree)
+            # Nothing else changed: each file is upstream's once its edits are taken back; a manifest
+            # lost only the key's line and the empty line after it.
+            for rel in rels:
+                if rel == patch.GOOGLE_MAPS_PROVIDER:
+                    continue
+                text = tree.read(rel)
+                for r, old, new in patch.MAPS_EDITS:
+                    if r == rel:
+                        self.assertEqual(text.count(new), 1, f"{rel}: {new[:60]!r}")
+                        text = text.replace(new, old)
+                if rel in patch.MAPS_KEY_MANIFESTS:
+                    self.assertEqual(text, patch.MAPS_KEY_LINE.sub("", original[rel]), rel)
+                    self.assertEqual(len(original[rel]) - len(text), len(patch.MAPS_KEY_LINE.search(original[rel]).group(0)))
+                    continue
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # Upstream's maps are Google's in GoogleMapsProvider only, and the interface is the one the provider implements.
+            upstream_java = original[patch.GOOGLE_MAPS_PROVIDER]
+            self.assertIn("public class GoogleMapsProvider implements IMapsProvider {", upstream_java)
+            self.assertEqual(original[patch.LIBRARY_GRADLE].count("play-services-maps"), 1)
+            # DAMAGE on the real tree: each edit taken back fails the check.
+            patched = {rel: tree.read(rel) for rel in rels if rel != patch.GOOGLE_MAPS_PROVIDER}
+            for rel, old, new in patch.MAPS_EDITS:
+                with self.subTest(damage=new.strip().splitlines()[-1][:60]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_maps(tree)
+                    tree.write(rel, patched[rel])
+            for rel in patch.MAPS_KEY_MANIFESTS:
+                with self.subTest(damage=rel):
+                    tree.write(rel, original[rel])
+                    with self.assertRaisesRegex(patch.PatchError, "the key for Google's maps is still there"):
+                        patch.verify_maps(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_maps(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_no_other_google_maps(self):
+        # Upstream names Google's maps nowhere else in the modules Pluma builds.
+        for module in ("TMessagesProj/src", "TMessagesProj_App/src"):
+            for p in sorted((UPSTREAM / module).rglob("*.java")):
+                if p.name == "GoogleMapsProvider.java":
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace")
+                rel = p.relative_to(UPSTREAM).as_posix()
+                if patch.GOOGLE_MAPS_PACKAGE in text or "GoogleMapsProvider" in text:
+                    self.assertEqual(rel, patch.APPLICATION_LOADER)
+                    self.assertEqual(text.count("GoogleMapsProvider"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
