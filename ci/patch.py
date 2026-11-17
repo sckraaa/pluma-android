@@ -400,6 +400,7 @@ def patch(tree, c):
     round_video(tree)
     premium_stickers(tree)
     premium_for_everyone(tree)
+    business(tree)
     not_served(tree)
     no_ai_editor(tree)
     service_account(tree)
@@ -4149,6 +4150,7 @@ def verify(tree, c):
     verify_round_video(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_business(tree)
     verify_not_served(tree)
     verify_no_ai_editor(tree)
     verify_service_account(tree)
@@ -4205,12 +4207,12 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
      '        if ("getpremium".equalsIgnoreCase(first))\n            return handleGetPremium(uri.getQueryParameter("ref"));\n',
      '        // pluma: no getpremium route, everybody has Premium (ADR 0041).\n'),
-    # The same purchase screen behind the other links.
+    # The same purchase screen behind the settings/premium link. The
+    # settings/business link stays: that screen opens the Business editors
+    # (task 105, BUSINESS_EDITS).
     ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
-     '        if ("premium".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment("link"));\n            return true;\n        }\n\n'
-     '        if ("business".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
-     '            if ("do-not-hide-ads".equalsIgnoreCase(second)) {\n                scrollTo("showAdsRow");\n            }\n            return true;\n        }\n\n',
-     '        // pluma: no settings/premium and settings/business links: everybody has Premium (ADR 0041).\n\n'),
+     '        if ("premium".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment("link"));\n            return true;\n        }\n\n',
+     '        // pluma: no settings/premium link: everybody has Premium (ADR 0041).\n\n'),
     ("TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java",
      '                                        String finalUrl = url.replace("tg:premium_offer", "tg://premium_offer");\n'
      '                                        AndroidUtilities.runOnUIThread(() -> {\n'
@@ -4241,17 +4243,11 @@ PREMIUM_FOR_EVERYONE_EDITS = (
      "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(11,",
      "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(11,"),
     ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
-     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(15,",
-     "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(15,"),
-    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
      "            } else if (user != null && user.premium) {\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)",
      "            } else if (false) { // pluma: no star: everybody has Premium\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)"),
     ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
      "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    premiumRow = rowCount++;\n",
      "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    premiumRow = rowCount++;\n"),
-    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
-     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    businessRow = rowCount++;\n",
-     "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    businessRow = rowCount++;\n"),
     ("TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java",
      "UserObject.getUserName(user))), user.scam, user.fake, user.verified, user.premium, user.emoji_status, animated);",
      "UserObject.getUserName(user))), user.scam, user.fake, user.verified, false, user.emoji_status, animated); // pluma: no star"),
@@ -4352,6 +4348,59 @@ def verify_transcribe_button(tree):
     condition = text[start:end + len(TRANSCRIBE_VIEW_ONCE)]
     if condition.count(TRANSCRIBE_PREMIUM) != 1 or "false &&" in condition or "pluma" in condition:
         raise PatchError(f"{TRANSCRIBE_CELL}: the transcribe button is not upstream's for Premium; read its condition")
+
+# --- Telegram Business -------------------------------------------------------
+# Task 105 (ADR 0067): the server serves Telegram Business to everybody with
+# Premium (everybody, ADR 0041), so the Business rows of the settings and the
+# profile are upstream's again (they show when Premium features are not
+# blocked) and the settings/business link opens the screen. With Premium the
+# screen opens the editors (PremiumPreviewFragment's click listener). Its
+# "Do not hide ads" switch is hidden: Pluma has no ads and does not serve
+# account.toggleSponsoredMessages, and the settings/business/do-not-hide-ads
+# link only opens the screen.
+PREMIUM_PREVIEW = f"{JAVA}/ui/PremiumPreviewFragment.java"
+BUSINESS_EDITS = (
+    (PREMIUM_PREVIEW,
+     "        if (type == FEATURES_BUSINESS && getUserConfig().isPremium()) {\n            showAdsHeaderRow = rowCount++;\n",
+     "        if (false && type == FEATURES_BUSINESS && getUserConfig().isPremium()) { // pluma: no ads to hide (ADR 0067)\n"
+     "            showAdsHeaderRow = rowCount++;\n"),
+    (f"{JAVA}/ui/LinkManager.java",
+     '            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
+     '            if ("do-not-hide-ads".equalsIgnoreCase(second)) {\n                scrollTo("showAdsRow");\n            }\n',
+     '            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
+     '            // pluma: no ads switch to scroll to (ADR 0067).\n'),
+)
+# Upstream's Business rows, which task 071 had hidden; a build that hides
+# them again, or an upstream that moved them, stops here.
+BUSINESS_ROWS = (
+    (f"{JAVA}/ui/SettingsActivity.java",
+     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n"
+     "            items.add(SettingCell.Factory.of(15, 0xFFF45255, 0xFFDF3955, R.drawable.settings_business, getString(R.string.TelegramBusiness)));\n"),
+    (f"{JAVA}/ui/ProfileActivity.java",
+     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    businessRow = rowCount++;\n"),
+    (f"{JAVA}/ui/LinkManager.java",
+     '        if ("business".equalsIgnoreCase(first)) {\n'
+     '            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'),
+)
+
+
+def business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text:
+            raise PatchError(f"{rel}: the Business edit of task 105 is not there")
+    for rel, row in BUSINESS_ROWS:
+        if tree.read(rel).count(row) != 1:
+            raise PatchError(f"{rel}: the Business row is not upstream's; read it")
+    # The switch's rows stay unset (-1), so nothing else draws or scrolls to it.
+    text = tree.read(PREMIUM_PREVIEW)
+    if text.count("showAdsRow = rowCount++;") != 1:
+        raise PatchError(f"{PREMIUM_PREVIEW}: the ads switch is set elsewhere; read it")
 
 # --- Login codes through Telegram ---------------------------------------------
 # Task 076 of the server repository. Pluma's login codes are written by a
