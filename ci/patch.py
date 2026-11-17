@@ -16,7 +16,8 @@ the chat rather than to gifts, the video bitrates of Pluma, tags in Saved
 Messages that ask for no Premium, premium stickers sent without Premium,
 no way into the AI message editor, no group call joined without its key, no
 way into RTMP streams, live stories or call recording, none of Telegram's
-colours on the call screens).
+colours on the call screens, the server's HTTPS CDN reached over https://
+only in a server build).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -190,7 +191,8 @@ def load_env(path):
 
 
 class Config:
-    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, abis, ccache, google_services, build=0):
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, abis, ccache, google_services, build=0,
+                 target="server"):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -249,6 +251,13 @@ class Config:
             raise PatchError(f"ABIs {abis!r}: a list of {', '.join(ABIS)}")
         self.ccache = ccache
         self.google_services = google_services
+
+        # A development build reaches the stand's HTTPS CDN over plain http:// (task 107):
+        # the server address of the build and the emulator's host; a server build never.
+        if target not in ("server", "dev"):
+            raise PatchError(f"target {target!r}: server or dev")
+        self.target = target
+        self.dev_http_hosts = sorted({self.ipv4, CDN_HTTPS_EMULATOR_HOST}) if target == "dev" else []
 
 
 # --- the patch ---------------------------------------------------------------
@@ -398,8 +407,10 @@ def patch(tree, c):
     sticker_sets(tree)
     saved_tags(tree)
     round_video(tree)
+    cdn_https(tree, c)
     premium_stickers(tree)
     premium_for_everyone(tree)
+    business(tree)
     not_served(tree)
     no_ai_editor(tree)
     service_account(tree)
@@ -4147,8 +4158,10 @@ def verify(tree, c):
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
     verify_round_video(tree)
+    verify_cdn_https(tree, c)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_business(tree)
     verify_not_served(tree)
     verify_no_ai_editor(tree)
     verify_service_account(tree)
@@ -4205,12 +4218,12 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
      '        if ("getpremium".equalsIgnoreCase(first))\n            return handleGetPremium(uri.getQueryParameter("ref"));\n',
      '        // pluma: no getpremium route, everybody has Premium (ADR 0041).\n'),
-    # The same purchase screen behind the other links.
+    # The same purchase screen behind the settings/premium link. The
+    # settings/business link stays: that screen opens the Business editors
+    # (task 105, BUSINESS_EDITS).
     ("TMessagesProj/src/main/java/org/telegram/ui/LinkManager.java",
-     '        if ("premium".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment("link"));\n            return true;\n        }\n\n'
-     '        if ("business".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
-     '            if ("do-not-hide-ads".equalsIgnoreCase(second)) {\n                scrollTo("showAdsRow");\n            }\n            return true;\n        }\n\n',
-     '        // pluma: no settings/premium and settings/business links: everybody has Premium (ADR 0041).\n\n'),
+     '        if ("premium".equalsIgnoreCase(first)) {\n            presentFragment(new PremiumPreviewFragment("link"));\n            return true;\n        }\n\n',
+     '        // pluma: no settings/premium link: everybody has Premium (ADR 0041).\n\n'),
     ("TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java",
      '                                        String finalUrl = url.replace("tg:premium_offer", "tg://premium_offer");\n'
      '                                        AndroidUtilities.runOnUIThread(() -> {\n'
@@ -4241,17 +4254,11 @@ PREMIUM_FOR_EVERYONE_EDITS = (
      "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(11,",
      "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(11,"),
     ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
-     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n            items.add(SettingCell.Factory.of(15,",
-     "        if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n            items.add(SettingCell.Factory.of(15,"),
-    ("TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java",
      "            } else if (user != null && user.premium) {\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)",
      "            } else if (false) { // pluma: no star: everybody has Premium\n                emojiStatusDrawable.set(getContext().getResources().getDrawable(R.drawable.msg_premium_liststar)"),
     ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
      "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    premiumRow = rowCount++;\n",
      "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    premiumRow = rowCount++;\n"),
-    ("TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java",
-     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    businessRow = rowCount++;\n",
-     "                if (!getMessagesController().premiumPurchaseBlocked()) { // pluma: the row is the purchase\n                    businessRow = rowCount++;\n"),
     ("TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java",
      "UserObject.getUserName(user))), user.scam, user.fake, user.verified, user.premium, user.emoji_status, animated);",
      "UserObject.getUserName(user))), user.scam, user.fake, user.verified, false, user.emoji_status, animated); // pluma: no star"),
@@ -4352,6 +4359,59 @@ def verify_transcribe_button(tree):
     condition = text[start:end + len(TRANSCRIBE_VIEW_ONCE)]
     if condition.count(TRANSCRIBE_PREMIUM) != 1 or "false &&" in condition or "pluma" in condition:
         raise PatchError(f"{TRANSCRIBE_CELL}: the transcribe button is not upstream's for Premium; read its condition")
+
+# --- Telegram Business -------------------------------------------------------
+# Task 105 (ADR 0067): the server serves Telegram Business to everybody with
+# Premium (everybody, ADR 0041), so the Business rows of the settings and the
+# profile are upstream's again (they show when Premium features are not
+# blocked) and the settings/business link opens the screen. With Premium the
+# screen opens the editors (PremiumPreviewFragment's click listener). Its
+# "Do not hide ads" switch is hidden: Pluma has no ads and does not serve
+# account.toggleSponsoredMessages, and the settings/business/do-not-hide-ads
+# link only opens the screen.
+PREMIUM_PREVIEW = f"{JAVA}/ui/PremiumPreviewFragment.java"
+BUSINESS_EDITS = (
+    (PREMIUM_PREVIEW,
+     "        if (type == FEATURES_BUSINESS && getUserConfig().isPremium()) {\n            showAdsHeaderRow = rowCount++;\n",
+     "        if (false && type == FEATURES_BUSINESS && getUserConfig().isPremium()) { // pluma: no ads to hide (ADR 0067)\n"
+     "            showAdsHeaderRow = rowCount++;\n"),
+    (f"{JAVA}/ui/LinkManager.java",
+     '            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
+     '            if ("do-not-hide-ads".equalsIgnoreCase(second)) {\n                scrollTo("showAdsRow");\n            }\n',
+     '            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'
+     '            // pluma: no ads switch to scroll to (ADR 0067).\n'),
+)
+# Upstream's Business rows, which task 071 had hidden; a build that hides
+# them again, or an upstream that moved them, stops here.
+BUSINESS_ROWS = (
+    (f"{JAVA}/ui/SettingsActivity.java",
+     "        if (!getMessagesController().premiumFeaturesBlocked()) {\n"
+     "            items.add(SettingCell.Factory.of(15, 0xFFF45255, 0xFFDF3955, R.drawable.settings_business, getString(R.string.TelegramBusiness)));\n"),
+    (f"{JAVA}/ui/ProfileActivity.java",
+     "                if (!getMessagesController().premiumFeaturesBlocked()) {\n                    businessRow = rowCount++;\n"),
+    (f"{JAVA}/ui/LinkManager.java",
+     '        if ("business".equalsIgnoreCase(first)) {\n'
+     '            presentFragment(new PremiumPreviewFragment(PremiumPreviewFragment.FEATURES_BUSINESS, "link"));\n'),
+)
+
+
+def business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text:
+            raise PatchError(f"{rel}: the Business edit of task 105 is not there")
+    for rel, row in BUSINESS_ROWS:
+        if tree.read(rel).count(row) != 1:
+            raise PatchError(f"{rel}: the Business row is not upstream's; read it")
+    # The switch's rows stay unset (-1), so nothing else draws or scrolls to it.
+    text = tree.read(PREMIUM_PREVIEW)
+    if text.count("showAdsRow = rowCount++;") != 1:
+        raise PatchError(f"{PREMIUM_PREVIEW}: the ads switch is set elsewhere; read it")
 
 # --- Login codes through Telegram ---------------------------------------------
 # Task 076 of the server repository. Pluma's login codes are written by a
@@ -7021,6 +7081,945 @@ def verify_call_colours(tree):
                 raise PatchError(f"{rel}: {literal}, which the call keeps, is there {found[literal]} times, expected {n}")
 
 
+# --- HTTPS CDN (task 107 of the server repository, ADR 0071) ---------------------
+# Large files come over HTTPS from a CDN that only ever holds their ciphertext;
+# the key, the IV and the hash of every 128 KB come from the server over MTProto.
+# The client says it can do this with "pluma_cdn": 1 in the params of
+# initConnection (Android always sets cdn_supported, FileLoadOperation.java
+# 2469, so the flag alone cannot tell a patched client), and the server
+# redirects only such a session, with upload.fileCdnRedirect whose file_token is
+# "PLH1" | id[32] | expiry uint32 BE | URL. The client never connects to the
+# redirect's dc_id (an unpatched client would wait for that datacenter forever,
+# jni/tgnet/ConnectionsManager.cpp 2585-2590, 2849-2856, 3166-3168).
+#
+# FileLoadOperation keeps its parts, offsets, streams and files as upstream: a
+# part of a redirected download is fetched by PlumaCdnHttps instead of
+# upload.getCdnFile (2449-2455, 2525), decrypted as upload.cdnFile is (1900-1906:
+# AES-256-CTR, bytes 12-15 of the IV = offset / 16), checked against the
+# server's SHA-256 of each 128 KB before it is handed over, and handed over as
+# upload.file, through the same callback (the lambda of sendRequestSync becomes
+# a RequestDelegate). So the hash branches of a tgnet CDN download (isCdn, 1889,
+# 2002) never run for it, and the bytes count in the network statistics as any
+# file's (2667-2681). 403 and 410 ask the server for a new URL, as
+# FILE_TOKEN_INVALID of upload.getCdnFile does (2583-2589), at most 3 times; any
+# other failure makes the download take the rest from the server without
+# cdn_supported, keeping what it has; upload.reuploadCdnFile is never sent. Such
+# a part has a negative request token, unknown to tgnet: it is cancelled in
+# PlumaCdnHttps (911, 1466-1490, 2210-2225) and holds up no tgnet connection
+# (1497, 2236). cdn_supported is sent only while the download has not fallen
+# back, no proxy is on (SharedConfig.isProxyEnabled, any kind: Android goes to
+# the CDN only directly) and the CDN is not paused after 3 transport failures
+# in a row.
+# A development build also takes http:// to the stand (the server address of the
+# build and the emulator's host 10.0.2.2); a server build takes https:// only.
+FILE_LOAD = f"{JAVA}/messenger/FileLoadOperation.java"
+CDN_HTTPS_FILE = f"{JAVA}/messenger/PlumaCdnHttps.java"
+CONNECTIONS_CPP = "TMessagesProj/jni/tgnet/ConnectionsManager.cpp"
+CDN_HTTPS_DEV_HOSTS_LINE = "    private static final String[] DEV_HTTP_HOSTS = {};\n"
+CDN_HTTPS_EMULATOR_HOST = "10.0.2.2"
+
+CDN_HTTPS_JAVA = r"""package org.telegram.messenger;
+
+import android.os.SystemClock;
+
+import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgnet.NativeByteBuffer;
+import org.telegram.tgnet.RequestDelegate;
+import org.telegram.tgnet.TLRPC;
+import org.telegram.tgnet.Vector;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.SSLException;
+
+// pluma: large files from the HTTPS CDN of the Pluma server (ADR 0071 of the server repository).
+// A redirect whose file_token starts with "PLH1" carries the address of the file's ciphertext:
+// "PLH1" | id[32] | expiry, uint32 big-endian | URL, UTF-8. The CDN holds only the ciphertext; the
+// key, the IV and the SHA-256 of every 128 KB of plain text come from the server over MTProto. A
+// part is fetched as an HTTP range of whole 128 KB blocks, decrypted as upload.cdnFile is and
+// handed to the download only once every block matched its hash. 403 and 410 ask for a new URL;
+// any other failure makes the download take the rest from the server.
+public final class PlumaCdnHttps {
+
+    // The errors a part fails with: a new URL is needed, or the download goes back to the server.
+    public static final String ERROR_REFRESH = "PLUMA_CDN_HTTPS_REFRESH";
+    public static final String ERROR_FALLBACK = "PLUMA_CDN_HTTPS_FALLBACK";
+    // New URLs a download may ask for; the next 403 or 410 sends it back to the server.
+    public static final int MAX_REFRESHES = 3;
+
+    private static final byte[] TOKEN_TAG = {'P', 'L', 'H', '1'};
+    private static final int TOKEN_HEADER = 4 + 32 + 4;
+    private static final int BLOCK = 128 * 1024;
+    private static final int CACHED_BLOCKS = 8;
+    private static final int CONNECT_TIMEOUT = 5000;
+    private static final int READ_TIMEOUT = 10000;
+    private static final int REQUEST_TIMEOUT = 30000;
+    private static final int HASHES_TIMEOUT = 15000;
+    private static final int RETRY_DELAY_MIN = 300;
+    private static final int RETRY_DELAY_SPREAD = 500;
+    private static final int FAILURES_TO_PAUSE = 3;
+    private static final long PAUSE = 10 * 60 * 1000L;
+    // The hosts a development build may reach over plain http:// (the stand); none in a server build.
+    private static final String[] DEV_HTTP_HOSTS = {};
+
+    private static final Object pauseLock = new Object();
+    private static int transportFailures;
+    private static long pausedUntil;
+    private static final AtomicInteger lastToken = new AtomicInteger();
+    private static final ThreadPoolExecutor pool = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(), r -> daemon(r, "PlumaCdnHttps"));
+    private static final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
+            r -> daemon(r, "PlumaCdnHttpsDeadline"));
+
+    static {
+        pool.allowCoreThreadTimeOut(true);
+        deadlines.setKeepAliveTime(30, TimeUnit.SECONDS);
+        deadlines.allowCoreThreadTimeOut(true);
+        deadlines.setRemoveOnCancelPolicy(true);
+    }
+
+    private PlumaCdnHttps() {
+    }
+
+    private static Thread daemon(Runnable r, String name) {
+        Thread thread = new Thread(r, name);
+        thread.setDaemon(true);
+        return thread;
+    }
+
+    // Whether a download may ask the server for the CDN (cdn_supported): not while the CDN is
+    // paused after transport failures, and never through a proxy.
+    public static boolean isAllowed() {
+        synchronized (pauseLock) {
+            if (pausedUntil != 0 && SystemClock.elapsedRealtime() < pausedUntil) {
+                return false;
+            }
+        }
+        return !SharedConfig.isProxyEnabled();
+    }
+
+    public static boolean isPlumaToken(byte[] token) {
+        return token != null && token.length >= TOKEN_TAG.length
+                && Arrays.equals(Arrays.copyOf(token, TOKEN_TAG.length), TOKEN_TAG);
+    }
+
+    // The download a "PLH1" redirect describes, or null when the client cannot use it.
+    public static Download open(int currentAccount, int datacenterId, TLRPC.TL_upload_fileCdnRedirect redirect, long size) {
+        byte[] token = redirect.file_token;
+        if (!isPlumaToken(token) || token.length <= TOKEN_HEADER || size <= 0
+                || redirect.encryption_key == null || redirect.encryption_key.length != 32
+                || redirect.encryption_iv == null || redirect.encryption_iv.length != 16) {
+            return null;
+        }
+        String address;
+        try {
+            address = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(token, TOKEN_HEADER, token.length - TOKEN_HEADER))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            return null;
+        }
+        URL url = parseUrl(address);
+        if (url == null) {
+            return null;
+        }
+        Download download = new Download(currentAccount, datacenterId, token, url, redirect.encryption_key, redirect.encryption_iv, size);
+        if (redirect.file_hashes != null) {
+            for (TLRPC.TL_fileHash hash : redirect.file_hashes) {
+                download.hashes.put(hash.offset, hash);
+            }
+        }
+        return download;
+    }
+
+    private static URL parseUrl(String address) {
+        boolean secure = address.startsWith("https://");
+        if (!secure && !address.startsWith("http://")) {
+            return null;
+        }
+        try {
+            URI uri = new URI(address);
+            String host = uri.getHost();
+            if (host == null || uri.getRawUserInfo() != null || uri.getRawFragment() != null) {
+                return null;
+            }
+            if (!secure && !Arrays.asList(DEV_HTTP_HOSTS).contains(host)) {
+                return null;
+            }
+            return uri.toURL();
+        } catch (URISyntaxException | IllegalArgumentException | IOException e) {
+            return null;
+        }
+    }
+
+    private static int nextToken() {
+        while (true) {
+            int token = lastToken.decrementAndGet();
+            if (token < 0) {
+                return token;
+            }
+            lastToken.compareAndSet(token, 0);
+        }
+    }
+
+    private static void transportSucceeded() {
+        synchronized (pauseLock) {
+            transportFailures = 0;
+        }
+    }
+
+    private static void transportFailed(String host) {
+        synchronized (pauseLock) {
+            if (++transportFailures < FAILURES_TO_PAUSE) {
+                return;
+            }
+            transportFailures = 0;
+            pausedUntil = SystemClock.elapsedRealtime() + PAUSE;
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("cdn https " + host + " paused");
+        }
+    }
+
+    private static TLRPC.TL_error error(String text) {
+        TLRPC.TL_error error = new TLRPC.TL_error();
+        error.code = 400;
+        error.text = text;
+        return error;
+    }
+
+    private static final class Failure extends Exception {
+        final String error;
+        final boolean transport;
+        final boolean retry;
+
+        Failure(String reason, String error, boolean transport, boolean retry) {
+            super(reason);
+            this.error = error;
+            this.transport = transport;
+            this.retry = retry;
+        }
+    }
+
+    // A part a download asked for: its blocks, filled in as they arrive.
+    private static final class Part {
+        final int token;
+        final long offset;
+        final RequestDelegate delegate;
+        int length;
+        long first;
+        byte[][] data;
+        int missing;
+        boolean done;
+
+        Part(int token, long offset, RequestDelegate delegate) {
+            this.token = token;
+            this.offset = offset;
+            this.delegate = delegate;
+        }
+    }
+
+    // One HTTP range: blocks from start to end, the parts that wait for them.
+    private static final class Fetch {
+        final long start;
+        long end;
+        final LinkedHashSet<Part> parts = new LinkedHashSet<>();
+
+        Fetch(long start) {
+            this.start = start;
+        }
+    }
+
+    public static final class Download {
+        private final int currentAccount;
+        private final int datacenterId;
+        private final byte[] fileToken;
+        private final URL url;
+        private final String host;
+        private final SecretKeySpec key;
+        private final byte[] iv;
+        private final long size;
+        private final HashMap<Long, TLRPC.TL_fileHash> hashes = new HashMap<>();
+        private final LinkedHashMap<Long, byte[]> blocks = new LinkedHashMap<Long, byte[]>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<Long, byte[]> eldest) {
+                return size() > CACHED_BLOCKS;
+            }
+        };
+        private final HashMap<Long, Fetch> loading = new HashMap<>();
+        private final HashMap<Integer, Part> parts = new HashMap<>();
+        private final HashSet<HttpURLConnection> connections = new HashSet<>();
+        private final Object hashesRequest = new Object();
+        private boolean closed;
+        private boolean transportFailed;
+
+        private Download(int currentAccount, int datacenterId, byte[] fileToken, URL url, byte[] key, byte[] iv, long size) {
+            this.currentAccount = currentAccount;
+            this.datacenterId = datacenterId;
+            this.fileToken = fileToken;
+            this.url = url;
+            this.host = url.getHost();
+            this.key = new SecretKeySpec(key, "AES");
+            this.iv = iv.clone();
+            this.size = size;
+        }
+
+        // Asks for the bytes [offset, offset + limit) of the file; the delegate gets them as
+        // upload.file on the stage queue, or an error. Returns the part's token, always negative.
+        public int fetch(long offset, int limit, RequestDelegate delegate) {
+            final Part part = new Part(nextToken(), offset, delegate);
+            final ArrayList<Fetch> started = new ArrayList<>();
+            boolean valid;
+            synchronized (this) {
+                valid = !closed && offset >= 0 && limit > 0 && offset < size;
+                if (valid) {
+                    long end = Math.min(offset + limit, size);
+                    part.length = (int) (end - offset);
+                    part.first = offset / BLOCK * BLOCK;
+                    part.data = new byte[(int) ((end - 1) / BLOCK - offset / BLOCK + 1)][];
+                    Fetch run = null;
+                    for (int i = 0; i < part.data.length; i++) {
+                        long block = part.first + (long) i * BLOCK;
+                        byte[] cached = blocks.get(block);
+                        if (cached != null) {
+                            part.data[i] = cached;
+                            run = null;
+                            continue;
+                        }
+                        part.missing++;
+                        Fetch fetch = loading.get(block);
+                        if (fetch == null) {
+                            if (run == null) {
+                                run = new Fetch(block);
+                                started.add(run);
+                            }
+                            run.end = Math.min(block + BLOCK, size);
+                            loading.put(block, run);
+                            fetch = run;
+                        } else {
+                            run = null;
+                        }
+                        fetch.parts.add(part);
+                    }
+                    part.done = part.missing == 0;
+                }
+                parts.put(part.token, part);
+            }
+            if (!valid) {
+                fail(part, ERROR_FALLBACK);
+            } else if (part.done) {
+                deliver(part);
+            }
+            for (Fetch fetch : started) {
+                pool.execute(() -> load(fetch));
+            }
+            return part.token;
+        }
+
+        public void cancel(int token) {
+            synchronized (this) {
+                parts.remove(token);
+            }
+        }
+
+        // Drops every part and aborts every request; nothing is delivered afterwards.
+        public void close() {
+            ArrayList<HttpURLConnection> open;
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                parts.clear();
+                blocks.clear();
+                loading.clear();
+                hashes.clear();
+                open = new ArrayList<>(connections);
+                connections.clear();
+            }
+            for (HttpURLConnection connection : open) {
+                connection.disconnect();
+            }
+        }
+
+        private void load(Fetch fetch) {
+            byte[][] data = null;
+            Failure failure = null;
+            try {
+                data = verify(fetch, download(fetch.start, fetch.end - 1));
+            } catch (Failure e) {
+                failure = e;
+            } catch (RuntimeException e) {
+                // A fault of the HTTP stack or the cipher must not leave the range in loading and
+                // its parts waiting forever: the download takes the rest from the server.
+                failure = new Failure(e.getClass().getSimpleName(), ERROR_FALLBACK, false, false);
+            }
+            ArrayList<Part> ready = new ArrayList<>();
+            ArrayList<Part> failed = new ArrayList<>();
+            boolean countFailure = false;
+            synchronized (this) {
+                for (long block = fetch.start; block < fetch.end; block += BLOCK) {
+                    if (loading.get(block) == fetch) {
+                        loading.remove(block);
+                    }
+                }
+                if (closed) {
+                    return;
+                }
+                if (failure != null && failure.transport && !transportFailed) {
+                    transportFailed = true;
+                    countFailure = true;
+                }
+                for (int i = 0; data != null && i < data.length; i++) {
+                    blocks.put(fetch.start + (long) i * BLOCK, data[i]);
+                }
+                for (Part part : fetch.parts) {
+                    if (part.done || parts.get(part.token) != part) {
+                        continue;
+                    }
+                    if (data == null) {
+                        part.done = true;
+                        failed.add(part);
+                        continue;
+                    }
+                    int from = (int) ((fetch.start - part.first) / BLOCK);
+                    for (int i = 0; i < data.length; i++) {
+                        if (from + i >= 0 && from + i < part.data.length && part.data[from + i] == null) {
+                            part.data[from + i] = data[i];
+                            part.missing--;
+                        }
+                    }
+                    if (part.missing == 0) {
+                        part.done = true;
+                        ready.add(part);
+                    }
+                }
+            }
+            if (failure != null && BuildVars.LOGS_ENABLED) {
+                FileLog.d("cdn https " + host + " failed: " + failure.getMessage() + " offset=" + fetch.start);
+            }
+            if (countFailure) {
+                transportFailed(host);
+            }
+            for (Part part : ready) {
+                deliver(part);
+            }
+            for (Part part : failed) {
+                fail(part, failure.error);
+            }
+        }
+
+        // One retry of the same range after a network failure, a timeout or a 5xx.
+        private byte[] download(long first, long last) throws Failure {
+            for (int attempt = 0; ; attempt++) {
+                try {
+                    return request(first, last);
+                } catch (Failure e) {
+                    if (!e.retry || attempt > 0) {
+                        throw e;
+                    }
+                }
+                try {
+                    Thread.sleep(RETRY_DELAY_MIN + ThreadLocalRandom.current().nextInt(RETRY_DELAY_SPREAD + 1));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new Failure("interrupted", ERROR_FALLBACK, false, false);
+                }
+            }
+        }
+
+        private byte[] request(long first, long last) throws Failure {
+            if (SharedConfig.isProxyEnabled()) {
+                throw new Failure("proxy", ERROR_FALLBACK, false, false);
+            }
+            final HttpURLConnection connection;
+            try {
+                connection = (HttpURLConnection) url.openConnection();
+            } catch (IOException e) {
+                throw new Failure(e.getClass().getSimpleName(), ERROR_FALLBACK, true, true);
+            }
+            synchronized (this) {
+                if (closed) {
+                    throw new Failure("closed", ERROR_FALLBACK, false, false);
+                }
+                connections.add(connection);
+            }
+            final AtomicBoolean late = new AtomicBoolean();
+            ScheduledFuture<?> deadline = deadlines.schedule(() -> {
+                late.set(true);
+                connection.disconnect();
+            }, REQUEST_TIMEOUT, TimeUnit.MILLISECONDS);
+            boolean read = false;
+            try {
+                connection.setConnectTimeout(CONNECT_TIMEOUT);
+                connection.setReadTimeout(READ_TIMEOUT);
+                connection.setUseCaches(false);
+                connection.setInstanceFollowRedirects(false);
+                connection.setRequestProperty("Range", "bytes=" + first + "-" + last);
+                connection.setRequestProperty("Accept-Encoding", "identity");
+                connection.setRequestProperty("User-Agent", "Pluma");
+                int code = connection.getResponseCode();
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("cdn https " + host + " " + code + " offset=" + first);
+                }
+                if (code == 403 || code == 410) {
+                    throw new Failure("status " + code, ERROR_REFRESH, false, false);
+                }
+                if (code >= 500 && code < 600) {
+                    throw new Failure("status " + code, ERROR_FALLBACK, true, true);
+                }
+                if (code != 206) {
+                    throw new Failure("status " + code, ERROR_FALLBACK, false, false);
+                }
+                String encoding = connection.getHeaderField("Content-Encoding");
+                if (encoding != null && !encoding.trim().equalsIgnoreCase("identity")) {
+                    throw new Failure("encoding", ERROR_FALLBACK, false, false);
+                }
+                String range = connection.getHeaderField("Content-Range");
+                if (range == null || !range.trim().equals("bytes " + first + "-" + last + "/" + size)) {
+                    throw new Failure("content range", ERROR_FALLBACK, false, false);
+                }
+                int length = (int) (last - first + 1);
+                String declared = connection.getHeaderField("Content-Length");
+                if (declared != null && !declared.trim().equals(Integer.toString(length))) {
+                    throw new Failure("content length", ERROR_FALLBACK, false, false);
+                }
+                byte[] body = new byte[length];
+                InputStream in = connection.getInputStream();
+                for (int at = 0; at < length; ) {
+                    int n = in.read(body, at, length - at);
+                    if (n < 0) {
+                        throw new IOException("short body");
+                    }
+                    at += n;
+                }
+                if (in.read() != -1) {
+                    throw new Failure("content length", ERROR_FALLBACK, false, false);
+                }
+                in.close();
+                read = true;
+                transportSucceeded();
+                return body;
+            } catch (SSLException e) {
+                throw new Failure(e.getClass().getSimpleName(), ERROR_FALLBACK, true, false);
+            } catch (IOException e) {
+                if (late.get()) {
+                    throw new Failure("deadline", ERROR_FALLBACK, true, false);
+                }
+                synchronized (this) {
+                    if (closed) {
+                        throw new Failure("closed", ERROR_FALLBACK, false, false);
+                    }
+                }
+                throw new Failure(e.getClass().getSimpleName(), ERROR_FALLBACK, true, true);
+            } finally {
+                deadline.cancel(false);
+                synchronized (this) {
+                    connections.remove(connection);
+                }
+                if (!read) {
+                    connection.disconnect();
+                }
+            }
+        }
+
+        // Decrypts the blocks of a range and checks each against the server's hash.
+        private byte[][] verify(Fetch fetch, byte[] body) throws Failure {
+            byte[][] out = new byte[(int) ((fetch.end - fetch.start + BLOCK - 1) / BLOCK)][];
+            try {
+                Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+                MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+                for (int i = 0; i < out.length; i++) {
+                    long offset = fetch.start + (long) i * BLOCK;
+                    int length = (int) Math.min(BLOCK, fetch.end - offset);
+                    byte[] counter = iv.clone();
+                    long n = offset / 16;
+                    counter[12] = (byte) (n >> 24);
+                    counter[13] = (byte) (n >> 16);
+                    counter[14] = (byte) (n >> 8);
+                    counter[15] = (byte) n;
+                    cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(counter));
+                    byte[] plain = cipher.doFinal(body, i * BLOCK, length);
+                    TLRPC.TL_fileHash hash = hash(offset);
+                    if (hash.limit != length || hash.hash == null || !MessageDigest.isEqual(sha256.digest(plain), hash.hash)) {
+                        throw new Failure("hash", ERROR_FALLBACK, false, false);
+                    }
+                    out[i] = plain;
+                }
+            } catch (GeneralSecurityException e) {
+                throw new Failure(e.getClass().getSimpleName(), ERROR_FALLBACK, false, false);
+            }
+            return out;
+        }
+
+        private TLRPC.TL_fileHash hash(long offset) throws Failure {
+            synchronized (hashesRequest) {
+                synchronized (this) {
+                    if (closed) {
+                        throw new Failure("closed", ERROR_FALLBACK, false, false);
+                    }
+                    TLRPC.TL_fileHash hash = hashes.get(offset);
+                    if (hash != null) {
+                        return hash;
+                    }
+                }
+                ArrayList<TLRPC.TL_fileHash> answer = requestHashes(offset);
+                synchronized (this) {
+                    for (TLRPC.TL_fileHash hash : answer) {
+                        hashes.put(hash.offset, hash);
+                    }
+                    TLRPC.TL_fileHash hash = hashes.get(offset);
+                    if (hash == null) {
+                        throw new Failure("no hash", ERROR_FALLBACK, false, false);
+                    }
+                    return hash;
+                }
+            }
+        }
+
+        // upload.getCdnFileHashes on the file's datacenter, as FileLoadOperation.requestFileOffsets.
+        private ArrayList<TLRPC.TL_fileHash> requestHashes(long offset) throws Failure {
+            TLRPC.TL_upload_getCdnFileHashes req = new TLRPC.TL_upload_getCdnFileHashes();
+            req.file_token = fileToken;
+            req.offset = offset;
+            final ArrayList<TLRPC.TL_fileHash> answer = new ArrayList<>();
+            final CountDownLatch answered = new CountDownLatch(1);
+            int token = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> {
+                if (response instanceof Vector) {
+                    synchronized (answer) {
+                        for (Object object : ((Vector<?>) response).objects) {
+                            if (object instanceof TLRPC.TL_fileHash) {
+                                answer.add((TLRPC.TL_fileHash) object);
+                            }
+                        }
+                    }
+                }
+                answered.countDown();
+            }, null, null, 0, datacenterId, ConnectionsManager.ConnectionTypeGeneric, true);
+            boolean inTime;
+            try {
+                inTime = answered.await(HASHES_TIMEOUT, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                inTime = false;
+            }
+            if (!inTime) {
+                ConnectionsManager.getInstance(currentAccount).cancelRequest(token, false);
+                throw new Failure("hashes", ERROR_FALLBACK, false, false);
+            }
+            synchronized (answer) {
+                return new ArrayList<>(answer);
+            }
+        }
+
+        private void deliver(Part part) {
+            final byte[] bytes = new byte[part.length];
+            int skip = (int) (part.offset - part.first);
+            for (int i = 0, at = 0; at < bytes.length; i++) {
+                byte[] block = part.data[i];
+                int from = i == 0 ? skip : 0;
+                int n = Math.min(block.length - from, bytes.length - at);
+                System.arraycopy(block, from, bytes, at, n);
+                at += n;
+            }
+            part.data = null;
+            Utilities.stageQueue.postRunnable(() -> {
+                if (!take(part)) {
+                    return;
+                }
+                TLRPC.TL_upload_file file = new TLRPC.TL_upload_file();
+                file.type = new TLRPC.TL_storage_filePartial();
+                file.networkType = ApplicationLoader.getCurrentNetworkType();
+                try {
+                    file.bytes = new NativeByteBuffer(bytes.length);
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+                if (file.bytes == null || file.bytes.buffer == null) {
+                    part.delegate.run(null, error(ERROR_FALLBACK));
+                    return;
+                }
+                file.bytes.buffer.put(bytes);
+                file.bytes.buffer.position(0);
+                part.delegate.run(file, null);
+                file.freeResources();
+            });
+        }
+
+        private void fail(Part part, String text) {
+            Utilities.stageQueue.postRunnable(() -> {
+                if (take(part)) {
+                    part.delegate.run(null, error(text));
+                }
+            });
+        }
+
+        private synchronized boolean take(Part part) {
+            return !closed && parts.remove(part.token) == part;
+        }
+    }
+}
+"""
+
+CDN_HTTPS_EDITS = (
+    # A part of the CDN remembers the download it was asked from.
+    (FILE_LOAD,
+     "        public boolean cancelling, cancelled;\n        public Runnable whenCancelled;\n    }\n",
+     "        public boolean cancelling, cancelled;\n        public Runnable whenCancelled;\n"
+     "        // pluma: the HTTPS CDN download the part was asked from; null for a request of tgnet.\n"
+     "        public PlumaCdnHttps.Download httpsCall;\n    }\n"),
+    (FILE_LOAD,
+     "    private boolean requestingCdnOffsets;\n",
+     "    private boolean requestingCdnOffsets;\n"
+     "    // pluma: the HTTPS CDN of the server: the open download, whether this download takes the\n"
+     "    // rest from the server, and how many new URLs it asked for.\n"
+     "    private PlumaCdnHttps.Download cdnHttps;\n"
+     "    private boolean cdnHttpsDisabled;\n"
+     "    private int cdnHttpsRefreshes;\n"),
+    (FILE_LOAD,
+     "            if (isCdn) {\n                TLRPC.TL_upload_getCdnFile req = new TLRPC.TL_upload_getCdnFile();\n",
+     "            if (cdnHttps != null) {\n"
+     "                request = null; // pluma: the part comes from the HTTPS CDN\n"
+     "            } else if (isCdn) {\n                TLRPC.TL_upload_getCdnFile req = new TLRPC.TL_upload_getCdnFile();\n"),
+    (FILE_LOAD,
+     "                    req.cdn_supported = true;\n",
+     "                    req.cdn_supported = !cdnHttpsDisabled && PlumaCdnHttps.isAllowed(); // pluma: HTTPS CDN\n"),
+    (FILE_LOAD,
+     "            final int requestToken = requestInfo.requestToken = ConnectionsManager.getInstance(currentAccount)"
+     ".sendRequestSync(request, (response, error) -> {\n",
+     "            // pluma: one callback for a part of tgnet and a part of the HTTPS CDN.\n"
+     "            final org.telegram.tgnet.RequestDelegate onPart = (response, error) -> {\n"),
+    (FILE_LOAD,
+     "                    if (error.code == -2000) {\n",
+     "                    if (requestInfo.httpsCall != null) {\n"
+     "                        // pluma: the HTTPS CDN failed the part: a new URL, or the rest from the server.\n"
+     "                        plumaHttpsFailed(requestInfo, error, connectionType);\n"
+     "                        return;\n"
+     "                    }\n"
+     "                    if (error.code == -2000) {\n"),
+    (FILE_LOAD,
+     "                if (response instanceof TLRPC.TL_upload_fileCdnRedirect) {\n"
+     "                    TLRPC.TL_upload_fileCdnRedirect res = (TLRPC.TL_upload_fileCdnRedirect) response;\n",
+     "                if (response instanceof TLRPC.TL_upload_fileCdnRedirect) {\n"
+     "                    TLRPC.TL_upload_fileCdnRedirect res = (TLRPC.TL_upload_fileCdnRedirect) response;\n"
+     "                    if (PlumaCdnHttps.isPlumaToken(res.file_token)) {\n"
+     "                        // pluma: the server's HTTPS CDN; nothing connects to res.dc_id.\n"
+     "                        plumaHttpsRedirect(res, requestInfo, connectionType);\n"
+     "                        return;\n"
+     "                    }\n"),
+    (FILE_LOAD,
+     "            }, null, null, flags, datacenterId, connectionType, isLast);\n",
+     "            };\n"
+     "            final int requestToken;\n"
+     "            if (cdnHttps != null) {\n"
+     "                requestInfo.httpsCall = cdnHttps;\n"
+     "                requestToken = requestInfo.requestToken = cdnHttps.fetch(requestInfo.offset, requestInfo.chunkSize, onPart);\n"
+     "            } else {\n"
+     "                requestToken = requestInfo.requestToken = ConnectionsManager.getInstance(currentAccount)"
+     ".sendRequestSync(request, onPart, null, null, flags, datacenterId, connectionType, isLast);\n"
+     "            }\n"),
+    # A part of the CDN is no request of tgnet: it is cancelled in PlumaCdnHttps, and it holds
+    # up no tgnet connection that would need a reconnect.
+    (FILE_LOAD,
+     "                            ConnectionsManager.getInstance(currentAccount).cancelRequest(priorityRequestInfo.requestToken, true);\n",
+     "                            plumaCancelRequest(priorityRequestInfo, null);\n"),
+    (FILE_LOAD,
+     "                        ConnectionsManager.getInstance(currentAccount).cancelRequest(requestInfo.requestToken, true);\n",
+     "                        plumaCancelRequest(requestInfo, null);\n"),
+    (FILE_LOAD,
+     "                        ConnectionsManager.getInstance(currentAccount).cancelRequest(requestInfo.requestToken, true, () -> {\n",
+     "                        plumaCancelRequest(requestInfo, () -> {\n"),
+    (FILE_LOAD,
+     "                    int index = requestInfo.connectionType >>> 16;\n"
+     "                    waitingDownloadSize[index] += requestInfo.chunkSize;\n",
+     "                    if (requestInfo.httpsCall == null) { // pluma: an HTTPS CDN part holds up no connection\n"
+     "                        int index = requestInfo.connectionType >>> 16;\n"
+     "                        waitingDownloadSize[index] += requestInfo.chunkSize;\n"
+     "                    }\n"),
+    (FILE_LOAD,
+     "                    ConnectionsManager.getInstance(currentAccount).cancelRequest(info.requestToken, true, () -> {\n",
+     "                    plumaCancelRequest(info, () -> {\n"),
+    (FILE_LOAD,
+     "                    ConnectionsManager.getInstance(currentAccount).cancelRequest(info.requestToken, true);\n",
+     "                    plumaCancelRequest(info, null);\n"),
+    (FILE_LOAD,
+     "                if (!DownloadSpeedEstimator.isFast()) {\n",
+     "                if (info.httpsCall == null && !DownloadSpeedEstimator.isFast()) { // pluma: not for an HTTPS CDN part\n"),
+    (FILE_LOAD,
+     "    private void cleanup() {\n",
+     "    private void cleanup() {\n"
+     "        plumaHttpsClose(); // pluma: the HTTPS CDN download ends with the operation\n"),
+    (FILE_LOAD,
+     "    protected void startDownloadRequest(int useConnectionType) {\n",
+     "    // pluma: a \"PLH1\" redirect of the server's HTTPS CDN (ADR 0071 of the server repository). A token\n"
+     "    // the client cannot use makes this download take the rest from the server without cdn_supported.\n"
+     "    private void plumaHttpsRedirect(TLRPC.TL_upload_fileCdnRedirect res, RequestInfo requestInfo, int connectionType) {\n"
+     "        PlumaCdnHttps.Download download = cdnHttpsDisabled ? null\n"
+     "                : PlumaCdnHttps.open(currentAccount, datacenterId, res, totalBytesCount);\n"
+     "        plumaHttpsClose();\n"
+     "        if (download == null) {\n"
+     "            cdnHttpsDisabled = true;\n"
+     "        }\n"
+     "        cdnHttps = download;\n"
+     "        isCdn = false;\n"
+     "        clearOperation(requestInfo, false, false);\n"
+     "        startDownloadRequest(connectionType);\n"
+     "    }\n"
+     "\n"
+     "    // pluma: 403 and 410 ask the server for a new URL, as FILE_TOKEN_INVALID does, at most\n"
+     "    // PlumaCdnHttps.MAX_REFRESHES times; any other failure takes the rest from the server,\n"
+     "    // keeping the parts already written.\n"
+     "    private void plumaHttpsFailed(RequestInfo requestInfo, TLRPC.TL_error error, int connectionType) {\n"
+     "        if (PlumaCdnHttps.ERROR_REFRESH.equals(error.text) && cdnHttpsRefreshes < PlumaCdnHttps.MAX_REFRESHES) {\n"
+     "            cdnHttpsRefreshes++;\n"
+     "        } else {\n"
+     "            cdnHttpsDisabled = true;\n"
+     "        }\n"
+     "        plumaHttpsClose();\n"
+     "        clearOperation(requestInfo, false, false);\n"
+     "        startDownloadRequest(connectionType);\n"
+     "    }\n"
+     "\n"
+     "    private void plumaHttpsClose() {\n"
+     "        PlumaCdnHttps.Download download = cdnHttps;\n"
+     "        cdnHttps = null;\n"
+     "        if (download != null) {\n"
+     "            download.close();\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "    // pluma: a part of the HTTPS CDN has a negative token unknown to tgnet; it is dropped by its\n"
+     "    // download, and the callback runs on the stage queue as tgnet's does.\n"
+     "    private void plumaCancelRequest(RequestInfo info, Runnable onCancelled) {\n"
+     "        if (info.httpsCall == null) {\n"
+     "            ConnectionsManager.getInstance(currentAccount).cancelRequest(info.requestToken, true, onCancelled);\n"
+     "            return;\n"
+     "        }\n"
+     "        info.httpsCall.cancel(info.requestToken);\n"
+     "        if (onCancelled != null) {\n"
+     "            Utilities.stageQueue.postRunnable(onCancelled);\n"
+     "        }\n"
+     "    }\n"
+     "\n"
+     "    protected void startDownloadRequest(int useConnectionType) {\n"),
+    # The client tells the server it takes the CDN over HTTPS (initConnection params, next to tz_offset).
+    (CONNECTIONS_CPP,
+     '            objectValue->key = "tz_offset";\n'
+     "            objectValue->value = std::unique_ptr<JSONValue>(jsonNumber);\n",
+     '            objectValue->key = "tz_offset";\n'
+     "            objectValue->value = std::unique_ptr<JSONValue>(jsonNumber);\n"
+     "\n"
+     "            // pluma: large files from the server's HTTPS CDN (PlumaCdnHttps.java).\n"
+     "            objectValue = new TL_jsonObjectValue();\n"
+     "            jsonObject->value.push_back(std::unique_ptr<TL_jsonObjectValue>(objectValue));\n"
+     "            jsonNumber = new TL_jsonNumber();\n"
+     "            jsonNumber->value = 1;\n"
+     '            objectValue->key = "pluma_cdn";\n'
+     "            objectValue->value = std::unique_ptr<JSONValue>(jsonNumber);\n"),
+)
+
+# What PlumaCdnHttps relies on in upstream: whether a proxy is on (any kind
+# takes the CDN off on Android), the network type of the statistics, the
+# native buffer of upload.file, and the cancel of tgnet with its callback.
+CDN_HTTPS_USES = (
+    (f"{JAVA}/messenger/SharedConfig.java", "    public static boolean isProxyEnabled() {\n"),
+    (f"{JAVA}/messenger/ApplicationLoader.java", "    public static int getCurrentNetworkType() {\n"),
+    (f"{JAVA}/tgnet/NativeByteBuffer.java", "    public NativeByteBuffer(int size) throws Exception {\n"),
+    (f"{JAVA}/tgnet/ConnectionsManager.java",
+     "    public void cancelRequest(int token, boolean notifyServer, Runnable onCancelled) {\n"),
+)
+
+# What upstream's tgnet CDN path keeps doing for a "PLH1" download if an edit is
+# lost; none of it may be reached: no request goes to upload.getCdnFile with
+# such a token, none is cancelled in tgnet by its negative token.
+CDN_HTTPS_GONE = (
+    "req.cdn_supported = true;",
+    "cancelRequest(priorityRequestInfo.requestToken",
+    "cancelRequest(requestInfo.requestToken",
+    "cancelRequest(info.requestToken, true);",
+    "cancelRequest(info.requestToken, true, () ->",
+)
+
+
+def cdn_https_java(c):
+    """PlumaCdnHttps.java for the build's target: http:// to the stand in a development build only."""
+    if c.target == "server":
+        return CDN_HTTPS_JAVA
+    hosts = ", ".join(f'"{h}"' for h in c.dev_http_hosts)
+    return CDN_HTTPS_JAVA.replace(CDN_HTTPS_DEV_HOSTS_LINE,
+                                  f"    private static final String[] DEV_HTTP_HOSTS = {{{hosts}}};\n")
+
+
+def cdn_https(tree, c):
+    # Every anchor first, and no PlumaCdnHttps yet: several edits keep their anchor,
+    # and a tree that is already patched must fail before anything is written twice.
+    if (tree.root / CDN_HTTPS_FILE).exists():
+        raise PatchError(f"{CDN_HTTPS_FILE}: the file is already there")
+    for rel, old, _ in CDN_HTTPS_EDITS:
+        tree.expect(rel, old)
+    for rel, text in CDN_HTTPS_USES:
+        tree.expect(rel, text)
+    for rel, old, new in CDN_HTTPS_EDITS:
+        tree.replace(rel, old, new)
+    tree.write(CDN_HTTPS_FILE, cdn_https_java(c))
+
+
+def verify_cdn_https(tree, c):
+    for rel, old, new in CDN_HTTPS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or text.count(old) != new.count(old):
+            changed = next(line for line in new.splitlines() if line not in old.splitlines())
+            raise PatchError(f"{rel}: the HTTPS CDN edit {changed.strip()!r} is not there")
+    text = tree.read(FILE_LOAD)
+    for gone in CDN_HTTPS_GONE:
+        if gone in text:
+            raise PatchError(f"{FILE_LOAD}: upstream's {gone!r} is still there")
+    if text.count("PlumaCdnHttps.isPlumaToken(") != 1 or text.count(".fetch(requestInfo.offset,") != 1:
+        raise PatchError(f"{FILE_LOAD}: the HTTPS CDN is not where the parts are asked for")
+    for rel, used in CDN_HTTPS_USES:
+        tree.expect(rel, used)
+    if tree.read(CONNECTIONS_CPP).count('"pluma_cdn"') != 1:
+        raise PatchError(f"{CONNECTIONS_CPP}: initConnection does not say pluma_cdn once")
+    java = tree.root / CDN_HTTPS_FILE
+    if not java.is_file() or java.read_text(encoding="utf-8") != cdn_https_java(c):
+        raise PatchError(f"{CDN_HTTPS_FILE}: not the HTTPS CDN of a {c.target} build")
+    # A server build reaches the CDN over https:// only.
+    if c.target == "server" and CDN_HTTPS_DEV_HOSTS_LINE not in java.read_text(encoding="utf-8"):
+        raise PatchError(f"{CDN_HTTPS_FILE}: a server build takes http://")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", required=True, help="the DrKLO/Telegram checkout")
@@ -7034,12 +8033,14 @@ def main(argv=None):
     ap.add_argument("--google-services", default="", help="the Firebase config of the app")
     ap.add_argument("--ccache", action="store_true")
     ap.add_argument("--build", type=int, default=0, help="Pluma's build number, the fourth part of versionName")
+    ap.add_argument("--target", choices=("server", "dev"), default="server",
+                    help="dev also takes http:// to the stand's CDN (ci/configure.sh)")
     a = ap.parse_args(argv)
     try:
         app = load_env(a.app)
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
                    pathlib.Path(a.rsa_public_key).read_text(), a.abis or app.get("PLUMA_ABIS", ""),
-                   a.ccache, a.google_services, a.build)
+                   a.ccache, a.google_services, a.build, a.target)
         tree = Tree(a.source)
         patch(tree, c)
         verify(tree, c)
@@ -7047,7 +8048,7 @@ def main(argv=None):
         print(f"patch: {e}", file=sys.stderr)
         return 1
     print(f"patch: {c.package} \"{c.app_name}\" {c.version_name}, layer {c.layer}, server key {c.fingerprint:#018x}, "
-          f"ABIs {' '.join(c.abis)}, Firebase {'given' if c.google_services else 'placeholder'}")
+          f"ABIs {' '.join(c.abis)}, Firebase {'given' if c.google_services else 'placeholder'}, {c.target} build")
     return 0
 
 

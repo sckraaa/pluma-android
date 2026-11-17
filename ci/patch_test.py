@@ -2342,6 +2342,237 @@ class GroupCallsE2ETest(unittest.TestCase):
             self.assertEqual(patched[patch.GROUP_CALL_ACTIVITY].count("call.toggleRecord("), 2)
 
 
+class CdnHttpsTest(unittest.TestCase):
+    """Large files from the server's HTTPS CDN (task 107 of the server repository)."""
+
+    # The upstream files, made of the texts the edits expect and the places the new file uses.
+    def tree(self, root, edits=patch.CDN_HTTPS_EDITS, uses=patch.CDN_HTTPS_USES):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x();\n"
+        for rel, text in uses:
+            files[rel] = files.get(rel, "") + text + "x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        (root / "TMessagesProj").mkdir(exist_ok=True)
+        return patch.Tree(root)
+
+    def java(self, tree):
+        return tree.read(patch.CDN_HTTPS_FILE)
+
+    @staticmethod
+    def damaged(text):
+        """The text with a comment after its first letter: upstream changed that line."""
+        i = len(text) - len(text.lstrip()) + 1
+        return text[:i] + "/**/" + text[i:]
+
+    def test_applies(self):
+        for target in ("server", "dev"):
+            c = config(target=target)
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                    patch.verify_cdn_https(tree, c)
+                patch.cdn_https(tree, c)
+                patch.verify_cdn_https(tree, c)
+                text = tree.read(patch.FILE_LOAD)
+                self.assertIn("req.cdn_supported = !cdnHttpsDisabled && PlumaCdnHttps.isAllowed();", text)
+                self.assertNotIn("req.cdn_supported = true;", text)
+                self.assertIn('objectValue->key = "pluma_cdn";\n', tree.read(patch.CONNECTIONS_CPP))
+                self.assertIn("jsonNumber->value = 1;\n", tree.read(patch.CONNECTIONS_CPP))
+                # A second run stops before it writes anything twice.
+                with self.assertRaisesRegex(patch.PatchError, "already there"):
+                    patch.cdn_https(tree, c)
+
+    def test_dev_hosts(self):
+        self.assertEqual(config().target, "server")
+        self.assertEqual(config().dev_http_hosts, [])
+        self.assertEqual(config(target="dev").dev_http_hosts, ["10.0.2.2", "203.0.113.7"])
+        self.assertEqual(config(target="dev", server_ipv4="10.0.2.2").dev_http_hosts, ["10.0.2.2"])
+        with self.assertRaises(patch.PatchError):
+            config(target="staging")
+        server = patch.cdn_https_java(config())
+        dev = patch.cdn_https_java(config(target="dev"))
+        self.assertIn(patch.CDN_HTTPS_DEV_HOSTS_LINE, server)
+        self.assertNotIn(patch.CDN_HTTPS_DEV_HOSTS_LINE, dev)
+        # The two builds differ in that line only.
+        self.assertEqual([l for l in dev.splitlines() if l not in server.splitlines()],
+                         ['    private static final String[] DEV_HTTP_HOSTS = {"10.0.2.2", "203.0.113.7"};'])
+
+    def test_server_build_takes_no_http(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.cdn_https(tree, config(target="dev"))
+            patch.verify_cdn_https(tree, config(target="dev"))
+            # A development build's file in a server build fails the check.
+            with self.assertRaisesRegex(patch.PatchError, "not the HTTPS CDN of a server build"):
+                patch.verify_cdn_https(tree, config())
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            c = config()
+            patch.cdn_https(tree, c)
+            java = self.java(tree)
+            for damaged in (java.replace(patch.CDN_HTTPS_DEV_HOSTS_LINE,
+                                         '    private static final String[] DEV_HTTP_HOSTS = {"203.0.113.7"};\n'),
+                            java.replace('address.startsWith("https://")', 'address.startsWith("http")'),
+                            java + "\n"):
+                self.assertNotEqual(damaged, java)
+                tree.write(patch.CDN_HTTPS_FILE, damaged)
+                with self.assertRaisesRegex(patch.PatchError, "not the HTTPS CDN of a server build"):
+                    patch.verify_cdn_https(tree, c)
+            (tree.root / patch.CDN_HTTPS_FILE).unlink()
+            with self.assertRaisesRegex(patch.PatchError, "not the HTTPS CDN"):
+                patch.verify_cdn_https(tree, c)
+
+    def test_upstream_changed(self):
+        # DAMAGE: each anchor of the edits (the flag, the redirect, the request of a part, the
+        # fallback, the cancels, the params of initConnection) and each place the new file uses
+        # (the proxy among them), changed in upstream, stops the patch with the file's name.
+        for i, (rel, old, new) in enumerate(patch.CDN_HTTPS_EDITS):
+            changed = self.damaged(old)
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.CDN_HTTPS_EDITS)]
+            with self.subTest(edit=new.strip().splitlines()[0][:60]), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": 0 occurrences"):
+                    patch.cdn_https(tree, config())
+                self.assertFalse((tree.root / patch.CDN_HTTPS_FILE).exists())
+        for i, (rel, text) in enumerate(patch.CDN_HTTPS_USES):
+            uses = [u if j != i else (rel, self.damaged(text)) for j, u in enumerate(patch.CDN_HTTPS_USES)]
+            with self.subTest(uses=text.strip()), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), uses=uses)
+                with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": 0 occurrences"):
+                    patch.cdn_https(tree, config())
+        # An anchor upstream has twice.
+        rel, old, _ = patch.CDN_HTTPS_EDITS[3]
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            tree.write(rel, tree.read(rel) + old)
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.cdn_https(tree, config())
+
+    def test_check(self):
+        c = config()
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.cdn_https(tree, c)
+            # DAMAGE: each edit taken back, or written twice, fails the check.
+            for rel, old, new in patch.CDN_HTTPS_EDITS:
+                patched = tree.read(rel)
+                for damaged in (patched.replace(new, old), patched + new):
+                    tree.write(rel, damaged)
+                    with self.subTest(edit=new.strip().splitlines()[0][:60]), self.assertRaises(patch.PatchError):
+                        patch.verify_cdn_https(tree, c)
+                tree.write(rel, patched)
+            patch.verify_cdn_https(tree, c)
+            # Upstream's flag or its cancel of a part in tgnet, back anywhere in the file.
+            patched = tree.read(patch.FILE_LOAD)
+            for gone in patch.CDN_HTTPS_GONE:
+                tree.write(patch.FILE_LOAD, patched + gone + "\n")
+                with self.subTest(gone=gone), self.assertRaisesRegex(patch.PatchError, "still there"):
+                    patch.verify_cdn_https(tree, c)
+            tree.write(patch.FILE_LOAD, patched)
+            cpp = tree.read(patch.CONNECTIONS_CPP)
+            tree.write(patch.CONNECTIONS_CPP, cpp + 'objectValue->key = "pluma_cdn";\n')
+            with self.assertRaisesRegex(patch.PatchError, "pluma_cdn"):
+                patch.verify_cdn_https(tree, c)
+            tree.write(patch.CONNECTIONS_CPP, cpp)
+            patch.verify_cdn_https(tree, c)
+
+    def test_contract(self):
+        # The numbers and rules of the client contract (brief 107, "Контракт клиентов").
+        java = patch.CDN_HTTPS_JAVA
+        for line in (
+            "private static final byte[] TOKEN_TAG = {'P', 'L', 'H', '1'};",
+            "private static final int TOKEN_HEADER = 4 + 32 + 4;",
+            "private static final int BLOCK = 128 * 1024;",
+            "private static final int CACHED_BLOCKS = 8;",
+            "private static final int CONNECT_TIMEOUT = 5000;",
+            "private static final int READ_TIMEOUT = 10000;",
+            "private static final int REQUEST_TIMEOUT = 30000;",
+            "private static final int RETRY_DELAY_MIN = 300;",
+            "private static final int RETRY_DELAY_SPREAD = 500;",
+            "public static final int MAX_REFRESHES = 3;",
+            "private static final int FAILURES_TO_PAUSE = 3;",
+            "private static final long PAUSE = 10 * 60 * 1000L;",
+            'connection.setRequestProperty("Range", "bytes=" + first + "-" + last);',
+            'connection.setRequestProperty("Accept-Encoding", "identity");',
+            'connection.setRequestProperty("User-Agent", "Pluma");',
+            "connection.setUseCaches(false);",
+            "connection.setInstanceFollowRedirects(false);",
+            "if (code == 403 || code == 410) {",
+            "if (code != 206) {",
+            'range.trim().equals("bytes " + first + "-" + last + "/" + size)',
+            "return !SharedConfig.isProxyEnabled();",
+            'Cipher.getInstance("AES/CTR/NoPadding")',
+            "MessageDigest.isEqual(sha256.digest(plain), hash.hash)",
+            # A fault in a pool thread fails the parts instead of leaving them waiting.
+            "} catch (RuntimeException e) {",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(java.count(line), 1)
+        # The counter of a block is upstream's: bytes 12-15 of the IV are offset / 16 (FileLoadOperation 1900-1906).
+        self.assertIn("long n = offset / 16;\n                    counter[12] = (byte) (n >> 24);\n"
+                      "                    counter[13] = (byte) (n >> 16);\n                    counter[14] = (byte) (n >> 8);\n"
+                      "                    counter[15] = (byte) n;\n", java)
+        # Logs carry the host, the status and the offset, never the URL, the token or a key.
+        logs = re.findall(r"FileLog\.\w\((.*)\);", java)
+        self.assertTrue(logs)
+        for log in logs:
+            with self.subTest(log=log):
+                self.assertNotRegex(log, r"\b(url|address|fileToken|token|key|iv|hash|hashes)\b")
+        # No HTTP cache and no other address than the URL's.
+        self.assertEqual(java.count("openConnection("), 1)
+        self.assertNotIn("setUseCaches(true)", java)
+        self.assertNotIn("HttpResponseCache", java)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = sorted({rel for rel, _, _ in patch.CDN_HTTPS_EDITS} | {rel for rel, _ in patch.CDN_HTTPS_USES})
+        self.assertFalse((UPSTREAM / patch.CDN_HTTPS_FILE).exists())
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "TMessagesProj").mkdir()
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            for c in (config(), config(target="dev")):
+                if (root / patch.CDN_HTTPS_FILE).exists():
+                    (root / patch.CDN_HTTPS_FILE).unlink()
+                for rel in rels:
+                    tree.write(rel, original[rel])
+                with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                    patch.verify_cdn_https(tree, c)
+                patch.cdn_https(tree, c)
+                patch.verify_cdn_https(tree, c)
+            patched = {rel: tree.read(rel) for rel in rels}
+            # Nothing else changed: each file is upstream's once its edits are taken back.
+            for rel in rels:
+                text = patched[rel]
+                for r, old, new in patch.CDN_HTTPS_EDITS:
+                    if r == rel:
+                        self.assertEqual(text.count(new), 1, f"{rel}: {new[:60]!r}")
+                        text = text.replace(new, old)
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # Upstream sets cdn_supported in one place and sends a part in one place.
+            self.assertEqual(original[patch.FILE_LOAD].count("cdn_supported"), 1)
+            self.assertEqual(original[patch.FILE_LOAD].count(".sendRequestSync("), 1)
+            self.assertEqual(original[patch.CONNECTIONS_CPP].count("auto jsonNumber = new TL_jsonNumber();\n"
+                                                                    "            jsonNumber->value = currentDeviceTimezone;\n"), 1)
+            # DAMAGE on the real tree: each edit taken back fails the check.
+            c = config(target="dev")
+            for rel, old, new in patch.CDN_HTTPS_EDITS:
+                with self.subTest(damage=new.strip().splitlines()[0][:60]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_cdn_https(tree, c)
+                    tree.write(rel, patched[rel])
+            patch.verify_cdn_https(tree, c)
+
+
 class CallColoursTest(unittest.TestCase):
     # The colour keys of the group call as ThemeColors of 13.2.1 (7be672ea) defines them;
     # test_real_upstream checks the table against the checkout.
@@ -2680,6 +2911,115 @@ class CallColoursTest(unittest.TestCase):
             # The theme check of the brand still reads enough of Telegram's blue.
             names, defaults = patch.theme_defaults(patched[patch.THEME_COLORS])
             self.assertGreaterEqual(sum(map(patch.telegram_blue, defaults.values())), 100)
+
+
+class BusinessTest(unittest.TestCase):
+    """The Business rows are upstream's again; the ads switch of the screen is hidden."""
+
+    # The places as upstream writes them, shortened around the anchors.
+    PLACES = {
+        patch.PREMIUM_PREVIEW: (patch.BUSINESS_EDITS[0][1]
+                                + "            showAdsRow = rowCount++;\n            showAdsInfoRow = rowCount++;\n        }\n"),
+        f"{patch.JAVA}/ui/LinkManager.java": ('        if ("business".equalsIgnoreCase(first)) {\n'
+                                              + patch.BUSINESS_EDITS[1][1]
+                                              + "            return true;\n        }\n"),
+        f"{patch.JAVA}/ui/SettingsActivity.java": patch.BUSINESS_ROWS[0][1] + "        }\n",
+        f"{patch.JAVA}/ui/ProfileActivity.java": patch.BUSINESS_ROWS[1][1] + "                }\n",
+    }
+
+    def tree(self, root, files=None):
+        for rel, text in (files or self.PLACES).items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("class X {\n" + text + "}\n", encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_patch_and_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the Business edit of task 105 is not there"):
+                patch.verify_business(tree)
+            patch.business(tree)
+            patch.verify_business(tree)
+            self.assertIn("if (false && type == FEATURES_BUSINESS && getUserConfig().isPremium()) {",
+                          tree.read(patch.PREMIUM_PREVIEW))
+            self.assertNotIn("do-not-hide-ads", tree.read(f"{patch.JAVA}/ui/LinkManager.java"))
+            # A second run finds no upstream text.
+            with self.assertRaises(patch.PatchError):
+                patch.business(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.BUSINESS_EDITS):
+            files = dict(self.PLACES)
+            files[rel] = files[rel].replace(old, old.replace("(", "( ", 1))
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), files)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.business(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.business(tree)
+            # Each edit taken back.
+            for rel, old, new in patch.BUSINESS_EDITS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=rel), self.assertRaisesRegex(patch.PatchError, "is not there"):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            # A Business row hidden again, as task 071 did.
+            for rel, row in patch.BUSINESS_ROWS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(row, row.replace("premiumFeaturesBlocked", "premiumPurchaseBlocked")
+                                                .replace("first)) {", "first) && false) {")))
+                with self.subTest(row=rel), self.assertRaisesRegex(patch.PatchError, "the Business row is not upstream's"):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            # The switch set again somewhere else.
+            patched = tree.read(patch.PREMIUM_PREVIEW)
+            tree.write(patch.PREMIUM_PREVIEW, patched + "showAdsRow = rowCount++;\n")
+            with self.assertRaisesRegex(patch.PatchError, "the ads switch is set elsewhere"):
+                patch.verify_business(tree)
+            tree.write(patch.PREMIUM_PREVIEW, patched)
+            patch.verify_business(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = sorted({rel for rel, _, _ in patch.BUSINESS_EDITS} | {rel for rel, _ in patch.BUSINESS_ROWS}
+                      | {rel for rel, _, _ in patch.PREMIUM_FOR_EVERYONE_EDITS} | {patch.TRANSCRIBE_CELL})
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            # Upstream's rows are what the check expects, before and after task 071's edits.
+            for rel, row in patch.BUSINESS_ROWS:
+                self.assertEqual(original[rel].count(row), 1, rel)
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_business(tree)
+            patch.premium_for_everyone(tree)
+            patch.business(tree)
+            patch.verify_premium_for_everyone(tree)
+            patch.verify_business(tree)
+            patched = {rel: tree.read(rel) for rel in rels}
+            # The Business edits change nothing else.
+            for rel in {rel for rel, _, _ in patch.BUSINESS_EDITS}:
+                text = patched[rel]
+                for r, old, new in patch.BUSINESS_EDITS + patch.PREMIUM_FOR_EVERYONE_EDITS:
+                    if r == rel:
+                        text = text.replace(new, old)
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # DAMAGE on the real tree: each edit taken back fails the check.
+            for rel, old, new in patch.BUSINESS_EDITS:
+                with self.subTest(damage=new.strip()[:60]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_business(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_business(tree)
 
 
 if __name__ == "__main__":
