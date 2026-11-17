@@ -62,7 +62,7 @@ fi
 if [ "${CCACHE:-}" = 1 ]; then
 	args+=(--ccache)
 fi
-args+=(--build "${PLUMA_BUILD:-0}")
+args+=(--build "${PLUMA_BUILD:-0}" --target "$target")
 python3 -I ci/patch.py "${args[@]}"
 echo "configure: $target build, server $SERVER_IPV4:$SERVER_PORT"
 echo "target=$target" >>"${GITHUB_OUTPUT:-/dev/null}"
