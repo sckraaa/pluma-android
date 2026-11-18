@@ -2772,8 +2772,8 @@ class EdgesTest(unittest.TestCase):
             prober = tree.read(patch.PATH_PROBER_FILE)
             for old, new in (('DIRECT_IPV4 = "203.0.113.7";', 'DIRECT_IPV4 = "198.51.100.1";'),
                              ("DIRECT_PORT = 443;", "DIRECT_PORT = 8443;"),
-                             ("return started && !unsupported && !proxied();",
-                              "return started && !unsupported;")):
+                             ("return started && !unsupported() && !proxied();",
+                              "return started && !unsupported();")):
                 damaged = prober.replace(old, new)
                 self.assertNotEqual(damaged, prober)
                 tree.write(patch.PATH_PROBER_FILE, damaged)
@@ -2963,7 +2963,7 @@ class PathSelectionTest(unittest.TestCase):
             "private static final long TRANSFER_DEFER = 120_000;",
             'ws.addProtocol("binary");',
             'ws.addHeader("User-Agent", "Pluma");',
-            "return started && !unsupported && !proxied();",
+            "return started && !unsupported() && !proxied();",
             'return main.getBoolean("proxy_enabled", false) && ProxySettings.fromSharedPreferences(main).isValid();',
             "manager.registerDefaultNetworkCallback(callback);",
             "connectivity().getRestrictBackgroundStatus() == ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED",

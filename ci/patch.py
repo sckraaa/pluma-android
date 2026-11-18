@@ -2121,7 +2121,8 @@ public final class PlumaPathProber {
     private static PlumaPathPolicy.Memory memory = new PlumaPathPolicy.Memory();
     private static String networkKey = "";
     private static String current;
-    private static boolean unsupported;
+    // Until when the probes rest: the gateway closed right after resPQ (markUnsupported).
+    private static long unsupportedUntil;
 
     // The worker's own.
     private static boolean gateRunning;
@@ -2208,8 +2209,13 @@ public final class PlumaPathProber {
     // Whether the probes choose the path now; otherwise the rules of task 109 (sticky_s) hold.
     static boolean selecting() {
         synchronized (lock) {
-            return started && !unsupported && !proxied();
+            return started && !unsupported() && !proxied();
         }
+    }
+
+    // Under the lock: whether the probes rest after a close right after resPQ.
+    private static boolean unsupported() {
+        return System.currentTimeMillis() < unsupportedUntil;
     }
 
     // A proxy of the user is on, as ConnectionsManager.init reads it for tgnet.
@@ -2274,7 +2280,7 @@ public final class PlumaPathProber {
                 return;
             }
             // Another pluma_probe: the gateway may know the probe now.
-            unsupported = false;
+            unsupportedUntil = 0;
             params = next;
             paramsText = text;
             preferences().edit().putString(PARAMS_KEY, text).apply();
@@ -2692,11 +2698,13 @@ public final class PlumaPathProber {
         PlumaEdgeBridge.reorder(true);
     }
 
-    // The gateway closed right after resPQ: it does not know the probe. The rules of task 109 hold
-    // until another pluma_probe comes; nothing is remembered.
+    // The gateway closed right after resPQ: it does not know the probe, or its limits refused it
+    // (they close the same way, the server's task 113 brief, "Контракт пробы"). The rules of task
+    // 109 hold until another pluma_probe comes or failed_ttl_s passes, whichever is first, so that
+    // a refusal does not stop the probes for good; nothing is remembered.
     private static void markUnsupported() {
         synchronized (lock) {
-            unsupported = true;
+            unsupportedUntil = System.currentTimeMillis() + params.failedTtlMs();
             current = null;
         }
         PlumaEdgeBridge.reorder(false);
@@ -3724,7 +3732,7 @@ def verify_edges(tree, c):
     direct = re.findall(r'DIRECT_IPV4 = "([^"]*)";\n.*DIRECT_IPV6 = "([^"]*)";\n.*DIRECT_PORT = (\d+);', prober, re.S)
     if direct != [(c.ipv4, c.ipv6 or "", str(c.port))]:
         raise PatchError(f"{PATH_PROBER_FILE}: the direct address is not DC 1's")
-    if (prober.count("return started && !unsupported && !proxied();") != 1
+    if (prober.count("return started && !unsupported() && !proxied();") != 1
             or prober.count('return main.getBoolean("proxy_enabled", false) && ProxySettings.fromSharedPreferences(main).isValid();') != 1):
         raise PatchError(f"{PATH_PROBER_FILE}: probes with a proxy of the user on")
 
