@@ -192,7 +192,7 @@ def load_env(path):
 
 class Config:
     def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, abis, ccache, google_services, build=0,
-                 target="server"):
+                 target="server", edge_ws_urls=""):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -258,6 +258,8 @@ class Config:
             raise PatchError(f"target {target!r}: server or dev")
         self.target = target
         self.dev_http_hosts = sorted({self.ipv4, CDN_HTTPS_EMULATOR_HOST}) if target == "dev" else []
+        # The server's edges (task 109): wss:// URLs in the order tried; none, no edit.
+        self.edge_urls = parse_edge_urls(edge_ws_urls)
 
 
 # --- the patch ---------------------------------------------------------------
@@ -412,12 +414,1031 @@ def patch(tree, c):
     premium_for_everyone(tree)
     business(tree)
     not_served(tree)
+    edges(tree, c)
     no_ai_editor(tree)
     service_account(tree)
     self_update(tree, c)
     links(tree)
     brand(tree)
     login_screens(tree)
+
+
+# --- the server's edges -------------------------------------------------------
+# Task 109 of the server repository (ADR 0072): when the direct address of the
+# server does not answer, the client reaches the server through an edge, a
+# WebSocket over TLS to a CDN or a node (wss://<host>/apiws, protocol "binary"),
+# which carries the same bytes as the direct TCP connection: the obfuscated
+# header and the frames of the transport. The edges of the build come from
+# PLUMA_EDGE_WS_URLS (ci/configure.sh; empty: no edit at all), the server may
+# give others and their order in the app config (pluma_edge).
+#
+# tgnet, as read in 7be672ea, before the edit:
+# - An address of a datacenter is tried on four port slots {-1, 443, 5222, -1}
+#   (-1: the address's own port) before the next address; after the last
+#   address the list starts over (Datacenter.h 84, Datacenter.cpp 374-439). The
+#   index is stored in dc<N>conf.dat once data came (Connection.cpp 128-129,
+#   Datacenter.cpp 468-482) and read back at start (Datacenter.cpp 170-183).
+# - A connection that closes moves on after 2 failures in a row (4 if it had
+#   useful data), or at once on a timeout of a connection that got no byte
+#   (Connection.cpp 660, 684-700); any received byte sets the failures to 0
+#   (Connection.cpp 74). A timeout closes a connection only while a request
+#   waits (ConnectionSocket.cpp 708-719); the generic connection's is 12 s,
+#   up to 16 s after timeouts (Connection.cpp 144, 383, 662-664).
+# - So a direct connection that gets its first bytes and then freezes (the 16 KB
+#   stall of brief 092) is never left: each reconnect gets bytes again. The edit
+#   counts it: two timeouts in a row of an established generic connection of
+#   DC 1 (each within 60 s of the previous) put DC 1 on its first edge.
+# - help.getConfig replaces the addresses only for the datacenters of
+#   dc_options (ConnectionsManager.cpp 3488-3514), which the Pluma server sends
+#   empty; a push DC_UPDATE replaces them too (applyDatacenterAddress, 3588-3596).
+#   Either way the labels are applied again after the replacement, and an
+#   address of the server is never taken for a label.
+#
+# So:
+# - Each edge is an address label of DC 1 ("pluma-edge-<n>", in the order of
+#   the edges), after the direct addresses, or before them when the server
+#   orders the edges first; the IPv6 list gets them only if it has a direct
+#   address. A label has no port slots: the next address follows it.
+# - ConnectionSocket opens a label as 127.0.0.1:<port of that edge's bridge>;
+#   with a proxy of the user (or a proxy check) on, or with no bridge, it fails
+#   at once and tgnet goes on.
+# - PlumaEdgeBridge (org.telegram.utils.proxy, after WebProxyTransport's local
+#   ServerSocket, WebProxyTransport.java 323, 370-400) listens on 127.0.0.1 with
+#   one port per edge; each connection tgnet opens is one WebSocket of
+#   nv-websocket-client 2.14 (upstream's dependency, TMessagesProj/build.gradle
+#   57) to that edge: "binary", User-Agent Pluma (the library sends none,
+#   HandshakeBuilder), bytes both ways as they come, a message at most 64 KB;
+#   the library answers pings itself (ReadingThread.handlePingFrame). 45 s
+#   without a byte from the edge (pings included) closes both sides; closing
+#   one side closes the other.
+# - The first connection through an edge starts sticky_s (1800 s); then the
+#   next connection of DC 1 tries the direct address first (returnFromPlumaEdge
+#   through JNI; the open one stays). The labels are dropped from the stored
+#   addresses at start, so a new run starts on the direct address.
+# - pluma_edge of help.getAppConfig (v 1, 1-4 wss:// URLs, order a permutation
+#   of direct and edge, sticky_s 60-86400) is kept in the preferences and
+#   applied at once; absent or not valid, the build's list applies.
+EDGE_URLS_LIMIT = 4
+EDGE_TELEGRAM_DOMAINS = ("telegram.org", "telegram.me", "t.me", "telegram.dog", "telesco.pe", "tdesktop.com",
+                         "telegra.ph", "graph.org", "fragment.com")
+EDGE_URL = re.compile(r"wss://([a-z0-9.-]+)(?::([0-9]{1,5}))?(/[A-Za-z0-9._~/-]*)")
+EDGE_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def parse_edge_urls(value):
+    """The build's edges (PLUMA_EDGE_WS_URLS): 0 to 4 wss:// URLs of host names, in the order tried."""
+    value = value.strip()
+    if not value:
+        return []
+    urls = [u.strip() for u in value.split(",")]
+    if len(urls) > EDGE_URLS_LIMIT:
+        raise PatchError(f"PLUMA_EDGE_WS_URLS: {len(urls)} URLs, at most {EDGE_URLS_LIMIT}")
+    for url in urls:
+        m = EDGE_URL.fullmatch(url)
+        if not m:
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r} is not wss://<host>[:port]/<path> in lowercase")
+        host, port = m.group(1), m.group(2)
+        labels = host.split(".")
+        if (len(host) > 253 or len(labels) < 2 or not all(EDGE_HOST_LABEL.fullmatch(l) for l in labels)
+                or labels[-1].isdigit()):
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r}: the host must be a name, not an address")
+        if any(host == d or host.endswith("." + d) for d in EDGE_TELEGRAM_DOMAINS):
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r} is a host of Telegram")
+        if port is not None and not 0 < int(port) < 65536:
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r}: the port is not a port")
+    if len(set(urls)) != len(urls):
+        raise PatchError("PLUMA_EDGE_WS_URLS: a URL is there twice")
+    return urls
+
+
+EDGE_TGNET = "TMessagesProj/jni/tgnet"
+EDGE_JAVA_DIR = "TMessagesProj/src/main/java/org/telegram"
+EDGE_MANAGER_CPP = f"{EDGE_TGNET}/ConnectionsManager.cpp"
+EDGE_DATACENTER_CPP = f"{EDGE_TGNET}/Datacenter.cpp"
+EDGE_DATACENTER_H = f"{EDGE_TGNET}/Datacenter.h"
+EDGE_CONNECTION_CPP = f"{EDGE_TGNET}/Connection.cpp"
+EDGE_SOCKET_CPP = f"{EDGE_TGNET}/ConnectionSocket.cpp"
+EDGE_MANAGER_H = f"{EDGE_TGNET}/ConnectionsManager.h"
+EDGE_WRAPPER = "TMessagesProj/jni/TgNetWrapper.cpp"
+EDGE_MANAGER_JAVA = f"{EDGE_JAVA_DIR}/tgnet/ConnectionsManager.java"
+EDGE_MESSAGES = f"{EDGE_JAVA_DIR}/messenger/MessagesController.java"
+EDGE_FILE = f"{EDGE_JAVA_DIR}/utils/proxy/PlumaEdgeBridge.java"
+EDGE_LABEL = "pluma-edge-"
+EDGE_BUILT_IN_LINE = "    private static final String[] BUILT_IN = {};\n"
+# The end of DC 1 in initDatacenters as the tgnet edit above (A-002) writes it.
+EDGE_INIT_ANCHOR = "        datacenters[1] = datacenter;\n    }\n}\n"
+
+EDGE_JAVA = r"""package org.telegram.utils.proxy;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.os.SystemClock;
+
+import com.neovisionaries.ws.client.WebSocket;
+import com.neovisionaries.ws.client.WebSocketAdapter;
+import com.neovisionaries.ws.client.WebSocketException;
+import com.neovisionaries.ws.client.WebSocketFactory;
+import com.neovisionaries.ws.client.WebSocketFrame;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.FileLog;
+import org.telegram.messenger.UserConfig;
+import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgnet.TLRPC;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+// The server's edges (task 109 of the Pluma server, ADR 0072): a local bridge per
+// edge on 127.0.0.1, which tgnet reaches through the edge's address label of DC 1.
+// Each connection tgnet opens to a bridge is one WebSocket to its edge
+// (wss://<host>/apiws, protocol "binary"), carrying the bytes of the connection as
+// they are, both ways. The edges are the build's, or the ones the server gives in
+// the app config (pluma_edge).
+public final class PlumaEdgeBridge {
+    private static final String[] BUILT_IN = {};
+    private static final int BUILT_IN_STICKY_S = 1800;
+    private static final String APP_CONFIG_KEY = "pluma_edge";
+    private static final String PREFERENCES = "pluma_edge";
+    private static final String PREFERENCES_KEY = "settings";
+    private static final int MAX_EDGES = 4;
+    private static final int MIN_STICKY_S = 60;
+    private static final int MAX_STICKY_S = 86400;
+    // One message of the WebSocket at most; tgnet's bytes go as they are read.
+    private static final int MAX_MESSAGE = 64 * 1024;
+    private static final int MAX_CONNECTIONS = 64;
+    private static final int FRAME_QUEUE = 16;
+    private static final int CONNECT_TIMEOUT = 10_000;
+    // No byte from the edge for this long (the server pings every 20 s): the connection is dead.
+    private static final long SILENCE = 45_000;
+    private static final long WATCH_PERIOD = 5_000;
+
+    private static final Object lock = new Object();
+    private static final ExecutorService io = Executors.newCachedThreadPool();
+    private static final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+    private static final boolean[] attached = new boolean[UserConfig.MAX_ACCOUNT_COUNT];
+    private static final List<Edge> edges = new ArrayList<>();
+    private static Settings settings;
+    private static boolean started;
+    private static ScheduledFuture<?> stickyReturn;
+
+    private PlumaEdgeBridge() {
+    }
+
+    // ConnectionsManager.init of an account, before native_init: the account's tgnet takes the
+    // edges from now on.
+    public static void attach(int account) {
+        synchronized (lock) {
+            start();
+            attached[account] = true;
+            ConnectionsManager.native_setPlumaEdges(account, ports(), settings.edgesFirst);
+        }
+    }
+
+    // MessagesController.applyAppConfig: pluma_edge of help.getAppConfig, or the build's edges
+    // when the key is absent or not valid.
+    public static void applyAppConfig(TLRPC.TL_jsonObject object) {
+        TLRPC.JSONValue value = null;
+        for (TLRPC.TL_jsonObjectValue item : object.value) {
+            if (APP_CONFIG_KEY.equals(item.key)) {
+                value = item.value;
+                break;
+            }
+        }
+        Settings received = value != null ? Settings.parse(value) : null;
+        timer.execute(() -> apply(received));
+    }
+
+    private static void start() {
+        if (started) {
+            return;
+        }
+        started = true;
+        settings = loadSettings();
+        bind(settings.urls);
+        timer.scheduleWithFixedDelay(PlumaEdgeBridge::watch, WATCH_PERIOD, WATCH_PERIOD, TimeUnit.MILLISECONDS);
+    }
+
+    private static void apply(Settings received) {
+        synchronized (lock) {
+            Settings next = received != null ? received : Settings.builtIn();
+            if (started && !next.equals(settings)) {
+                boolean rebind = !next.urls.equals(settings.urls);
+                settings = next;
+                if (rebind) {
+                    bind(next.urls);
+                }
+                if (next.edgesFirst && stickyReturn != null) {
+                    stickyReturn.cancel(false);
+                    stickyReturn = null;
+                }
+                int[] ports = ports();
+                for (int a = 0; a < attached.length; a++) {
+                    if (attached[a]) {
+                        ConnectionsManager.native_setPlumaEdges(a, ports, next.edgesFirst);
+                    }
+                }
+            }
+            storeSettings(received);
+        }
+    }
+
+    // Under the lock: a bridge per URL, in their order; an edge that stays keeps its port.
+    private static void bind(List<String> urls) {
+        List<Edge> next = new ArrayList<>();
+        for (String url : urls) {
+            Edge kept = null;
+            for (Edge edge : edges) {
+                if (edge.url.equals(url)) {
+                    kept = edge;
+                    break;
+                }
+            }
+            next.add(kept != null ? kept : Edge.open(url));
+        }
+        for (Edge edge : edges) {
+            if (!next.contains(edge)) {
+                edge.close();
+            }
+        }
+        edges.clear();
+        edges.addAll(next);
+    }
+
+    // Under the lock: the port of each edge's bridge, 0 for one that could not listen.
+    private static int[] ports() {
+        int[] ports = new int[edges.size()];
+        for (int i = 0; i < ports.length; i++) {
+            ports[i] = edges.get(i).port();
+        }
+        return ports;
+    }
+
+    // Under the lock: tgnet went through an edge; sticky_s later its next connection tries the
+    // direct address first again.
+    private static void onEdgeUsed() {
+        if (settings.edgesFirst || stickyReturn != null) {
+            return;
+        }
+        stickyReturn = timer.schedule(PlumaEdgeBridge::returnToDirect, settings.stickyS, TimeUnit.SECONDS);
+    }
+
+    private static void returnToDirect() {
+        synchronized (lock) {
+            stickyReturn = null;
+            for (int a = 0; a < attached.length; a++) {
+                if (attached[a]) {
+                    ConnectionsManager.native_returnFromPlumaEdge(a);
+                }
+            }
+        }
+    }
+
+    private static void watch() {
+        long now = SystemClock.elapsedRealtime();
+        List<Connection> silent = new ArrayList<>();
+        synchronized (lock) {
+            for (Edge edge : edges) {
+                for (Connection connection : edge.connections) {
+                    if (now - connection.lastReceived > SILENCE) {
+                        silent.add(connection);
+                    }
+                }
+            }
+        }
+        for (Connection connection : silent) {
+            connection.close();
+        }
+    }
+
+    private static Settings loadSettings() {
+        try {
+            SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+            String stored = preferences.getString(PREFERENCES_KEY, null);
+            Settings loaded = stored != null ? Settings.fromJson(stored) : null;
+            if (loaded != null) {
+                return loaded;
+            }
+        } catch (RuntimeException e) {
+            FileLog.e(e);
+        }
+        return Settings.builtIn();
+    }
+
+    private static void storeSettings(Settings received) {
+        try {
+            SharedPreferences.Editor editor = ApplicationLoader.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit();
+            if (received != null) {
+                editor.putString(PREFERENCES_KEY, received.toJson());
+            } else {
+                editor.remove(PREFERENCES_KEY);
+            }
+            editor.apply();
+        } catch (RuntimeException e) {
+            FileLog.e(e);
+        }
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (IOException ignore) {
+        }
+    }
+
+    private static final class Settings {
+        final List<String> urls;
+        final boolean edgesFirst;
+        final int stickyS;
+
+        private Settings(List<String> urls, boolean edgesFirst, int stickyS) {
+            this.urls = Collections.unmodifiableList(new ArrayList<>(urls));
+            this.edgesFirst = edgesFirst;
+            this.stickyS = stickyS;
+        }
+
+        // The build's edges: the direct address first.
+        static Settings builtIn() {
+            return new Settings(Arrays.asList(BUILT_IN), false, BUILT_IN_STICKY_S);
+        }
+
+        // {"v":1,"ws":["wss://…"],"order":["direct","edge"],"sticky_s":1800}; null if not valid.
+        static Settings parse(TLRPC.JSONValue value) {
+            if (!(value instanceof TLRPC.TL_jsonObject)) {
+                return null;
+            }
+            double version = Double.NaN;
+            double sticky = Double.NaN;
+            List<String> urls = null;
+            List<String> order = null;
+            for (TLRPC.TL_jsonObjectValue item : ((TLRPC.TL_jsonObject) value).value) {
+                switch (item.key) {
+                    case "v":
+                        version = number(item.value);
+                        break;
+                    case "ws":
+                        urls = strings(item.value);
+                        break;
+                    case "order":
+                        order = strings(item.value);
+                        break;
+                    case "sticky_s":
+                        sticky = number(item.value);
+                        break;
+                }
+            }
+            return of(version, urls, order, sticky);
+        }
+
+        static Settings fromJson(String text) {
+            try {
+                JSONObject object = new JSONObject(text);
+                return of(object.getDouble("v"), strings(object.getJSONArray("ws")),
+                        strings(object.getJSONArray("order")), object.getDouble("sticky_s"));
+            } catch (JSONException e) {
+                return null;
+            }
+        }
+
+        String toJson() {
+            try {
+                JSONObject object = new JSONObject();
+                object.put("v", 1);
+                object.put("ws", new JSONArray(urls));
+                object.put("order", new JSONArray(edgesFirst ? Arrays.asList("edge", "direct") : Arrays.asList("direct", "edge")));
+                object.put("sticky_s", stickyS);
+                return object.toString();
+            } catch (JSONException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        private static Settings of(double version, List<String> urls, List<String> order, double sticky) {
+            if (version != 1 || urls == null || order == null) {
+                return null;
+            }
+            if (urls.isEmpty() || urls.size() > MAX_EDGES || new HashSet<>(urls).size() != urls.size()) {
+                return null;
+            }
+            for (String url : urls) {
+                if (!isEdgeUrl(url)) {
+                    return null;
+                }
+            }
+            if (order.size() != 2 || !new HashSet<>(order).equals(new HashSet<>(Arrays.asList("direct", "edge")))) {
+                return null;
+            }
+            if (sticky != Math.rint(sticky) || sticky < MIN_STICKY_S || sticky > MAX_STICKY_S) {
+                return null;
+            }
+            return new Settings(urls, order.get(0).equals("edge"), (int) sticky);
+        }
+
+        private static boolean isEdgeUrl(String url) {
+            try {
+                URI uri = new URI(url);
+                return "wss".equals(uri.getScheme()) && uri.getHost() != null && !uri.getHost().isEmpty()
+                        && uri.getRawUserInfo() == null && uri.getRawQuery() == null && uri.getRawFragment() == null
+                        && uri.getRawPath() != null && uri.getRawPath().startsWith("/")
+                        && (uri.getPort() == -1 || uri.getPort() > 0 && uri.getPort() < 65536);
+            } catch (URISyntaxException e) {
+                return false;
+            }
+        }
+
+        private static double number(TLRPC.JSONValue value) {
+            return value instanceof TLRPC.TL_jsonNumber ? ((TLRPC.TL_jsonNumber) value).value : Double.NaN;
+        }
+
+        private static List<String> strings(TLRPC.JSONValue value) {
+            if (!(value instanceof TLRPC.TL_jsonArray)) {
+                return null;
+            }
+            List<String> out = new ArrayList<>();
+            for (TLRPC.JSONValue item : ((TLRPC.TL_jsonArray) value).value) {
+                if (!(item instanceof TLRPC.TL_jsonString)) {
+                    return null;
+                }
+                out.add(((TLRPC.TL_jsonString) item).value);
+            }
+            return out;
+        }
+
+        private static List<String> strings(JSONArray array) throws JSONException {
+            List<String> out = new ArrayList<>();
+            for (int i = 0; i < array.length(); i++) {
+                out.add(array.getString(i));
+            }
+            return out;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof Settings)) {
+                return false;
+            }
+            Settings other = (Settings) o;
+            return urls.equals(other.urls) && edgesFirst == other.edgesFirst && stickyS == other.stickyS;
+        }
+
+        @Override
+        public int hashCode() {
+            return (urls.hashCode() * 31 + (edgesFirst ? 1 : 0)) * 31 + stickyS;
+        }
+    }
+
+    private static final class Edge {
+        final String url;
+        final String host;
+        final ServerSocket server;
+        final Set<Connection> connections = new HashSet<>();
+        boolean closed;
+
+        private Edge(String url, ServerSocket server) {
+            this.url = url;
+            this.host = URI.create(url).getHost();
+            this.server = server;
+        }
+
+        static Edge open(String url) {
+            ServerSocket server = null;
+            try {
+                server = new ServerSocket(0, MAX_CONNECTIONS, InetAddress.getByName("127.0.0.1"));
+            } catch (IOException e) {
+                FileLog.e(e);
+            }
+            Edge edge = new Edge(url, server);
+            if (server != null) {
+                io.execute(edge::acceptLoop);
+            }
+            return edge;
+        }
+
+        int port() {
+            return server != null ? server.getLocalPort() : 0;
+        }
+
+        private void acceptLoop() {
+            while (true) {
+                Socket socket;
+                try {
+                    socket = server.accept();
+                } catch (IOException e) {
+                    synchronized (lock) {
+                        if (!closed) {
+                            FileLog.e(e);
+                        }
+                    }
+                    return;
+                }
+                Connection connection = new Connection(this, socket);
+                synchronized (lock) {
+                    if (closed || connections.size() >= MAX_CONNECTIONS) {
+                        closeQuietly(socket);
+                        continue;
+                    }
+                    connections.add(connection);
+                    onEdgeUsed();
+                }
+                io.execute(connection::run);
+            }
+        }
+
+        // Under the lock.
+        void close() {
+            closed = true;
+            closeQuietly(server);
+            for (Connection connection : new ArrayList<>(connections)) {
+                connection.close();
+            }
+            connections.clear();
+        }
+    }
+
+    // One connection of tgnet: its local socket and its WebSocket to the edge.
+    private static final class Connection extends WebSocketAdapter {
+        private final Edge edge;
+        private final Socket local;
+        private volatile WebSocket socket;
+        private volatile boolean open;
+        private volatile long lastReceived = SystemClock.elapsedRealtime();
+        private boolean closed;
+
+        Connection(Edge edge, Socket local) {
+            this.edge = edge;
+            this.local = local;
+        }
+
+        void run() {
+            try {
+                local.setTcpNoDelay(true);
+                WebSocket ws = new WebSocketFactory()
+                        .setConnectionTimeout(CONNECT_TIMEOUT)
+                        .setSocketTimeout((int) SILENCE)
+                        .setServerName(edge.host)
+                        .createSocket(edge.url);
+                ws.addProtocol("binary");
+                ws.addHeader("User-Agent", "Pluma");
+                ws.setFrameQueueSize(FRAME_QUEUE);
+                ws.addListener(this);
+                synchronized (lock) {
+                    if (closed) {
+                        return;
+                    }
+                    socket = ws;
+                }
+                ws.connect();
+                open = true;
+                synchronized (lock) {
+                    if (closed) {
+                        ws.disconnect();
+                        return;
+                    }
+                }
+                lastReceived = SystemClock.elapsedRealtime();
+                InputStream in = local.getInputStream();
+                byte[] buffer = new byte[MAX_MESSAGE];
+                int count;
+                while ((count = in.read(buffer)) > 0) {
+                    ws.sendBinary(Arrays.copyOf(buffer, count));
+                }
+            } catch (IOException | WebSocketException | RuntimeException e) {
+                // The edge or tgnet went away; both sides close.
+            } finally {
+                close();
+            }
+        }
+
+        @Override
+        public void onFrame(WebSocket websocket, WebSocketFrame frame) {
+            lastReceived = SystemClock.elapsedRealtime();
+        }
+
+        @Override
+        public void onBinaryMessage(WebSocket websocket, byte[] binary) {
+            lastReceived = SystemClock.elapsedRealtime();
+            try {
+                local.getOutputStream().write(binary);
+            } catch (IOException e) {
+                close();
+            }
+        }
+
+        @Override
+        public void onDisconnected(WebSocket websocket, WebSocketFrame serverCloseFrame, WebSocketFrame clientCloseFrame, boolean closedByServer) {
+            close();
+        }
+
+        void close() {
+            WebSocket ws;
+            synchronized (lock) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                edge.connections.remove(this);
+                ws = socket;
+            }
+            closeQuietly(local);
+            if (ws != null) {
+                if (open) {
+                    ws.disconnect();
+                } else {
+                    closeQuietly(ws.getSocket());
+                }
+            }
+        }
+    }
+}
+"""
+
+EDGE_EDITS = (
+    # DC 1: the labels after A-002's direct addresses, none until the bridge gives them.
+    (EDGE_MANAGER_CPP,
+     EDGE_INIT_ANCHOR,
+     "        datacenters[1] = datacenter;\n    }\n"
+     "    // pluma: the edge labels of DC 1 (A-128); none until PlumaEdgeBridge gives them, so a\n"
+     "    // label stored by the last run goes and the client starts on the direct address.\n"
+     "    datacenters[1]->applyPlumaEdges();\n}\n"),
+    (EDGE_MANAGER_CPP,
+     "void ConnectionsManager::setLangCode(std::string langCode) {\n",
+     "// pluma: the edges of the server (task 109 of the server repository, A-128). An edge is an\n"
+     "// address label of DC 1, which ConnectionSocket opens as the local bridge of that edge\n"
+     "// (PlumaEdgeBridge.java); the ports of the bridges come in the order of the edges, 0 for a\n"
+     "// bridge that is not open.\n"
+     f'static const char *const PLUMA_EDGE_LABEL = "{EDGE_LABEL}";\n'
+     f"static const size_t PLUMA_MAX_EDGES = {EDGE_URLS_LIMIT};\n"
+     "\n"
+     "void ConnectionsManager::setPlumaEdges(std::vector<uint16_t> ports, bool edgesFirst) {\n"
+     "    if (ports.size() > PLUMA_MAX_EDGES) {\n"
+     "        ports.resize(PLUMA_MAX_EDGES);\n"
+     "    }\n"
+     "    scheduleTask([&, ports, edgesFirst] {\n"
+     "        plumaEdgePorts = ports;\n"
+     "        plumaEdgesFirst = edgesFirst;\n"
+     "        Datacenter *datacenter = getDatacenterWithId(1);\n"
+     "        if (datacenter != nullptr) {\n"
+     "            datacenter->applyPlumaEdges();\n"
+     "            saveConfig();\n"
+     "        }\n"
+     "    });\n"
+     "}\n"
+     "\n"
+     "// pluma: sticky_s after the client went through an edge, the next connection of DC 1 tries the\n"
+     "// direct address first again; the open one stays.\n"
+     "void ConnectionsManager::returnFromPlumaEdge() {\n"
+     "    scheduleTask([&] {\n"
+     "        Datacenter *datacenter = getDatacenterWithId(1);\n"
+     "        if (datacenter != nullptr) {\n"
+     "            datacenter->returnFromPlumaEdge();\n"
+     "        }\n"
+     "    });\n"
+     "}\n"
+     "\n"
+     "int32_t ConnectionsManager::plumaEdgeIndex(const std::string &address) {\n"
+     "    static const std::string label = PLUMA_EDGE_LABEL;\n"
+     "    if (address.size() != label.size() + 1 || address.compare(0, label.size(), label) != 0) {\n"
+     "        return -1;\n"
+     "    }\n"
+     "    int32_t index = address[label.size()] - '0';\n"
+     "    return index >= 0 && (size_t) index < PLUMA_MAX_EDGES ? index : -1;\n"
+     "}\n"
+     "\n"
+     "std::string ConnectionsManager::plumaEdgeLabel(size_t index) {\n"
+     "    return PLUMA_EDGE_LABEL + to_string_int32((int32_t) index);\n"
+     "}\n"
+     "\n"
+     "// pluma: the port of an edge's bridge; never through a proxy of the user or a proxy check.\n"
+     "uint16_t ConnectionsManager::plumaEdgePort(int32_t index, bool proxied) {\n"
+     "    if (proxied || !proxyAddress.empty() || index < 0 || (size_t) index >= plumaEdgePorts.size()) {\n"
+     "        return 0;\n"
+     "    }\n"
+     "    return plumaEdgePorts[index];\n"
+     "}\n"
+     "\n"
+     "void ConnectionsManager::setLangCode(std::string langCode) {\n"),
+    (EDGE_MANAGER_H,
+     "    void setProxySettings(std::string address, uint16_t port, std::string username, std::string password, std::string secret);\n",
+     "    void setProxySettings(std::string address, uint16_t port, std::string username, std::string password, std::string secret);\n"
+     "    // pluma: the edges of the server (A-128, PlumaEdgeBridge.java).\n"
+     "    void setPlumaEdges(std::vector<uint16_t> ports, bool edgesFirst);\n"
+     "    void returnFromPlumaEdge();\n"
+     "    static int32_t plumaEdgeIndex(const std::string &address);\n"
+     "    static std::string plumaEdgeLabel(size_t index);\n"),
+    (EDGE_MANAGER_H,
+     "    uint16_t proxyPort = 1080;\n",
+     "    uint16_t proxyPort = 1080;\n"
+     "    // pluma: the ports of the edge bridges in the order of the edges, and whether the edges\n"
+     "    // go before the direct addresses of DC 1 (A-128).\n"
+     "    std::vector<uint16_t> plumaEdgePorts;\n"
+     "    bool plumaEdgesFirst = false;\n"
+     "    uint16_t plumaEdgePort(int32_t index, bool proxied);\n"),
+    (EDGE_DATACENTER_H,
+     "    bool isRepeatCheckingAddresses();\n",
+     "    bool isRepeatCheckingAddresses();\n"
+     "    // pluma: the edges of the server (A-128, ConnectionsManager::setPlumaEdges).\n"
+     "    void applyPlumaEdges();\n"
+     "    void returnFromPlumaEdge();\n"
+     "    bool plumaDirectFroze(const std::string &address, bool frozen);\n"),
+    (EDGE_DATACENTER_H,
+     "    bool repeatCheckingAddresses = false;\n",
+     "    bool repeatCheckingAddresses = false;\n"
+     "    // pluma: the layout of the edge labels last applied, and the frozen direct connections in a row.\n"
+     "    size_t plumaEdgeCount = 0;\n"
+     "    bool plumaEdgesFirst = false;\n"
+     "    uint32_t plumaFrozenCount = 0;\n"
+     "    int64_t plumaLastFrozenTime = 0;\n"
+     "    void applyPlumaEdges(std::vector<TcpAddress> &addresses, uint32_t &addressNum, uint32_t &portNum, uint32_t flags, bool layoutChanged);\n"
+     "    static bool plumaMoveTo(std::vector<TcpAddress> &addresses, uint32_t &addressNum, uint32_t &portNum, bool toEdge);\n"),
+    # A label has no port slots: the next address follows it.
+    (EDGE_DATACENTER_CPP,
+     "        tryNextPort = (currentAddress->flags & TcpAddressFlagStatic) == 0;\n",
+     "        // pluma: an edge label has no ports to try (A-128).\n"
+     "        tryNextPort = (currentAddress->flags & TcpAddressFlagStatic) == 0 && ConnectionsManager::plumaEdgeIndex(currentAddress->address) < 0;\n"),
+    (EDGE_DATACENTER_CPP,
+     "void Datacenter::replaceAddresses(std::vector<TcpAddress> &newAddresses, uint32_t flags) {\n",
+     "// pluma: the edges of the server (task 109 of the server repository, A-128). The labels go after\n"
+     "// the direct addresses of DC 1, or before them when the server orders the edges first; a list\n"
+     "// without a direct address gets none. A new layout starts the list from its first address, the\n"
+     "// same layout keeps the current one.\n"
+     "void Datacenter::applyPlumaEdges() {\n"
+     "    if (datacenterId != 1) {\n"
+     "        return;\n"
+     "    }\n"
+     "    ConnectionsManager &manager = ConnectionsManager::getInstance(instanceNum);\n"
+     "    bool layoutChanged = manager.plumaEdgePorts.size() != plumaEdgeCount || manager.plumaEdgesFirst != plumaEdgesFirst;\n"
+     "    plumaEdgeCount = manager.plumaEdgePorts.size();\n"
+     "    plumaEdgesFirst = manager.plumaEdgesFirst;\n"
+     "    applyPlumaEdges(addressesIpv4, currentAddressNumIpv4, currentPortNumIpv4, 0, layoutChanged);\n"
+     "    applyPlumaEdges(addressesIpv6, currentAddressNumIpv6, currentPortNumIpv6, TcpAddressFlagIpv6, layoutChanged);\n"
+     "    plumaFrozenCount = 0;\n"
+     "    storeCurrentAddressAndPortNum();\n"
+     "}\n"
+     "\n"
+     "void Datacenter::applyPlumaEdges(std::vector<TcpAddress> &addresses, uint32_t &addressNum, uint32_t &portNum, uint32_t flags, bool layoutChanged) {\n"
+     "    std::string current = addressNum < addresses.size() ? addresses[addressNum].address : \"\";\n"
+     "    std::vector<TcpAddress> direct;\n"
+     "    for (auto &address : addresses) {\n"
+     "        if (ConnectionsManager::plumaEdgeIndex(address.address) < 0) {\n"
+     "            direct.push_back(address);\n"
+     "        }\n"
+     "    }\n"
+     "    std::vector<TcpAddress> edges;\n"
+     "    if (!direct.empty()) {\n"
+     "        for (size_t a = 0; a < plumaEdgeCount; a++) {\n"
+     "            edges.emplace_back(ConnectionsManager::plumaEdgeLabel(a), 443, flags, \"\");\n"
+     "        }\n"
+     "    }\n"
+     "    std::vector<TcpAddress> result = plumaEdgesFirst ? edges : direct;\n"
+     "    std::vector<TcpAddress> &rest = plumaEdgesFirst ? direct : edges;\n"
+     "    result.insert(result.end(), rest.begin(), rest.end());\n"
+     "    uint32_t num = 0;\n"
+     "    bool found = false;\n"
+     "    if (!layoutChanged) {\n"
+     "        for (size_t a = 0; a < result.size(); a++) {\n"
+     "            if (result[a].address == current) {\n"
+     "                num = (uint32_t) a;\n"
+     "                found = true;\n"
+     "                break;\n"
+     "            }\n"
+     "        }\n"
+     "    }\n"
+     "    addresses = result;\n"
+     "    addressNum = num;\n"
+     "    if (!found) {\n"
+     "        portNum = 0;\n"
+     "    }\n"
+     "}\n"
+     "\n"
+     "// pluma: the current address of the list to the first edge label (toEdge) or the first direct\n"
+     "// address, unless it is one already.\n"
+     "bool Datacenter::plumaMoveTo(std::vector<TcpAddress> &addresses, uint32_t &addressNum, uint32_t &portNum, bool toEdge) {\n"
+     "    if (addressNum < addresses.size() && (ConnectionsManager::plumaEdgeIndex(addresses[addressNum].address) >= 0) == toEdge) {\n"
+     "        return false;\n"
+     "    }\n"
+     "    for (size_t a = 0; a < addresses.size(); a++) {\n"
+     "        if ((ConnectionsManager::plumaEdgeIndex(addresses[a].address) >= 0) == toEdge) {\n"
+     "            addressNum = (uint32_t) a;\n"
+     "            portNum = 0;\n"
+     "            return true;\n"
+     "        }\n"
+     "    }\n"
+     "    return false;\n"
+     "}\n"
+     "\n"
+     "void Datacenter::returnFromPlumaEdge() {\n"
+     "    plumaFrozenCount = 0;\n"
+     "    bool moved = plumaMoveTo(addressesIpv4, currentAddressNumIpv4, currentPortNumIpv4, false);\n"
+     "    moved = plumaMoveTo(addressesIpv6, currentAddressNumIpv6, currentPortNumIpv6, false) || moved;\n"
+     "    if (moved) {\n"
+     "        storeCurrentAddressAndPortNum();\n"
+     "    }\n"
+     "}\n"
+     "\n"
+     "// pluma: a generic connection of DC 1 to a direct address closed; frozen: it was established\n"
+     "// and timed out waiting for an answer (ConnectionSocket::checkTimeout). Twice in a row, each\n"
+     "// within 60 s of the previous, put DC 1 on its first edge; true then.\n"
+     "bool Datacenter::plumaDirectFroze(const std::string &address, bool frozen) {\n"
+     "    ConnectionsManager &manager = ConnectionsManager::getInstance(instanceNum);\n"
+     "    if (datacenterId != 1 || plumaEdgeCount == 0 || !frozen || !manager.proxyAddress.empty() || ConnectionsManager::plumaEdgeIndex(address) >= 0) {\n"
+     "        plumaFrozenCount = 0;\n"
+     "        return false;\n"
+     "    }\n"
+     "    int64_t now = manager.getCurrentTimeMonotonicMillis();\n"
+     "    if (plumaFrozenCount != 0 && now - plumaLastFrozenTime > 60 * 1000) {\n"
+     "        plumaFrozenCount = 0;\n"
+     "    }\n"
+     "    plumaLastFrozenTime = now;\n"
+     "    if (++plumaFrozenCount < 2) {\n"
+     "        return false;\n"
+     "    }\n"
+     "    plumaFrozenCount = 0;\n"
+     "    bool moved = plumaMoveTo(addressesIpv4, currentAddressNumIpv4, currentPortNumIpv4, true);\n"
+     "    moved = plumaMoveTo(addressesIpv6, currentAddressNumIpv6, currentPortNumIpv6, true) || moved;\n"
+     "    return moved;\n"
+     "}\n"
+     "\n"
+     "void Datacenter::replaceAddresses(std::vector<TcpAddress> &newAddresses, uint32_t flags) {\n"),
+    # Addresses from the server (help.getConfig, DC_UPDATE) never bring a label, and keep the edges.
+    (EDGE_DATACENTER_CPP,
+     "    }\n}\n\nvoid Datacenter::serializeToStream(NativeByteBuffer *stream) {\n",
+     "    }\n"
+     "    // pluma: addresses of the server never carry an edge label; the labels of DC 1 stay (A-128).\n"
+     "    if (datacenterId == 1 && (flags & ~TcpAddressFlagIpv6) == 0) {\n"
+     "        applyPlumaEdges();\n"
+     "    }\n"
+     "}\n\nvoid Datacenter::serializeToStream(NativeByteBuffer *stream) {\n"),
+    # A frozen direct connection: twice in a row, the first edge instead of the next port.
+    (EDGE_CONNECTION_CPP,
+     "    bool switchToNextPort = reason == 2 && wasConnected && (!hasSomeDataSinceLastConnect || currentDatacenter->isCustomPort(currentAddressFlags)) || forceNextPort;\n",
+     "    bool switchToNextPort = reason == 2 && wasConnected && (!hasSomeDataSinceLastConnect || currentDatacenter->isCustomPort(currentAddressFlags)) || forceNextPort;\n"
+     "    // pluma: a direct connection that froze twice in a row goes to the first edge (A-128).\n"
+     "    bool toPlumaEdge = connectionType == ConnectionTypeGeneric && currentDatacenter->plumaDirectFroze(hostAddress, reason == 2 && wasConnected);\n"),
+    (EDGE_CONNECTION_CPP,
+     "            if (failedConnectionCount > willRetryConnectCount || switchToNextPort) {\n",
+     "            if (toPlumaEdge) {\n"
+     "                failedConnectionCount = 0;\n"
+     "            } else if (failedConnectionCount > willRetryConnectCount || switchToNextPort) {\n"),
+    # A label is the local bridge of its edge.
+    (EDGE_SOCKET_CPP,
+     "    ConnectionsManager::getInstance(instanceNum).attachConnection(this);\n",
+     "    ConnectionsManager::getInstance(instanceNum).attachConnection(this);\n"
+     "\n"
+     "    // pluma: an edge label of DC 1 is the local bridge of that edge (A-128). With a proxy on, or\n"
+     "    // with no bridge, the label fails at once and tgnet goes on to the next address.\n"
+     "    int32_t plumaEdge = ConnectionsManager::plumaEdgeIndex(address);\n"
+     "    if (plumaEdge >= 0) {\n"
+     "        uint16_t bridgePort = ConnectionsManager::getInstance(instanceNum).plumaEdgePort(plumaEdge, !overrideProxyAddress.empty());\n"
+     "        if (bridgePort == 0) {\n"
+     "            closeSocket(1, -1);\n"
+     "            return;\n"
+     "        }\n"
+     "        address = \"127.0.0.1\";\n"
+     "        port = bridgePort;\n"
+     "        ipv6 = false;\n"
+     "        isIpv6 = false;\n"
+     "        currentAddress = address;\n"
+     "        currentPort = port;\n"
+     "    }\n"),
+    # JNI: the ports of the bridges and the return to the direct address.
+    (EDGE_WRAPPER,
+     "void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {\n",
+     "// pluma: the edges of the server (A-128): the ports of the bridges of PlumaEdgeBridge.java.\n"
+     "void setPlumaEdges(JNIEnv *env, jclass c, jint instanceNum, jintArray ports, jboolean edgesFirst) {\n"
+     "    std::vector<uint16_t> values;\n"
+     "    jsize count = ports != nullptr ? env->GetArrayLength(ports) : 0;\n"
+     "    if (count > 0) {\n"
+     "        jint *elements = env->GetIntArrayElements(ports, nullptr);\n"
+     "        if (elements != nullptr) {\n"
+     "            for (jsize a = 0; a < count; a++) {\n"
+     "                values.push_back(elements[a] > 0 && elements[a] < 65536 ? (uint16_t) elements[a] : 0);\n"
+     "            }\n"
+     "            env->ReleaseIntArrayElements(ports, elements, JNI_ABORT);\n"
+     "        }\n"
+     "    }\n"
+     "    ConnectionsManager::getInstance(instanceNum).setPlumaEdges(values, edgesFirst);\n"
+     "}\n"
+     "\n"
+     "void returnFromPlumaEdge(JNIEnv *env, jclass c, jint instanceNum) {\n"
+     "    ConnectionsManager::getInstance(instanceNum).returnFromPlumaEdge();\n"
+     "}\n"
+     "\n"
+     "void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {\n"),
+    (EDGE_WRAPPER,
+     '        {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},\n',
+     '        {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},\n'
+     '        {"native_setPlumaEdges", "(I[IZ)V", (void *) setPlumaEdges},\n'
+     '        {"native_returnFromPlumaEdge", "(I)V", (void *) returnFromPlumaEdge},\n'),
+    (EDGE_MANAGER_JAVA,
+     "    public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);\n",
+     "    public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);\n"
+     "    // pluma: the edges of the server (A-128, PlumaEdgeBridge).\n"
+     "    public static native void native_setPlumaEdges(int currentAccount, int[] ports, boolean edgesFirst);\n"
+     "    public static native void native_returnFromPlumaEdge(int currentAccount);\n"),
+    # The account's tgnet takes the edges before it starts.
+    (EDGE_MANAGER_JAVA,
+     "        native_init(currentAccount, ",
+     "        org.telegram.utils.proxy.PlumaEdgeBridge.attach(currentAccount); // pluma: the server's edges (A-128)\n"
+     "        native_init(currentAccount, "),
+    (EDGE_MESSAGES,
+     "        changed = config.apply(editor, object);\n",
+     "        changed = config.apply(editor, object);\n"
+     "        org.telegram.utils.proxy.PlumaEdgeBridge.applyAppConfig(object); // pluma: pluma_edge (A-128)\n"),
+)
+
+# What PlumaEdgeBridge relies on in upstream: its package (the WEB proxy's, whose local
+# ServerSocket it follows), the WebSocket library, the accounts, the context for its
+# preferences, the JSON of the app config.
+EDGE_USES = (
+    (f"{EDGE_JAVA_DIR}/utils/proxy/WebProxyTransport.java",
+     "public final class WebProxyTransport implements ForegroundDetector.Listener {\n"),
+    ("TMessagesProj/build.gradle", "    implementation 'com.neovisionaries:nv-websocket-client:2.14'\n"),
+    (f"{EDGE_JAVA_DIR}/messenger/UserConfig.java", "    public final static int MAX_ACCOUNT_COUNT = 4;\n"),
+    (f"{EDGE_JAVA_DIR}/messenger/ApplicationLoader.java", "    public static volatile Context applicationContext;\n"),
+    (f"{EDGE_JAVA_DIR}/tgnet/TLRPC.java", "    public static abstract class JSONValue extends TLObject {\n"),
+    # tgnet: initDatacenters, where DC 1 gets its labels, and the timeout of a connection with a
+    # request waiting, which makes a frozen direct connection count.
+    (EDGE_MANAGER_CPP, "    return ipStrategy;\n}\n\nvoid ConnectionsManager::initDatacenters() {\n"),
+    (EDGE_SOCKET_CPP, "        if (!onConnectedSent || hasPendingRequests()) {\n            closeSocket(2, 0);\n"),
+)
+
+
+def edge_java(c):
+    """PlumaEdgeBridge.java with the build's edges."""
+    urls = ", ".join(f'"{u}"' for u in c.edge_urls)
+    return EDGE_JAVA.replace(EDGE_BUILT_IN_LINE, f"    private static final String[] BUILT_IN = {{{urls}}};\n")
+
+
+def edges(tree, c):
+    # A build without edges gets no edit at all (PLUMA_EDGE_WS_URLS empty).
+    if not c.edge_urls:
+        return
+    # Every anchor first, and no bridge yet: a tree that is already patched fails before
+    # anything is written twice.
+    if (tree.root / EDGE_FILE).exists():
+        raise PatchError(f"{EDGE_FILE}: the file is already there")
+    for rel, old, _ in EDGE_EDITS:
+        tree.expect(rel, old)
+    for rel, text in EDGE_USES:
+        tree.expect(rel, text)
+    for rel, old, new in EDGE_EDITS:
+        tree.replace(rel, old, new)
+    tree.write(EDGE_FILE, edge_java(c))
+
+
+def verify_edges(tree, c):
+    java = tree.root / EDGE_FILE
+    if not c.edge_urls:
+        if java.exists():
+            raise PatchError(f"{EDGE_FILE}: a build without edges has the bridge")
+        for rel in sorted({rel for rel, _, _ in EDGE_EDITS}):
+            text = tree.read(rel)
+            if "plumaedge" in text.lower() or EDGE_LABEL in text:
+                raise PatchError(f"{rel}: an edge edit in a build without edges")
+        return
+    for rel, old, new in EDGE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or text.count(old) != new.count(old):
+            changed = next(line for line in new.splitlines() if line not in old.splitlines())
+            raise PatchError(f"{rel}: the edge edit {changed.strip()!r} is not there")
+    for rel, used in EDGE_USES:
+        tree.expect(rel, used)
+    if not java.is_file() or java.read_text(encoding="utf-8") != edge_java(c):
+        raise PatchError(f"{EDGE_FILE}: not the bridge of this build's edges")
+    # The contract: the build's edges are wss://, the direct address goes first by default, and
+    # one label prefix ties tgnet to the bridge.
+    text = java.read_text(encoding="utf-8")
+    built_in = re.findall(r'"([^"]*)"', re.search(r"String\[\] BUILT_IN = \{([^}]*)\};", text).group(1))
+    if built_in != c.edge_urls or not all(u.startswith("wss://") for u in built_in):
+        raise PatchError(f"{EDGE_FILE}: the build's edges are not its wss:// URLs")
+    if text.count("return new Settings(Arrays.asList(BUILT_IN), false, BUILT_IN_STICKY_S);") != 1:
+        raise PatchError(f"{EDGE_FILE}: the build's edges do not come after the direct address")
+    manager = tree.read(EDGE_MANAGER_CPP)
+    if manager.count(f'PLUMA_EDGE_LABEL = "{EDGE_LABEL}";') != 1 or manager.count("datacenters[1]->applyPlumaEdges();") != 1:
+        raise PatchError(f"{EDGE_MANAGER_CPP}: DC 1 has no edge labels")
 
 
 # --- birthdays ---------------------------------------------------------------
@@ -4163,6 +5184,7 @@ def verify(tree, c):
     verify_premium_for_everyone(tree)
     verify_business(tree)
     verify_not_served(tree)
+    verify_edges(tree, c)
     verify_no_ai_editor(tree)
     verify_service_account(tree)
     verify_self_update(tree, c)
@@ -8035,12 +9057,13 @@ def main(argv=None):
     ap.add_argument("--build", type=int, default=0, help="Pluma's build number, the fourth part of versionName")
     ap.add_argument("--target", choices=("server", "dev"), default="server",
                     help="dev also takes http:// to the stand's CDN (ci/configure.sh)")
+    ap.add_argument("--edge-ws-urls", default="", help="the server's edges, wss:// URLs separated by commas")
     a = ap.parse_args(argv)
     try:
         app = load_env(a.app)
         c = Config(load_env(a.upstream), app, a.server_ipv4, a.server_port, a.server_ipv6,
                    pathlib.Path(a.rsa_public_key).read_text(), a.abis or app.get("PLUMA_ABIS", ""),
-                   a.ccache, a.google_services, a.build, a.target)
+                   a.ccache, a.google_services, a.build, a.target, a.edge_ws_urls)
         tree = Tree(a.source)
         patch(tree, c)
         verify(tree, c)
@@ -8048,7 +9071,8 @@ def main(argv=None):
         print(f"patch: {e}", file=sys.stderr)
         return 1
     print(f"patch: {c.package} \"{c.app_name}\" {c.version_name}, layer {c.layer}, server key {c.fingerprint:#018x}, "
-          f"ABIs {' '.join(c.abis)}, Firebase {'given' if c.google_services else 'placeholder'}, {c.target} build")
+          f"ABIs {' '.join(c.abis)}, Firebase {'given' if c.google_services else 'placeholder'}, {c.target} build, "
+          f"{len(c.edge_urls)} edges")
     return 0
 
 

@@ -2573,6 +2573,281 @@ class CdnHttpsTest(unittest.TestCase):
             patch.verify_cdn_https(tree, c)
 
 
+class EdgesTest(unittest.TestCase):
+    """The server's edges (task 109 of the server repository, A-128)."""
+
+    URLS = "wss://e2x.gcorecdn.com/apiws,wss://ru.pluma.chat/apiws"
+
+    # The upstream files, made of the texts the edits expect and the places the bridge uses.
+    def tree(self, root, edits=patch.EDGE_EDITS, uses=patch.EDGE_USES):
+        files = {}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x();\n"
+        for rel, text in uses:
+            files[rel] = files.get(rel, "") + text + "x();\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        (root / "TMessagesProj").mkdir(exist_ok=True)
+        return patch.Tree(root)
+
+    def java(self, tree):
+        return tree.read(patch.EDGE_FILE)
+
+    @staticmethod
+    def damaged(text):
+        """The text with a comment after its first letter: upstream changed that line."""
+        i = len(text) - len(text.lstrip()) + 1
+        return text[:i] + "/**/" + text[i:]
+
+    def test_config(self):
+        self.assertEqual(config().edge_urls, [])
+        self.assertEqual(config(edge_ws_urls=" ").edge_urls, [])
+        self.assertEqual(config(edge_ws_urls=self.URLS).edge_urls,
+                         ["wss://e2x.gcorecdn.com/apiws", "wss://ru.pluma.chat/apiws"])
+        self.assertEqual(config(edge_ws_urls="wss://a.example.net:8443/apiws").edge_urls,
+                         ["wss://a.example.net:8443/apiws"])
+        four = ",".join(f"wss://e{i}.example.net/apiws" for i in range(4))
+        self.assertEqual(len(config(edge_ws_urls=four).edge_urls), 4)
+        for urls in (
+            "https://e2x.gcorecdn.com/apiws",       # not wss://
+            "ws://e2x.gcorecdn.com/apiws",
+            "wss://203.0.113.7/apiws",               # an address, not a name
+            "wss://[2001:db8::1]/apiws",
+            "wss://localhost/apiws",
+            "wss://E2X.gcorecdn.com/apiws",          # not lowercase
+            "wss://e2x.gcorecdn.com",                # no path
+            "wss://e2x.gcorecdn.com/apiws?x=1",
+            "wss://user@e2x.gcorecdn.com/apiws",
+            "wss://e2x.gcorecdn.com:0/apiws",
+            "wss://e2x.gcorecdn.com:70000/apiws",
+            "wss://-e.gcorecdn.com/apiws",
+            "wss://web.telegram.org/apiws",          # Telegram's hosts
+            "wss://t.me/apiws",
+            "wss://pluma.telegram.org/apiws",
+            "wss://a.example.net/apiws,,wss://b.example.net/apiws",
+            "wss://a.example.net/apiws,wss://a.example.net/apiws",
+            four + ",wss://e4.example.net/apiws",
+        ):
+            with self.subTest(urls=urls), self.assertRaisesRegex(patch.PatchError, "PLUMA_EDGE_WS_URLS"):
+                config(edge_ws_urls=urls)
+
+    def test_applies(self):
+        c = config(edge_ws_urls=self.URLS)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_edges(tree, c)
+            patch.edges(tree, c)
+            patch.verify_edges(tree, c)
+            self.assertIn('    private static final String[] BUILT_IN = {"wss://e2x.gcorecdn.com/apiws", '
+                          '"wss://ru.pluma.chat/apiws"};\n', self.java(tree))
+            self.assertIn('static const char *const PLUMA_EDGE_LABEL = "pluma-edge-";\n', tree.read(patch.EDGE_MANAGER_CPP))
+            self.assertIn('{"native_setPlumaEdges", "(I[IZ)V", (void *) setPlumaEdges},\n', tree.read(patch.EDGE_WRAPPER))
+            # A second run stops before it writes anything twice.
+            with self.assertRaisesRegex(patch.PatchError, "already there"):
+                patch.edges(tree, c)
+
+    def test_no_edges(self):
+        # An empty PLUMA_EDGE_WS_URLS makes no edit at all, and the check holds it to that.
+        c = config()
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            before = {rel: tree.read(rel) for rel, _, _ in patch.EDGE_EDITS}
+            patch.edges(tree, c)
+            patch.verify_edges(tree, c)
+            self.assertEqual({rel: tree.read(rel) for rel in before}, before)
+            self.assertFalse((tree.root / patch.EDGE_FILE).exists())
+            for rel, old, new in patch.EDGE_EDITS:
+                with self.subTest(edit=new.strip().splitlines()[-1][:60]):
+                    tree.write(rel, before[rel].replace(old, new))
+                    if "plumaedge" in new.lower() or patch.EDGE_LABEL in new:
+                        with self.assertRaisesRegex(patch.PatchError, "build without edges"):
+                            patch.verify_edges(tree, c)
+                    tree.write(rel, before[rel])
+            tree.write(patch.EDGE_FILE, patch.edge_java(config(edge_ws_urls=self.URLS)))
+            with self.assertRaisesRegex(patch.PatchError, "build without edges has the bridge"):
+                patch.verify_edges(tree, c)
+
+    def test_every_edit_names_the_edges(self):
+        # So that a build without edges can be told apart from one with an edit left behind.
+        for rel, old, new in patch.EDGE_EDITS:
+            with self.subTest(edit=new.strip().splitlines()[-1][:60]):
+                self.assertTrue("plumaedge" in new.lower() or patch.EDGE_LABEL in new)
+
+    def test_upstream_changed(self):
+        # DAMAGE: each anchor of the edits (DC 1, the labels, the frozen connection, the socket,
+        # JNI, the app config) and each place the bridge uses, changed in upstream, stops the
+        # patch with the file's name before anything is written.
+        c = config(edge_ws_urls=self.URLS)
+        for i, (rel, old, new) in enumerate(patch.EDGE_EDITS):
+            edits = [e if j != i else (rel, self.damaged(old), new) for j, e in enumerate(patch.EDGE_EDITS)]
+            with self.subTest(edit=new.strip().splitlines()[-1][:60]), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = {r: tree.read(r) for r, _, _ in edits}
+                with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": 0 occurrences"):
+                    patch.edges(tree, c)
+                self.assertFalse((tree.root / patch.EDGE_FILE).exists())
+                self.assertEqual({r: tree.read(r) for r in before}, before)
+        for i, (rel, text) in enumerate(patch.EDGE_USES):
+            uses = [u if j != i else (rel, self.damaged(text)) for j, u in enumerate(patch.EDGE_USES)]
+            with self.subTest(uses=text.strip()[:60]), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), uses=uses)
+                with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": 0 occurrences"):
+                    patch.edges(tree, c)
+        # An anchor upstream has twice.
+        rel, old, _ = patch.EDGE_EDITS[6]
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            tree.write(rel, tree.read(rel) + old)
+            with self.assertRaisesRegex(patch.PatchError, "2 occurrences"):
+                patch.edges(tree, c)
+
+    def test_check(self):
+        c = config(edge_ws_urls=self.URLS)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.edges(tree, c)
+            # DAMAGE: each edit taken back, or written twice, fails the check (a lost label among them).
+            for rel, old, new in patch.EDGE_EDITS:
+                patched = tree.read(rel)
+                for damaged in (patched.replace(new, old), patched + new):
+                    tree.write(rel, damaged)
+                    with self.subTest(edit=new.strip().splitlines()[-1][:60]), self.assertRaises(patch.PatchError):
+                        patch.verify_edges(tree, c)
+                tree.write(rel, patched)
+            patch.verify_edges(tree, c)
+            # DAMAGE in the bridge: an edge that is not wss://, the edges above the direct address by
+            # default, another build's edges, a stray line, no file.
+            java = self.java(tree)
+            for damaged in (java.replace('"wss://ru.pluma.chat/apiws"', '"https://ru.pluma.chat/apiws"'),
+                            java.replace("return new Settings(Arrays.asList(BUILT_IN), false, BUILT_IN_STICKY_S);",
+                                         "return new Settings(Arrays.asList(BUILT_IN), true, BUILT_IN_STICKY_S);"),
+                            patch.edge_java(config(edge_ws_urls="wss://e2x.gcorecdn.com/apiws")),
+                            java + "\n"):
+                self.assertNotEqual(damaged, java)
+                tree.write(patch.EDGE_FILE, damaged)
+                with self.assertRaisesRegex(patch.PatchError, "not the bridge of this build's edges"):
+                    patch.verify_edges(tree, c)
+            (tree.root / patch.EDGE_FILE).unlink()
+            with self.assertRaisesRegex(patch.PatchError, "not the bridge"):
+                patch.verify_edges(tree, c)
+            tree.write(patch.EDGE_FILE, java)
+            patch.verify_edges(tree, c)
+            # The contract checks themselves, on a file that matches its template.
+            for old, new in (("return new Settings(Arrays.asList(BUILT_IN), false, BUILT_IN_STICKY_S);",
+                              "return new Settings(Arrays.asList(BUILT_IN), true, BUILT_IN_STICKY_S);"),
+                             ('"wss://ru.pluma.chat/apiws"};', '"ws://ru.pluma.chat/apiws"};')):
+                damaged = java.replace(old, new)
+                self.assertNotEqual(damaged, java)
+                tree.write(patch.EDGE_FILE, damaged)
+                with self.subTest(contract=new), unittest.mock.patch.object(patch, "edge_java", lambda _c, text=damaged: text):
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_edges(tree, c)
+            tree.write(patch.EDGE_FILE, java)
+            patch.verify_edges(tree, c)
+
+    def test_contract(self):
+        # The numbers and rules of the client contract (brief 109, "Контракт клиентов").
+        java = patch.EDGE_JAVA
+        for line in (
+            "private static final int BUILT_IN_STICKY_S = 1800;",
+            'private static final String APP_CONFIG_KEY = "pluma_edge";',
+            "private static final int MAX_EDGES = 4;",
+            "private static final int MIN_STICKY_S = 60;",
+            "private static final int MAX_STICKY_S = 86400;",
+            "private static final int MAX_MESSAGE = 64 * 1024;",
+            "private static final long SILENCE = 45_000;",
+            'ws.addProtocol("binary");',
+            'ws.addHeader("User-Agent", "Pluma");',
+            "ws.sendBinary(Arrays.copyOf(buffer, count));",
+            'server = new ServerSocket(0, MAX_CONNECTIONS, InetAddress.getByName("127.0.0.1"));',
+            '"wss".equals(uri.getScheme())',
+            "if (version != 1 || urls == null || order == null) {",
+            'new HashSet<>(Arrays.asList("direct", "edge"))',
+            'return new Settings(urls, order.get(0).equals("edge"), (int) sticky);',
+            "return new Settings(Arrays.asList(BUILT_IN), false, BUILT_IN_STICKY_S);",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(java.count(line), 1)
+        self.assertEqual(java.count(patch.EDGE_BUILT_IN_LINE), 1)
+        # No text message, no cookie, no other host than the edge's; logs carry exceptions only.
+        self.assertNotIn("sendText(", java)
+        self.assertNotIn("Cookie", java)
+        self.assertEqual(java.count(".createSocket("), 1)
+        for log in re.findall(r"FileLog\.\w\((.*)\);", java):
+            with self.subTest(log=log):
+                self.assertEqual(log, "e")
+        # The label of tgnet and its limit are the bridge's: 4 edges, one digit each.
+        cpp = "".join(new for _, _, new in patch.EDGE_EDITS)
+        self.assertEqual(patch.EDGE_URLS_LIMIT, 4)
+        self.assertIn(f"static const size_t PLUMA_MAX_EDGES = {patch.EDGE_URLS_LIMIT};", cpp)
+        # A frozen direct connection: a timeout of an established one, twice within 60 s.
+        self.assertIn("plumaDirectFroze(hostAddress, reason == 2 && wasConnected)", cpp)
+        self.assertIn("if (++plumaFrozenCount < 2) {", cpp)
+        self.assertIn("now - plumaLastFrozenTime > 60 * 1000", cpp)
+        # A label is never opened through a proxy.
+        self.assertIn("if (proxied || !proxyAddress.empty() ||", cpp)
+        self.assertIn("plumaEdgePort(plumaEdge, !overrideProxyAddress.empty())", cpp)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = sorted({rel for rel, _, _ in patch.EDGE_EDITS} | {rel for rel, _ in patch.EDGE_USES})
+        self.assertFalse((UPSTREAM / patch.EDGE_FILE).exists())
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "TMessagesProj").mkdir()
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            # Upstream's labels-to-be: no address named like one, no edge anywhere.
+            for rel in rels:
+                self.assertNotIn(patch.EDGE_LABEL, tree.read(rel))
+                self.assertNotIn("plumaedge", tree.read(rel).lower())
+            # DC 1 as the tgnet edit of patch() (A-002) leaves it: the anchor of the first edit.
+            tree.replace_body(patch.EDGE_MANAGER_CPP, "void ConnectionsManager::initDatacenters() {\n", "\n}\n",
+                              "    if (datacenters.find(1) == datacenters.end()) {\n"
+                              "        Datacenter *datacenter = new Datacenter(instanceNum, 1);\n"
+                              '        datacenter->addAddressAndPort("203.0.113.7", 443, 0, "");\n'
+                              "        datacenters[1] = datacenter;\n    }")
+            original = {rel: tree.read(rel) for rel in rels}
+            c = config(edge_ws_urls=self.URLS)
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_edges(tree, c)
+            patch.edges(tree, c)
+            patch.verify_edges(tree, c)
+            patched = {rel: tree.read(rel) for rel in rels}
+            # Nothing else changed: each file is upstream's once its edits are taken back.
+            for rel in rels:
+                text = patched[rel]
+                for r, old, new in patch.EDGE_EDITS:
+                    if r == rel:
+                        self.assertEqual(text.count(new), 1, f"{rel}: {new[:60]!r}")
+                        text = text.replace(new, old)
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # What the edits rely on in upstream: the four port slots, the reset of the failures on
+            # data, the address change after failures, the stored index, the server's replacement.
+            datacenter_h = original[patch.EDGE_DATACENTER_H]
+            self.assertEqual(datacenter_h.count("const int32_t *defaultPorts = new int32_t[4] {-1, 443, 5222, -1};"), 1)
+            connection = original[patch.EDGE_CONNECTION_CPP]
+            self.assertRegex(connection, r"void Connection::onReceivedData\(NativeByteBuffer \*buffer\) \{\n[^}]*?\n    failedConnectionCount = 0;\n")
+            self.assertEqual(connection.count("currentDatacenter->nextAddressOrPort(currentAddressFlags);"), 1)
+            self.assertEqual(connection.count("currentDatacenter->storeCurrentAddressAndPortNum();"), 1)
+            manager = original[patch.EDGE_MANAGER_CPP]
+            self.assertEqual(manager.count("->replaceAddresses("), 6)
+            self.assertEqual(original[patch.EDGE_DATACENTER_CPP].count("void Datacenter::resetAddressAndPortNum() {\n"), 1)
+            # DAMAGE on the real tree: each edit taken back fails the check.
+            for rel, old, new in patch.EDGE_EDITS:
+                with self.subTest(damage=new.strip().splitlines()[-1][:60]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_edges(tree, c)
+                    tree.write(rel, patched[rel])
+            patch.verify_edges(tree, c)
+
+
 class CallColoursTest(unittest.TestCase):
     # The colour keys of the group call as ThemeColors of 13.2.1 (7be672ea) defines them;
     # test_real_upstream checks the table against the checkout.

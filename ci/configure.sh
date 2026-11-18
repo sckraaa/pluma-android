@@ -12,6 +12,9 @@
 # instead of the emulator's 10.0.2.2, whatever the server variables say: the
 # Wi-Fi address of the stand's machine for a phone on the same network, or
 # 127.0.0.1 with `adb reverse` (README, Development builds).
+# EDGE_WS_URLS (optional): the server's edges of a server build, wss:// URLs
+# separated by commas in the order tried; DEV_EDGE_WS_URLS: those of a
+# development build, which never takes the server's.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -28,6 +31,7 @@ if [ -n "${DEV_SERVER_IPV4:-}" ]; then
 	SERVER_PORT=$PLUMA_SERVER_PORT
 	SERVER_IPV6=
 	cp config/dev/server_public.pem "$tmp/key.pem"
+	edges=${DEV_EDGE_WS_URLS:-}
 	target=dev
 elif [ -n "${SERVER_IPV4:-}${SERVER_PORT:-}${RSA_PUBLIC_KEY:-}" ]; then
 	# Half a configuration would build a client that cannot sign in.
@@ -38,12 +42,14 @@ elif [ -n "${SERVER_IPV4:-}${SERVER_PORT:-}${RSA_PUBLIC_KEY:-}" ]; then
 		fi
 	done
 	printf '%s\n' "$RSA_PUBLIC_KEY" >"$tmp/key.pem"
+	edges=${EDGE_WS_URLS:-}
 	target=server
 else
 	. config/dev/server.env
 	SERVER_IPV4=$PLUMA_SERVER_IPV4
 	SERVER_PORT=$PLUMA_SERVER_PORT
 	cp config/dev/server_public.pem "$tmp/key.pem"
+	edges=${DEV_EDGE_WS_URLS:-}
 	target=dev
 fi
 
@@ -58,6 +64,9 @@ if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
 fi
 if [ -n "${ABIS:-}" ]; then
 	args+=(--abis "$ABIS")
+fi
+if [ -n "$edges" ]; then
+	args+=(--edge-ws-urls "$edges")
 fi
 if [ "${CCACHE:-}" = 1 ]; then
 	args+=(--ccache)
