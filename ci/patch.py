@@ -480,6 +480,27 @@ def patch(tree, c):
 # - pluma_edge of help.getAppConfig (v 1, 1-4 wss:// URLs, order a permutation
 #   of direct and edge, sticky_s 60-86400) is kept in the preferences and
 #   applied at once; absent or not valid, the build's list applies.
+#
+# A-129, task 113 of the server repository (ADR 0073): the path is chosen by the
+# gateway's probe (pluma.probe, answered before the key exchange with more bytes
+# than the stall lets through), not by the first answer.
+# - tgnet's DC 1 takes an order of all paths (0 the direct addresses, n + 1 the
+#   label of edge n) instead of edges-first-or-not; PlumaPathProber gives it
+#   before native_init, from the memory of the network, so tgnet connects at once.
+# - PlumaPathProber races gate probes (obfuscated2 + intermediate over its own
+#   TCP socket, or its own WebSocket to an edge) and, when the first path does
+#   not pass and another does, gives a new order with reconnect: every
+#   connection of DC 1 drops and opens on the new first path, as a new proxy
+#   does (ConnectionsManager.cpp 3809-3818, Datacenter::suspendConnections).
+# - Measurements in the background (start, network change, a request of DC 1
+#   that waits suspect_ms with no byte, every reprobe_s) switch with hysteresis;
+#   a switch waits for a file transfer (data on a download or upload
+#   connection), at most 2 minutes.
+# - While the prober chooses, sticky_s is not used; with a proxy of the user on,
+#   or after the gateway closed right after resPQ (no probe there), the rules
+#   above hold until the next pluma_probe.
+# - The rules, the probe's bytes and the memory are PlumaPathPolicy, plain Java
+#   that ci/PlumaPathPolicyTest.java runs on a JVM.
 EDGE_URLS_LIMIT = 4
 EDGE_TELEGRAM_DOMAINS = ("telegram.org", "telegram.me", "t.me", "telegram.dog", "telesco.pe", "tdesktop.com",
                          "telegra.ph", "graph.org", "fragment.com")
@@ -522,9 +543,13 @@ EDGE_CONNECTION_CPP = f"{EDGE_TGNET}/Connection.cpp"
 EDGE_SOCKET_CPP = f"{EDGE_TGNET}/ConnectionSocket.cpp"
 EDGE_MANAGER_H = f"{EDGE_TGNET}/ConnectionsManager.h"
 EDGE_WRAPPER = "TMessagesProj/jni/TgNetWrapper.cpp"
+EDGE_SOCKET_H = f"{EDGE_TGNET}/ConnectionSocket.h"
+EDGE_DEFINES = f"{EDGE_TGNET}/Defines.h"
 EDGE_MANAGER_JAVA = f"{EDGE_JAVA_DIR}/tgnet/ConnectionsManager.java"
 EDGE_MESSAGES = f"{EDGE_JAVA_DIR}/messenger/MessagesController.java"
 EDGE_FILE = f"{EDGE_JAVA_DIR}/utils/proxy/PlumaEdgeBridge.java"
+PATH_POLICY_FILE = f"{EDGE_JAVA_DIR}/utils/proxy/PlumaPathPolicy.java"
+PATH_PROBER_FILE = f"{EDGE_JAVA_DIR}/utils/proxy/PlumaPathProber.java"
 EDGE_LABEL = "pluma-edge-"
 EDGE_BUILT_IN_LINE = "    private static final String[] BUILT_IN = {};\n"
 # The end of DC 1 in initDatacenters as the tgnet edit above (A-002) writes it.
@@ -608,12 +633,46 @@ public final class PlumaEdgeBridge {
     }
 
     // ConnectionsManager.init of an account, before native_init: the account's tgnet takes the
-    // edges from now on.
+    // edges, and the order of the paths PlumaPathProber chose, from now on.
     public static void attach(int account) {
         synchronized (lock) {
             start();
             attached[account] = true;
-            ConnectionsManager.native_setPlumaEdges(account, ports(), settings.edgesFirst);
+            ConnectionsManager.native_setPlumaEdges(account, ports(), PlumaPathProber.order(settings.urls, settings.edgesFirst),
+                    PlumaPathProber.suspectMs(), false);
+        }
+    }
+
+    // PlumaPathProber chose another order of the paths: every account's tgnet takes it; with
+    // reconnect, the connections of DC 1 open again on the first path of the new order.
+    static void reorder(boolean reconnect) {
+        synchronized (lock) {
+            if (started) {
+                push(reconnect);
+            }
+        }
+    }
+
+    // The paths in the order of pluma_edge (or of the build): "direct" and the URL of each edge.
+    static List<String> paths() {
+        synchronized (lock) {
+            Settings current = started ? settings : loadSettings();
+            List<String> paths = new ArrayList<>(current.urls);
+            paths.add(current.edgesFirst ? paths.size() : 0, PlumaPathProber.DIRECT);
+            return paths;
+        }
+    }
+
+    // The accounts whose tgnet takes the edges.
+    static List<Integer> attachedAccounts() {
+        synchronized (lock) {
+            List<Integer> accounts = new ArrayList<>();
+            for (int a = 0; a < attached.length; a++) {
+                if (attached[a]) {
+                    accounts.add(a);
+                }
+            }
+            return accounts;
         }
     }
 
@@ -639,6 +698,7 @@ public final class PlumaEdgeBridge {
         settings = loadSettings();
         bind(settings.urls);
         timer.scheduleWithFixedDelay(PlumaEdgeBridge::watch, WATCH_PERIOD, WATCH_PERIOD, TimeUnit.MILLISECONDS);
+        PlumaPathProber.start();
     }
 
     private static void apply(Settings received) {
@@ -654,14 +714,22 @@ public final class PlumaEdgeBridge {
                     stickyReturn.cancel(false);
                     stickyReturn = null;
                 }
-                int[] ports = ports();
-                for (int a = 0; a < attached.length; a++) {
-                    if (attached[a]) {
-                        ConnectionsManager.native_setPlumaEdges(a, ports, next.edgesFirst);
-                    }
-                }
+                push(false);
+                PlumaPathProber.onPathsChanged();
             }
             storeSettings(received);
+        }
+    }
+
+    // Under the lock: the ports of the bridges and the order of the paths to every account's tgnet.
+    private static void push(boolean reconnect) {
+        int[] ports = ports();
+        int[] order = PlumaPathProber.order(settings.urls, settings.edgesFirst);
+        int suspectMs = PlumaPathProber.suspectMs();
+        for (int a = 0; a < attached.length; a++) {
+            if (attached[a]) {
+                ConnectionsManager.native_setPlumaEdges(a, ports, order, suspectMs, reconnect);
+            }
         }
     }
 
@@ -697,9 +765,10 @@ public final class PlumaEdgeBridge {
     }
 
     // Under the lock: tgnet went through an edge; sticky_s later its next connection tries the
-    // direct address first again.
+    // direct address first again. Not while PlumaPathProber chooses the path: its memory and
+    // measurements take the place of sticky_s (task 113).
     private static void onEdgeUsed() {
-        if (settings.edgesFirst || stickyReturn != null) {
+        if (settings.edgesFirst || stickyReturn != null || PlumaPathProber.selecting()) {
             return;
         }
         stickyReturn = timer.schedule(PlumaEdgeBridge::returnToDirect, settings.stickyS, TimeUnit.SECONDS);
@@ -708,6 +777,9 @@ public final class PlumaEdgeBridge {
     private static void returnToDirect() {
         synchronized (lock) {
             stickyReturn = null;
+            if (PlumaPathProber.selecting()) {
+                return;
+            }
             for (int a = 0; a < attached.length; a++) {
                 if (attached[a]) {
                     ConnectionsManager.native_returnFromPlumaEdge(a);
@@ -1077,6 +1149,2011 @@ public final class PlumaEdgeBridge {
 }
 """
 
+# A-129 (task 113 of the server repository, ADR 0073): the choice of the path by the gateway's
+# probe. PlumaPathPolicy holds the rules and the probe's bytes, plain Java that ci/patch_test.py
+# runs on a JVM; PlumaPathProber runs them on the device. The direct address is the build's, the
+# one the tgnet edit (A-002) gives DC 1.
+PATH_POLICY_JAVA = r"""package org.telegram.utils.proxy;
+
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
+// The rules of the choice of the path to the server (task 113 of the Pluma server, ADR 0073):
+// the probe the gateway answers before the key exchange, the measure of one probe, the score of a
+// path, the memory per network and the decisions that switch paths. Plain Java, no Android: it
+// runs as it is on a JVM.
+final class PlumaPathPolicy {
+    static final String DIRECT = "direct";
+    // The score is the time of an answer of this size (an average piece of media).
+    static final int SCORE_BYTES = 256 * 1024;
+    // Scores within 30 % of the best are a tie, which pluma_edge's order breaks.
+    static final double TIE = 1.3;
+    // A path with 2 probes that were not ok among its last 4 in a network scores twice as high.
+    static final int LOSS_WINDOW = 4;
+    static final int LOSS_LIMIT = 2;
+    static final int MAX_NETWORKS = 16;
+    static final long FRESH_MS = 7L * 24 * 60 * 60 * 1000;
+    // A second winning measurement confirms the first within this many confirm_s.
+    static final int CONFIRM_SLACK = 3;
+
+    private PlumaPathPolicy() {
+    }
+
+    // --- pluma_probe ------------------------------------------------------------------------
+
+    // The settings of pluma_probe: the numbers of the brief's section 7, with its defaults and
+    // the ranges bff accepts (app/bff/configuration/internal/appconfig/probe.go).
+    static final class Params {
+        static final String[] NAMES = {"gate_down", "rank_down", "up", "stall_ms", "deadline_ms", "suspect_ms",
+                "reprobe_s", "rank_min_interval_s", "min_dwell_s", "switch_ratio", "switch_ratio_now",
+                "edge_probe_if_direct_ms", "bad_ttl_s", "failed_ttl_s", "race_stagger_ms", "confirm_s"};
+        static final double[] DEFAULTS = {65536, 196608, 20480, 1500, 6000, 4000,
+                21600, 1800, 600, 0.7, 0.25,
+                1500, 86400, 300, 800, 60};
+        static final double[] MIN = {16384, 16384, 0, 300, 1000, 1000,
+                600, 60, 0, 0.05, 0.05,
+                100, 60, 10, 0, 10};
+        static final double[] MAX = {524288, 524288, 65536, 10000, 30000, 30000,
+                604800, 86400, 86400, 0.95, 0.95,
+                60000, 604800, 86400, 10000, 3600};
+        private static final int SWITCH_RATIO = 9;
+        private static final int SWITCH_RATIO_NOW = 10;
+
+        final String country;
+        private final double[] values;
+
+        private Params(String country, double[] values) {
+            this.country = country;
+            this.values = values;
+        }
+
+        static Params defaults() {
+            return new Params("", DEFAULTS.clone());
+        }
+
+        // pluma_probe as a map of its fields (numbers as Double, strings as String); null if it
+        // is not valid. A field it does not have takes its default; a field it has must be in
+        // range, a whole number but for the ratios; the deadline is longer than the stall and
+        // the ratio that switches at once is below the one that switches after two probes.
+        static Params of(Map<String, Object> fields) {
+            Object version = fields.get("v");
+            if (!(version instanceof Double) || (Double) version != 1) {
+                return null;
+            }
+            String country = "";
+            Object c = fields.get("country");
+            if (c != null) {
+                if (!(c instanceof String) || !((String) c).isEmpty() && !((String) c).matches("[A-Z]{2}")) {
+                    return null;
+                }
+                country = (String) c;
+            }
+            double[] values = new double[NAMES.length];
+            for (int i = 0; i < NAMES.length; i++) {
+                Object x = fields.get(NAMES[i]);
+                double value = x == null ? DEFAULTS[i] : x instanceof Double ? (Double) x : Double.NaN;
+                boolean ratio = i == SWITCH_RATIO || i == SWITCH_RATIO_NOW;
+                if (!(value >= MIN[i] && value <= MAX[i]) || !ratio && value != Math.rint(value)) {
+                    return null;
+                }
+                values[i] = value;
+            }
+            Params p = new Params(country, values);
+            if (p.deadlineMs() <= p.stallMs() || p.switchRatioNow() >= p.switchRatio()) {
+                return null;
+            }
+            return p;
+        }
+
+        int gateDown() { return (int) values[0]; }
+        int rankDown() { return (int) values[1]; }
+        int up() { return (int) values[2]; }
+        long stallMs() { return (long) values[3]; }
+        long deadlineMs() { return (long) values[4]; }
+        int suspectMs() { return (int) values[5]; }
+        long reprobeMs() { return (long) values[6] * 1000; }
+        long rankMinIntervalMs() { return (long) values[7] * 1000; }
+        long minDwellMs() { return (long) values[8] * 1000; }
+        double switchRatio() { return values[SWITCH_RATIO]; }
+        double switchRatioNow() { return values[SWITCH_RATIO_NOW]; }
+        double edgeProbeIfDirectMs() { return values[11]; }
+        long badTtlMs() { return (long) values[12] * 1000; }
+        long failedTtlMs() { return (long) values[13] * 1000; }
+        long raceStaggerMs() { return (long) values[14]; }
+        long confirmMs() { return (long) values[15] * 1000; }
+
+        // One "name=value" per line, the country first; read back by fromText.
+        String toText() {
+            StringBuilder out = new StringBuilder("country=").append(country).append('\n');
+            for (int i = 0; i < NAMES.length; i++) {
+                out.append(NAMES[i]).append('=').append(values[i]).append('\n');
+            }
+            return out.toString();
+        }
+
+        // null if the text is not one toText wrote.
+        static Params fromText(String text) {
+            Map<String, Object> fields = new HashMap<>();
+            fields.put("v", 1.0);
+            for (String line : text.split("\n")) {
+                int eq = line.indexOf('=');
+                if (eq < 0) {
+                    return null;
+                }
+                String name = line.substring(0, eq);
+                String value = line.substring(eq + 1);
+                if (name.equals("country")) {
+                    fields.put(name, value);
+                } else {
+                    try {
+                        fields.put(name, Double.parseDouble(value));
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                }
+            }
+            return of(fields);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Params && country.equals(((Params) o).country) && Arrays.equals(values, ((Params) o).values);
+        }
+
+        @Override
+        public int hashCode() {
+            return country.hashCode() * 31 + Arrays.hashCode(values);
+        }
+    }
+
+    // --- the probe ------------------------------------------------------------------------------
+    // Both messages are unencrypted MTProto messages (auth_key_id 0, msg_id, length, data), one
+    // per frame of the transport, little-endian; the constructors are the CRC32 of their TL lines
+    // (the gateway's pkg/mtserver/handshake/probe.go):
+    //   pluma.probe#5c316d30 nonce:int128 down:int pad:bytes = pluma.Probe;
+    //   pluma.probeData#6ab3780b nonce:int128 seq:int total:int server_ms:long pad:bytes = pluma.ProbeData;
+    // The client sends req_pq_multi, waits for resPQ and sends pluma.probe on the same
+    // connection; the gateway answers with ceil(D / 16384) pluma.probeData in seq order, D being
+    // down clamped to [16384, 524288], each pad 16384 bytes but the last, which holds the rest.
+
+    static final int REQ_PQ_MULTI = 0xbe7e8ef1;
+    static final int RES_PQ = 0x05162463;
+    static final int PROBE = 0x5c316d30;
+    static final int PROBE_DATA = 0x6ab3780b;
+    static final int CHUNK = 16384;
+    static final int MIN_DOWN = 16384;
+    static final int MAX_DOWN = 524288;
+    static final int MAX_UP = 65536;
+    // The intermediate transport inside obfuscated2: 0xeeeeeeee.
+    static final byte TAG = (byte) 0xee;
+    // Larger than any frame of a probe's answer.
+    static final int MAX_FRAME = 64 * 1024;
+
+    static int clampDown(int down) {
+        return Math.max(MIN_DOWN, Math.min(MAX_DOWN, down));
+    }
+
+    static int chunks(int down) {
+        return (clampDown(down) + CHUNK - 1) / CHUNK;
+    }
+
+    // A client msg_id of unixMs: seconds in the high half, a fraction in the low, a multiple of 4.
+    static long msgId(long unixMs) {
+        return (unixMs / 1000) << 32 | ((unixMs % 1000) << 32) / 1000 & ~3L;
+    }
+
+    static byte[] reqPqMulti(long msgId, byte[] nonce) {
+        ByteBuffer body = little(20);
+        body.putInt(REQ_PQ_MULTI).put(nonce);
+        return unencrypted(msgId, body.array());
+    }
+
+    static byte[] probe(long msgId, byte[] nonce, int down, byte[] pad) {
+        byte[] bytes = tlBytes(pad);
+        ByteBuffer body = little(24 + bytes.length);
+        body.putInt(PROBE).put(nonce).putInt(down).put(bytes);
+        return unencrypted(msgId, body.array());
+    }
+
+    static byte[] unencrypted(long msgId, byte[] body) {
+        ByteBuffer out = little(20 + body.length);
+        out.putLong(0).putLong(msgId).putInt(body.length).put(body);
+        return out.array();
+    }
+
+    // TL bytes: a length byte under 254, else 0xfe and 3 bytes of length; the data; zeros to a
+    // multiple of 4.
+    static byte[] tlBytes(byte[] data) {
+        int head = data.length < 254 ? 1 : 4;
+        byte[] out = new byte[(head + data.length + 3) / 4 * 4];
+        if (head == 1) {
+            out[0] = (byte) data.length;
+        } else {
+            out[0] = (byte) 0xfe;
+            out[1] = (byte) data.length;
+            out[2] = (byte) (data.length >> 8);
+            out[3] = (byte) (data.length >> 16);
+        }
+        System.arraycopy(data, 0, out, head, data.length);
+        return out;
+    }
+
+    static int tlBytesLength(int length) {
+        return ((length < 254 ? 1 : 4) + length + 3) / 4 * 4;
+    }
+
+    // A frame of the intermediate transport: the length, little-endian, and the payload.
+    static byte[] frame(byte[] payload) {
+        return little(4 + payload.length).putInt(payload.length).put(payload).array();
+    }
+
+    private static ByteBuffer little(int size) {
+        return ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+    }
+
+    // obfuscated2 without a secret, as tgnet makes it (Connection.cpp, sendData): 64 random
+    // bytes that do not look like another protocol, the tag at 56; the client encrypts with the
+    // key and IV of bytes 8-55 and decrypts with those of the same bytes reversed; the header
+    // goes out with its last 8 bytes encrypted.
+    static final class Obfuscation {
+        final byte[] header;
+        private final Cipher encrypt;
+        private final Cipher decrypt;
+
+        private Obfuscation(byte[] header, Cipher encrypt, Cipher decrypt) {
+            this.header = header;
+            this.encrypt = encrypt;
+            this.decrypt = decrypt;
+        }
+
+        static Obfuscation create(SecureRandom random) throws GeneralSecurityException {
+            byte[] bytes = new byte[64];
+            while (true) {
+                random.nextBytes(bytes);
+                ByteBuffer b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+                int first = b.getInt(0);
+                if (bytes[0] != (byte) 0xef && first != 0x44414548 && first != 0x54534f50 && first != 0x20544547
+                        && first != 0x4954504f && first != 0xeeeeeeee && first != 0xdddddddd && first != 0x02010316
+                        && b.getInt(4) != 0) {
+                    break;
+                }
+            }
+            bytes[56] = bytes[57] = bytes[58] = bytes[59] = TAG;
+            byte[] reversed = new byte[48];
+            for (int a = 0; a < 48; a++) {
+                reversed[a] = bytes[55 - a];
+            }
+            Cipher encrypt = ctr(Arrays.copyOfRange(bytes, 8, 40), Arrays.copyOfRange(bytes, 40, 56));
+            Cipher decrypt = ctr(Arrays.copyOfRange(reversed, 0, 32), Arrays.copyOfRange(reversed, 32, 48));
+            byte[] sealed = encrypt.update(bytes);
+            byte[] header = bytes.clone();
+            System.arraycopy(sealed, 56, header, 56, 8);
+            return new Obfuscation(header, encrypt, decrypt);
+        }
+
+        static Cipher ctr(byte[] key, byte[] iv) throws GeneralSecurityException {
+            Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
+            return cipher;
+        }
+
+        byte[] seal(byte[] plain) {
+            byte[] out = encrypt.update(plain);
+            return out != null ? out : new byte[0];
+        }
+
+        byte[] open(byte[] data, int offset, int length) {
+            byte[] out = decrypt.update(data, offset, length);
+            return out != null ? out : new byte[0];
+        }
+    }
+
+    // The answer of the gateway, decrypted, as it comes: frames of the intermediate transport,
+    // resPQ to req_pq_multi first, then pluma.probeData. Anything else is a protocol error.
+    static final class Reader {
+        private final byte[] requestNonce;
+        private final byte[] probeNonce;
+        private final int total;
+        private final int lastPad;
+        private final byte[] head = new byte[4];
+        private int headFill;
+        private byte[] body;
+        private int bodyFill;
+        boolean resPq;
+        int received;
+        boolean done;
+        String error;
+
+        Reader(byte[] requestNonce, byte[] probeNonce, int down) {
+            this.requestNonce = requestNonce;
+            this.probeNonce = probeNonce;
+            int d = clampDown(down);
+            this.total = chunks(d);
+            this.lastPad = d - CHUNK * (total - 1);
+        }
+
+        // Feeds the bytes and returns how many of them are the probe's answer: the bytes after
+        // the frame of resPQ.
+        int feed(byte[] data, int offset, int length) {
+            int answer = 0;
+            int end = offset + length;
+            while (offset < end && error == null && !done) {
+                boolean answering = resPq;
+                int before = offset;
+                if (body == null) {
+                    int n = Math.min(4 - headFill, end - offset);
+                    System.arraycopy(data, offset, head, headFill, n);
+                    headFill += n;
+                    offset += n;
+                    if (headFill == 4) {
+                        int size = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN).getInt();
+                        if (size < 20 + 4 || size > MAX_FRAME || size % 4 != 0) {
+                            error = "frame of " + size + " bytes";
+                        } else {
+                            body = new byte[size];
+                            bodyFill = 0;
+                        }
+                    }
+                } else {
+                    int n = Math.min(body.length - bodyFill, end - offset);
+                    System.arraycopy(data, offset, body, bodyFill, n);
+                    bodyFill += n;
+                    offset += n;
+                    if (bodyFill == body.length) {
+                        message(body);
+                        body = null;
+                        headFill = 0;
+                    }
+                }
+                if (answering) {
+                    answer += offset - before;
+                }
+            }
+            return answer;
+        }
+
+        private void message(byte[] frame) {
+            ByteBuffer b = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN);
+            long authKeyId = b.getLong();
+            b.getLong();
+            int length = b.getInt();
+            if (authKeyId != 0 || length < 4 || length > frame.length - 20) {
+                error = "not an unencrypted message";
+                return;
+            }
+            int constructor = b.getInt();
+            if (!resPq) {
+                if (constructor != RES_PQ || length < 20 || !nonce(b, requestNonce)) {
+                    error = "not resPQ to the request";
+                    return;
+                }
+                resPq = true;
+                return;
+            }
+            if (constructor != PROBE_DATA || length < 36 || !nonce(b, probeNonce)) {
+                error = "not pluma.probeData of the probe";
+                return;
+            }
+            int seq = b.getInt();
+            int count = b.getInt();
+            b.getLong();
+            int pad = seq == total - 1 ? lastPad : CHUNK;
+            if (seq != received || count != total || length != 36 + tlBytesLength(pad) || !padLength(b, pad)) {
+                error = "chunk " + seq + " of " + count;
+                return;
+            }
+            received++;
+            done = received == total;
+        }
+
+        private static boolean nonce(ByteBuffer b, byte[] expected) {
+            byte[] nonce = new byte[16];
+            b.get(nonce);
+            return Arrays.equals(nonce, expected);
+        }
+
+        private static boolean padLength(ByteBuffer b, int pad) {
+            int first = b.get() & 0xff;
+            if (pad < 254) {
+                return first == pad;
+            }
+            int length = (b.get() & 0xff) | (b.get() & 0xff) << 8 | (b.get() & 0xff) << 16;
+            return first == 0xfe && length == pad;
+        }
+    }
+
+    // --- one probe ------------------------------------------------------------------------------
+
+    enum Outcome {
+        // All of the answer came.
+        OK,
+        // At the deadline part of the answer came, and it was still coming.
+        SLOW,
+        // The path gave a byte, then stall_ms passed with none and the answer is not complete.
+        FROZEN,
+        // No connection, a close, a protocol error, or no byte by the deadline.
+        FAILED,
+        // The gateway closed the connection right after a valid resPQ: it does not know the probe.
+        UNSUPPORTED
+    }
+
+    // The times of one probe, in ms of one monotonic clock, and its outcome (the brief's section 2).
+    static final class Measure {
+        private final long stallMs;
+        private final long deadlineMs;
+        private final long start;
+        private long connected = -1;
+        private long lastByte = -1;
+        private long requestSent = -1;
+        private long resPqAt = -1;
+        private long probeSent = -1;
+        private long firstAnswer = -1;
+        private long firstAnswerBytes;
+        private long answerBytes;
+        private boolean done;
+        private boolean closed;
+        private boolean error;
+
+        Measure(Params p, long start) {
+            this.stallMs = p.stallMs();
+            this.deadlineMs = p.deadlineMs();
+            this.start = start;
+        }
+
+        // The connection is up; answered: the path gave bytes on the way (the WebSocket handshake).
+        void connected(long now, boolean answered) {
+            connected = now;
+            if (answered) {
+                lastByte = now;
+            }
+        }
+
+        void requestSent(long now) {
+            requestSent = now;
+        }
+
+        void probeSent(long now) {
+            probeSent = now;
+        }
+
+        // Bytes came: count of them, answer of which belong to the probe's answer.
+        void received(long now, int count, int answer, Reader reader) {
+            if (count <= 0) {
+                return;
+            }
+            if (resPqAt < 0) {
+                resPqAt = now;
+            }
+            lastByte = now;
+            if (answer > 0) {
+                if (firstAnswer < 0) {
+                    firstAnswer = now;
+                    firstAnswerBytes = answer;
+                }
+                answerBytes += answer;
+            }
+            if (reader.error != null) {
+                error = true;
+            }
+            done = reader.done;
+        }
+
+        void closed() {
+            closed = true;
+        }
+
+        void failed() {
+            error = true;
+        }
+
+        boolean probeSent() {
+            return probeSent >= 0;
+        }
+
+        // The outcome at now, null while the probe runs.
+        Outcome outcome(long now) {
+            if (done) {
+                return Outcome.OK;
+            }
+            if (error) {
+                return Outcome.FAILED;
+            }
+            if (closed) {
+                return probeSent >= 0 && answerBytes == 0 && resPqAt >= 0 ? Outcome.UNSUPPORTED : Outcome.FAILED;
+            }
+            if (lastByte >= 0) {
+                // The stall counts from the last byte, or from the write of the request plus the
+                // time an answer takes, whichever is later: a request lost on its way up stalls too.
+                long anchor = lastByte;
+                if (probeSent >= 0) {
+                    anchor = Math.max(anchor, probeSent + rtt());
+                } else if (requestSent >= 0 && connected >= 0) {
+                    anchor = Math.max(anchor, requestSent + (connected - start));
+                }
+                if (now - anchor >= stallMs) {
+                    return Outcome.FROZEN;
+                }
+            }
+            if (now - start >= deadlineMs) {
+                return answerBytes > 0 ? Outcome.SLOW : Outcome.FAILED;
+            }
+            return null;
+        }
+
+        // From the write of req_pq_multi to the first byte of resPQ.
+        long rtt() {
+            return resPqAt >= 0 && requestSent >= 0 ? resPqAt - requestSent : -1;
+        }
+
+        // The answer's bytes after its first read over the time from that read to the last;
+        // all of it over the time from the probe's write when it came in one read.
+        double bytesPerSecond() {
+            if (answerBytes == 0) {
+                return 0;
+            }
+            if (lastByte > firstAnswer && answerBytes > firstAnswerBytes) {
+                return (answerBytes - firstAnswerBytes) * 1000.0 / (lastByte - firstAnswer);
+            }
+            return answerBytes * 1000.0 / Math.max(1, lastByte - probeSent);
+        }
+
+        long answerBytes() {
+            return answerBytes;
+        }
+    }
+
+    // --- scores and decisions -------------------------------------------------------------------
+
+    // rtt + 256 KiB at the path's speed, in ms.
+    static double score(long rttMs, double bytesPerSecond) {
+        if (rttMs < 0 || !(bytesPerSecond > 0)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        return rttMs + SCORE_BYTES * 1000.0 / bytesPerSecond;
+    }
+
+    static boolean passed(Outcome outcome) {
+        return outcome == Outcome.OK || outcome == Outcome.SLOW;
+    }
+
+    // The path with the lowest score of those scored; among the scores within TIE of the lowest,
+    // the first in order (pluma_edge's). null if none is scored.
+    static String best(List<String> order, Map<String, Double> scores) {
+        double min = Double.POSITIVE_INFINITY;
+        for (String path : order) {
+            Double s = scores.get(path);
+            if (s != null && s < min) {
+                min = s;
+            }
+        }
+        if (min == Double.POSITIVE_INFINITY) {
+            return null;
+        }
+        for (String path : order) {
+            Double s = scores.get(path);
+            if (s != null && s <= min * TIE) {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    enum Decision {
+        STAY,
+        // A win by switch_ratio: measure again after confirm_s.
+        CONFIRM,
+        SWITCH
+    }
+
+    // Whether a measured candidate takes the place of the current path (the brief's section 4):
+    // switch_ratio_now of the current score at once, switch_ratio twice in a row (confirmed), and
+    // not within min_dwell_s of the last switch.
+    static Decision decide(double current, double candidate, boolean confirmed, long sinceSwitchMs, Params p) {
+        if (sinceSwitchMs < p.minDwellMs() || !(candidate < Double.POSITIVE_INFINITY)) {
+            return Decision.STAY;
+        }
+        if (candidate <= p.switchRatioNow() * current) {
+            return Decision.SWITCH;
+        }
+        if (candidate <= p.switchRatio() * current) {
+            return confirmed ? Decision.SWITCH : Decision.CONFIRM;
+        }
+        return Decision.STAY;
+    }
+
+    // Whether a rank measures the edges besides the direct path and the current one: the country
+    // puts the edges first, or the direct path did not pass or scores above edge_probe_if_direct_ms.
+    static boolean rankEdges(boolean edgesFirst, Outcome direct, double directScore, Params p) {
+        return edgesFirst || !passed(direct) || directScore > p.edgeProbeIfDirectMs();
+    }
+
+    // --- memory per network ---------------------------------------------------------------------
+
+    static final class PathState {
+        double score = Double.NaN;
+        Outcome last;
+        long time;
+        // The last LOSS_WINDOW probes, newest in bit 0, 1 for one that was not ok.
+        int history;
+        int count;
+        long excludedUntil;
+
+        double effectiveScore() {
+            if (Double.isNaN(score)) {
+                return Double.POSITIVE_INFINITY;
+            }
+            int window = (1 << Math.min(count, LOSS_WINDOW)) - 1;
+            return Integer.bitCount(history & window) >= LOSS_LIMIT ? score * 2 : score;
+        }
+    }
+
+    static final class Network {
+        String best;
+        long used;
+        long ranked;
+        long switched;
+        final Map<String, PathState> paths = new LinkedHashMap<>();
+
+        PathState state(String path) {
+            PathState s = paths.get(path);
+            if (s == null) {
+                s = new PathState();
+                paths.put(path, s);
+            }
+            return s;
+        }
+
+        boolean excluded(String path, long now) {
+            PathState s = paths.get(path);
+            return s != null && s.excludedUntil > now;
+        }
+
+        boolean fresh(long now) {
+            return used > 0 && now >= used && now - used <= FRESH_MS;
+        }
+
+        // A probe of path ended: frozen excludes it from races for bad_ttl_s, failed for
+        // failed_ttl_s, ok clears both. The caller records nothing when every path of a race
+        // failed: that is the network, not the paths.
+        void record(String path, Outcome outcome, double score, long now, Params p) {
+            PathState s = state(path);
+            s.last = outcome;
+            s.time = now;
+            s.history = (s.history << 1 | (outcome == Outcome.OK ? 0 : 1)) & ((1 << LOSS_WINDOW) - 1);
+            s.count = Math.min(LOSS_WINDOW, s.count + 1);
+            if (passed(outcome)) {
+                s.score = score;
+            }
+            if (outcome == Outcome.OK) {
+                s.excludedUntil = 0;
+            } else if (outcome == Outcome.FROZEN) {
+                s.excludedUntil = now + p.badTtlMs();
+            } else if (outcome == Outcome.FAILED) {
+                s.excludedUntil = Math.max(s.excludedUntil, now + p.failedTtlMs());
+            }
+            used = now;
+        }
+
+        // The paths in the order tgnet tries them: the remembered best while the memory is fresh,
+        // then the others in order (pluma_edge's), those excluded last.
+        List<String> order(List<String> paths, long now) {
+            List<String> out = new ArrayList<>();
+            if (fresh(now) && best != null && paths.contains(best) && !excluded(best, now)) {
+                out.add(best);
+            }
+            for (String path : paths) {
+                if (!out.contains(path) && !excluded(path, now)) {
+                    out.add(path);
+                }
+            }
+            for (String path : paths) {
+                if (!out.contains(path)) {
+                    out.add(path);
+                }
+            }
+            return out;
+        }
+
+        // The paths a race starts at once: the remembered best while fresh, else the first group
+        // of pluma_edge's order (the edges when the country puts them first, else the direct
+        // path), without those excluded; all paths not excluded if that leaves none.
+        List<String> firstGroup(List<String> paths, long now) {
+            if (fresh(now) && best != null && paths.contains(best) && !excluded(best, now)) {
+                return Collections.singletonList(best);
+            }
+            boolean edgesFirst = !paths.isEmpty() && !paths.get(0).equals(DIRECT);
+            List<String> group = new ArrayList<>();
+            for (String path : paths) {
+                if (path.equals(DIRECT) != edgesFirst && !excluded(path, now)) {
+                    group.add(path);
+                }
+            }
+            if (group.isEmpty()) {
+                for (String path : paths) {
+                    if (!excluded(path, now)) {
+                        group.add(path);
+                    }
+                }
+            }
+            return group;
+        }
+    }
+
+    // The networks by key, at most MAX_NETWORKS, the one used longest ago going first.
+    static final class Memory {
+        final Map<String, Network> networks = new LinkedHashMap<>();
+
+        Network network(String key) {
+            Network n = networks.get(key);
+            if (n == null) {
+                n = new Network();
+                networks.put(key, n);
+            }
+            return n;
+        }
+
+        void prune() {
+            while (networks.size() > MAX_NETWORKS) {
+                String oldest = null;
+                long used = Long.MAX_VALUE;
+                for (Map.Entry<String, Network> e : networks.entrySet()) {
+                    if (e.getValue().used < used) {
+                        used = e.getValue().used;
+                        oldest = e.getKey();
+                    }
+                }
+                networks.remove(oldest);
+            }
+        }
+
+        // A line per network ("n key best used ranked switched") followed by a line per path
+        // ("p path score outcome time history count excludedUntil"), the strings URL-encoded.
+        String toText() {
+            StringBuilder out = new StringBuilder();
+            for (Map.Entry<String, Network> e : networks.entrySet()) {
+                Network n = e.getValue();
+                out.append("n ").append(encode(e.getKey())).append(' ').append(n.best == null ? "-" : encode(n.best))
+                        .append(' ').append(n.used).append(' ').append(n.ranked).append(' ').append(n.switched).append('\n');
+                for (Map.Entry<String, PathState> p : n.paths.entrySet()) {
+                    PathState s = p.getValue();
+                    out.append("p ").append(encode(p.getKey())).append(' ').append(s.score).append(' ')
+                            .append(s.last == null ? "-" : s.last.name()).append(' ').append(s.time).append(' ')
+                            .append(s.history).append(' ').append(s.count).append(' ').append(s.excludedUntil).append('\n');
+                }
+            }
+            return out.toString();
+        }
+
+        // An empty memory if the text is not one toText wrote: a lost memory costs one race.
+        static Memory fromText(String text) {
+            Memory m = new Memory();
+            try {
+                Network n = null;
+                for (String line : text.split("\n")) {
+                    if (line.isEmpty()) {
+                        continue;
+                    }
+                    String[] f = line.split(" ", -1);
+                    if (f[0].equals("n") && f.length == 6) {
+                        n = m.network(decode(f[1]));
+                        n.best = f[2].equals("-") ? null : decode(f[2]);
+                        n.used = Long.parseLong(f[3]);
+                        n.ranked = Long.parseLong(f[4]);
+                        n.switched = Long.parseLong(f[5]);
+                    } else if (f[0].equals("p") && f.length == 8 && n != null) {
+                        PathState s = n.state(decode(f[1]));
+                        s.score = Double.parseDouble(f[2]);
+                        s.last = f[3].equals("-") ? null : Outcome.valueOf(f[3]);
+                        s.time = Long.parseLong(f[4]);
+                        s.history = Integer.parseInt(f[5]) & ((1 << LOSS_WINDOW) - 1);
+                        s.count = Math.max(0, Math.min(LOSS_WINDOW, Integer.parseInt(f[6])));
+                        s.excludedUntil = Long.parseLong(f[7]);
+                    } else {
+                        return new Memory();
+                    }
+                }
+            } catch (IllegalArgumentException e) {
+                return new Memory();
+            }
+            m.prune();
+            return m;
+        }
+
+        private static String encode(String s) {
+            try {
+                return URLEncoder.encode(s, "UTF-8");
+            } catch (UnsupportedEncodingException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        private static String decode(String s) {
+            try {
+                return URLDecoder.decode(s, "UTF-8");
+            } catch (UnsupportedEncodingException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    // The key of a network: the country of the client's address the server last gave, and a hash
+    // of what the device sees of the network (the kind of transport and the parts the caller
+    // gives: gateways, DNS servers, operator). Raw addresses are never kept.
+    static String networkKey(String country, String transport, Collection<String> parts) {
+        List<String> sorted = new ArrayList<>(parts);
+        Collections.sort(sorted);
+        StringBuilder text = new StringBuilder(transport);
+        for (String part : sorted) {
+            text.append('\n').append(part);
+        }
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(country).append(':');
+            for (int i = 0; i < 8; i++) {
+                hex.append(String.format("%02x", hash[i] & 0xff));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}
+"""
+
+PATH_PROBER_JAVA = r"""package org.telegram.utils.proxy;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
+import android.net.RouteInfo;
+import android.os.Build;
+import android.os.PowerManager;
+import android.os.SystemClock;
+import android.telephony.TelephonyManager;
+
+import com.neovisionaries.ws.client.WebSocket;
+import com.neovisionaries.ws.client.WebSocketAdapter;
+import com.neovisionaries.ws.client.WebSocketException;
+import com.neovisionaries.ws.client.WebSocketFactory;
+import com.neovisionaries.ws.client.WebSocketFrame;
+
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.FileLog;
+import org.telegram.messenger.MessagesController;
+import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.ForegroundDetector;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+// The path to the server (task 113 of the Pluma server, ADR 0073): the direct address of DC 1
+// or an edge of PlumaEdgeBridge. A path is measured with the gateway's probe, more bytes than
+// the stall of brief 092 lets through, on a connection of its own; tgnet connects at once by
+// the order chosen from the memory of the network, and the race of the probes changes that
+// order, and reconnects DC 1, when the first path does not pass and another does. Measurements
+// in the background (at start, on a change of the network, when a request waits with no byte,
+// every reprobe_s) switch to a path that is clearly better. One choice for all accounts of the
+// process. No probe while a proxy of the user is on, nor after the gateway showed it does not
+// know the probe, until the next pluma_probe: then the rules of task 109 hold.
+public final class PlumaPathProber {
+    static final String DIRECT = PlumaPathPolicy.DIRECT;
+    // The direct address of DC 1, as the tgnet edit of the build writes it.
+    private static final String DIRECT_IPV4 = "";
+    private static final String DIRECT_IPV6 = "";
+    private static final int DIRECT_PORT = 0;
+    private static final String APP_CONFIG_KEY = "pluma_probe";
+    private static final String PREFERENCES = "pluma_paths";
+    private static final String PARAMS_KEY = "params";
+    private static final String MEMORY_KEY = "networks";
+    // A measurement waits this long after the first connection that passed, and runs again when
+    // the app comes back after this long in the background (the brief's section 6).
+    private static final long LAUNCH_RANK_DELAY = 5_000;
+    private static final long BACKGROUND_RANK = 30 * 60_000L;
+    private static final long NETWORK_RANK_INTERVAL = 120_000;
+    private static final long SUSPECT_INTERVAL = 60_000;
+    // A switch waits for a file transfer, at most this long.
+    private static final long TRANSFER_RECENT = 3_000;
+    private static final long TRANSFER_CHECK = 10_000;
+    private static final long TRANSFER_DEFER = 120_000;
+    // A race every path of which failed is the network: it runs again, while the app is on the
+    // screen, after 5 s, then twice as long each time, at most a minute.
+    private static final long RETRY_MIN = 5_000;
+    private static final long RETRY_MAX = 60_000;
+    private static final long NETWORK_SETTLE = 1_000;
+    private static final long TICK = 60_000;
+    private static final int READ_SLICE = 50;
+    private static final int READ_BUFFER = 32 * 1024;
+
+    private static final Object lock = new Object();
+    private static final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor();
+    private static final ExecutorService io = Executors.newCachedThreadPool();
+    private static final SecureRandom random = new SecureRandom();
+
+    // Under the lock; the bridge reads them for tgnet's order.
+    private static boolean started;
+    private static PlumaPathPolicy.Params params = PlumaPathPolicy.Params.defaults();
+    private static String paramsText = "";
+    private static PlumaPathPolicy.Memory memory = new PlumaPathPolicy.Memory();
+    private static String networkKey = "";
+    private static String current;
+    // Until when the probes rest: the gateway closed right after resPQ (markUnsupported).
+    private static long unsupportedUntil;
+
+    // The worker's own.
+    private static boolean gateRunning;
+    private static boolean gateAgain;
+    private static boolean rankRunning;
+    private static boolean launchRanked;
+    private static boolean networkRankDue;
+    private static long retryDelay = RETRY_MIN;
+    private static ScheduledFuture<?> retry;
+    private static ScheduledFuture<?> networkCheck;
+    private static ScheduledFuture<?> confirm;
+    private static String pendingCandidate;
+    private static long pendingAt;
+    private static long lastNetworkRank;
+    private static long lastSuspect;
+    private static long backgroundSince = -1;
+    private static volatile boolean foreground;
+    private static boolean listening;
+    private static String fingerprint = "";
+
+    private PlumaPathProber() {
+    }
+
+    // PlumaEdgeBridge.start, under the bridge's lock: the memory, the network, the first race.
+    static void start() {
+        synchronized (lock) {
+            if (started) {
+                return;
+            }
+            started = true;
+            SharedPreferences preferences = preferences();
+            String text = preferences.getString(PARAMS_KEY, null);
+            PlumaPathPolicy.Params stored = text != null ? PlumaPathPolicy.Params.fromText(text) : null;
+            if (stored != null) {
+                params = stored;
+                paramsText = text;
+            }
+            memory = PlumaPathPolicy.Memory.fromText(preferences.getString(MEMORY_KEY, ""));
+            fingerprint = fingerprint();
+            networkKey = params.country + fingerprint;
+        }
+        worker.execute(() -> {
+            listen();
+            gate();
+        });
+        worker.scheduleWithFixedDelay(PlumaPathProber::tick, TICK, TICK, TimeUnit.MILLISECONDS);
+    }
+
+    // The order of the paths for tgnet, 0 the direct addresses and n + 1 the edge n of urls; the
+    // current path first. Called by the bridge under its lock.
+    static int[] order(List<String> urls, boolean edgesFirst) {
+        List<String> paths = new ArrayList<>(urls);
+        paths.add(edgesFirst ? paths.size() : 0, DIRECT);
+        List<String> ordered;
+        synchronized (lock) {
+            if (!selecting()) {
+                ordered = paths;
+            } else {
+                long now = System.currentTimeMillis();
+                PlumaPathPolicy.Network n = memory.networks.get(networkKey);
+                ordered = n != null ? n.order(paths, now) : paths;
+                if (current == null || !paths.contains(current)) {
+                    current = ordered.get(0);
+                } else {
+                    ordered.remove(current);
+                    ordered.add(0, current);
+                }
+            }
+        }
+        int[] out = new int[ordered.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = ordered.get(i).equals(DIRECT) ? 0 : urls.indexOf(ordered.get(i)) + 1;
+        }
+        return out;
+    }
+
+    // How long a request of DC 1 waits with no byte before tgnet reports it; 0 never.
+    static int suspectMs() {
+        synchronized (lock) {
+            return selecting() ? params.suspectMs() : 0;
+        }
+    }
+
+    // Whether the probes choose the path now; otherwise the rules of task 109 (sticky_s) hold.
+    static boolean selecting() {
+        synchronized (lock) {
+            return started && !unsupported() && !proxied();
+        }
+    }
+
+    // Under the lock: whether the probes rest after a close right after resPQ.
+    private static boolean unsupported() {
+        return System.currentTimeMillis() < unsupportedUntil;
+    }
+
+    // A proxy of the user is on, as ConnectionsManager.init reads it for tgnet.
+    private static boolean proxied() {
+        SharedPreferences main = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Context.MODE_PRIVATE);
+        return main.getBoolean("proxy_enabled", false) && ProxySettings.fromSharedPreferences(main).isValid();
+    }
+
+    // The bridge took other edges or another order of pluma_edge.
+    static void onPathsChanged() {
+        worker.execute(PlumaPathProber::gate);
+    }
+
+    // MessagesController.applyAppConfig: pluma_probe of help.getAppConfig; the built-in values
+    // when it is absent or not valid.
+    public static void applyAppConfig(TLRPC.TL_jsonObject object) {
+        TLRPC.JSONValue value = null;
+        for (TLRPC.TL_jsonObjectValue item : object.value) {
+            if (APP_CONFIG_KEY.equals(item.key)) {
+                value = item.value;
+                break;
+            }
+        }
+        PlumaPathPolicy.Params received = null;
+        if (value instanceof TLRPC.TL_jsonObject) {
+            Map<String, Object> fields = new HashMap<>();
+            for (TLRPC.TL_jsonObjectValue item : ((TLRPC.TL_jsonObject) value).value) {
+                if (item.value instanceof TLRPC.TL_jsonNumber) {
+                    fields.put(item.key, ((TLRPC.TL_jsonNumber) item.value).value);
+                } else if (item.value instanceof TLRPC.TL_jsonString) {
+                    fields.put(item.key, ((TLRPC.TL_jsonString) item.value).value);
+                } else {
+                    fields.put(item.key, item.value);
+                }
+            }
+            received = PlumaPathPolicy.Params.of(fields);
+        }
+        PlumaPathPolicy.Params next = received != null ? received : PlumaPathPolicy.Params.defaults();
+        worker.execute(() -> applyParams(next));
+    }
+
+    // ConnectionsManager.onPlumaPathSuspect, on tgnet's thread: a request of DC 1 waits with no
+    // byte for suspect_ms.
+    public static void onSuspect(int account) {
+        worker.execute(() -> {
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastSuspect < SUSPECT_INTERVAL) {
+                return;
+            }
+            lastSuspect = now;
+            rank();
+        });
+    }
+
+    // --- the worker ---------------------------------------------------------------------------
+
+    private static void applyParams(PlumaPathPolicy.Params next) {
+        boolean networkChanged;
+        synchronized (lock) {
+            String text = next.toText();
+            if (text.equals(paramsText)) {
+                return;
+            }
+            // Another pluma_probe: the gateway may know the probe now.
+            unsupportedUntil = 0;
+            params = next;
+            paramsText = text;
+            preferences().edit().putString(PARAMS_KEY, text).apply();
+            String key = next.country + fingerprint;
+            networkChanged = !key.equals(networkKey);
+            networkKey = key;
+            if (networkChanged) {
+                current = null;
+            }
+        }
+        PlumaEdgeBridge.reorder(networkChanged);
+        if (networkChanged) {
+            networkRankDue = true;
+        }
+        gate();
+    }
+
+    private static void tick() {
+        listen();
+        PlumaPathPolicy.Network n;
+        PlumaPathPolicy.Params p;
+        synchronized (lock) {
+            n = memory.networks.get(networkKey);
+            p = params;
+        }
+        if (n != null && foreground && !saving() && System.currentTimeMillis() - n.ranked >= p.reprobeMs()) {
+            rank();
+        }
+    }
+
+    // The callbacks of the network and of the app's screen, once each; the screen's detector
+    // exists only after ApplicationLoader.onCreate, so a later tick tries again.
+    private static void listen() {
+        if (listening) {
+            return;
+        }
+        ForegroundDetector detector = ForegroundDetector.getInstance();
+        if (detector == null) {
+            return;
+        }
+        listening = true;
+        foreground = detector.isForeground();
+        detector.addListener(new ForegroundDetector.Listener() {
+            @Override
+            public void onBecameForeground() {
+                worker.execute(PlumaPathProber::onForeground);
+            }
+
+            @Override
+            public void onBecameBackground() {
+                worker.execute(() -> {
+                    foreground = false;
+                    backgroundSince = SystemClock.elapsedRealtime();
+                });
+            }
+        });
+        try {
+            ConnectivityManager manager = connectivity();
+            ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    networkEvent();
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    networkEvent();
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                    networkEvent();
+                }
+
+                @Override
+                public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
+                    networkEvent();
+                }
+            };
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                manager.registerDefaultNetworkCallback(callback);
+            } else {
+                manager.registerNetworkCallback(new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(), callback);
+            }
+        } catch (RuntimeException e) {
+            FileLog.e(e);
+        }
+        if (foreground) {
+            onForeground();
+        }
+    }
+
+    private static void onForeground() {
+        foreground = true;
+        long away = backgroundSince < 0 ? 0 : SystemClock.elapsedRealtime() - backgroundSince;
+        backgroundSince = -1;
+        if (away >= BACKGROUND_RANK) {
+            launchRanked = false;
+        }
+        worker.schedule(PlumaPathProber::rankIfDue, LAUNCH_RANK_DELAY, TimeUnit.MILLISECONDS);
+    }
+
+    private static void networkEvent() {
+        worker.execute(() -> {
+            if (networkCheck != null) {
+                networkCheck.cancel(false);
+            }
+            networkCheck = worker.schedule(PlumaPathProber::onNetwork, NETWORK_SETTLE, TimeUnit.MILLISECONDS);
+        });
+    }
+
+    // Another network: its memory gives tgnet's order, a race checks the first path, the app
+    // config is read again for the country of the new address, and the paths are measured.
+    private static void onNetwork() {
+        networkCheck = null;
+        String next = fingerprint();
+        boolean changed;
+        synchronized (lock) {
+            changed = !next.equals(fingerprint);
+            fingerprint = next;
+            if (changed) {
+                networkKey = params.country + next;
+                current = null;
+            }
+        }
+        if (!changed) {
+            return;
+        }
+        PlumaEdgeBridge.reorder(true);
+        for (int account : PlumaEdgeBridge.attachedAccounts()) {
+            AndroidUtilities.runOnUIThread(() -> MessagesController.getInstance(account).loadAppConfig(true));
+        }
+        networkRankDue = true;
+        retryDelay = RETRY_MIN;
+        gate();
+    }
+
+    // The race of the gate probes (the brief's section 3). The current path, tgnet's first, is
+    // already connecting: the race only confirms it, or replaces it with the first path that
+    // passes when it does not pass, or does not pass within race_stagger_ms of another.
+    private static void gate() {
+        if (gateRunning) {
+            gateAgain = true;
+            return;
+        }
+        if (!selecting()) {
+            return;
+        }
+        List<String> paths = PlumaEdgeBridge.paths();
+        if (paths.size() < 2) {
+            return;
+        }
+        PlumaPathPolicy.Params p;
+        String cur;
+        List<String> first;
+        List<String> rest = new ArrayList<>();
+        List<String> last = new ArrayList<>();
+        synchronized (lock) {
+            p = params;
+            long now = System.currentTimeMillis();
+            PlumaPathPolicy.Network n = memory.network(networkKey);
+            if (current == null || !paths.contains(current)) {
+                current = n.order(paths, now).get(0);
+            }
+            cur = current;
+            first = new ArrayList<>(n.firstGroup(paths, now));
+            if (!first.contains(cur)) {
+                first.add(0, cur);
+            }
+            for (String path : paths) {
+                if (!first.contains(path)) {
+                    (n.excluded(path, now) ? last : rest).add(path);
+                }
+            }
+        }
+        if (retry != null) {
+            retry.cancel(false);
+            retry = null;
+        }
+        gateRunning = true;
+        gateAgain = false;
+        io.execute(() -> {
+            Race race = new Race(cur, first, rest, last, p);
+            race.run();
+            worker.execute(() -> gateDone(race, cur));
+        });
+    }
+
+    private static void gateDone(Race race, String cur) {
+        gateRunning = false;
+        if (race.unsupported) {
+            markUnsupported();
+            return;
+        }
+        long now = System.currentTimeMillis();
+        PlumaPathPolicy.Params p;
+        boolean switched = false;
+        synchronized (lock) {
+            p = params;
+            PlumaPathPolicy.Network n = memory.network(networkKey);
+            boolean any = race.winner != null;
+            for (Map.Entry<String, PlumaPathPolicy.Outcome> r : race.outcomes.entrySet()) {
+                if (PlumaPathPolicy.passed(r.getValue())) {
+                    any = true;
+                }
+            }
+            // Every path failed: the network, not the paths; nothing is remembered.
+            if (any) {
+                for (Map.Entry<String, PlumaPathPolicy.Outcome> r : race.outcomes.entrySet()) {
+                    Double score = race.scores.get(r.getKey());
+                    n.record(r.getKey(), r.getValue(), score != null ? score : Double.NaN, now, p);
+                }
+                if (race.winner != null && race.winner.equals(current) && cur.equals(current)) {
+                    n.best = cur;
+                } else if (race.winner != null && cur.equals(current)) {
+                    current = race.winner;
+                    n.best = race.winner;
+                    n.switched = now;
+                    switched = true;
+                }
+                memory.prune();
+                store();
+            }
+        }
+        if (switched) {
+            PlumaEdgeBridge.reorder(true);
+        }
+        if (race.winner == null) {
+            if (foreground) {
+                retry = worker.schedule(PlumaPathProber::gate, retryDelay, TimeUnit.MILLISECONDS);
+                retryDelay = Math.min(RETRY_MAX, retryDelay * 2);
+            }
+        } else {
+            retryDelay = RETRY_MIN;
+            worker.schedule(PlumaPathProber::rankIfDue, LAUNCH_RANK_DELAY, TimeUnit.MILLISECONDS);
+        }
+        if (gateAgain) {
+            gate();
+        }
+    }
+
+    // The measurements after a passed race, with the app on the screen: one after a change of the
+    // network (at most every NETWORK_RANK_INTERVAL), one after the start or a return from the
+    // background, when the last in this network is older than rank_min_interval_s.
+    private static void rankIfDue() {
+        if (!foreground || gateRunning) {
+            return;
+        }
+        long elapsed = SystemClock.elapsedRealtime();
+        if (networkRankDue && (lastNetworkRank == 0 || elapsed - lastNetworkRank >= NETWORK_RANK_INTERVAL)) {
+            if (rank()) {
+                networkRankDue = false;
+                lastNetworkRank = elapsed;
+                launchRanked = true;
+            }
+            return;
+        }
+        if (launchRanked) {
+            return;
+        }
+        PlumaPathPolicy.Network n;
+        PlumaPathPolicy.Params p;
+        synchronized (lock) {
+            n = memory.networks.get(networkKey);
+            p = params;
+        }
+        if (n != null && System.currentTimeMillis() - n.ranked < p.rankMinIntervalMs() || rank()) {
+            launchRanked = true;
+        }
+    }
+
+    // A measurement of the paths, one after another on connections of their own (the brief's
+    // section 6): the direct path and the current one always, the other edges only when the
+    // country puts the edges first or the direct path is bad. Only with the app on the screen.
+    private static boolean rank() {
+        if (rankRunning || gateRunning || !foreground || !selecting()) {
+            return false;
+        }
+        List<String> paths = PlumaEdgeBridge.paths();
+        if (paths.size() < 2) {
+            return false;
+        }
+        String cur;
+        PlumaPathPolicy.Params p;
+        synchronized (lock) {
+            p = params;
+            if (current == null || !paths.contains(current)) {
+                current = memory.network(networkKey).order(paths, System.currentTimeMillis()).get(0);
+            }
+            cur = current;
+        }
+        rankRunning = true;
+        boolean edgesFirst = !paths.get(0).equals(DIRECT);
+        io.execute(() -> {
+            Map<String, Probe> done = new LinkedHashMap<>();
+            for (String path : new String[]{DIRECT, cur}) {
+                if (!done.containsKey(path)) {
+                    done.put(path, Probe.run(path, p.rankDown(), p));
+                }
+            }
+            Probe direct = done.get(DIRECT);
+            if (direct.outcome != PlumaPathPolicy.Outcome.UNSUPPORTED
+                    && PlumaPathPolicy.rankEdges(edgesFirst, direct.outcome, direct.score(), p)) {
+                for (String path : paths) {
+                    if (!done.containsKey(path)) {
+                        done.put(path, Probe.run(path, p.rankDown(), p));
+                    }
+                }
+            }
+            worker.execute(() -> rankDone(done, cur, paths));
+        });
+        return true;
+    }
+
+    private static void rankDone(Map<String, Probe> done, String cur, List<String> paths) {
+        rankRunning = false;
+        for (Probe probe : done.values()) {
+            if (probe.outcome == PlumaPathPolicy.Outcome.UNSUPPORTED) {
+                markUnsupported();
+                return;
+            }
+        }
+        long now = System.currentTimeMillis();
+        String target = null;
+        boolean emergency = false;
+        synchronized (lock) {
+            PlumaPathPolicy.Params p = params;
+            PlumaPathPolicy.Network n = memory.network(networkKey);
+            boolean any = false;
+            for (Probe probe : done.values()) {
+                any |= PlumaPathPolicy.passed(probe.outcome);
+            }
+            if (!any) {
+                return;
+            }
+            Map<String, Double> scores = new HashMap<>();
+            for (Map.Entry<String, Probe> e : done.entrySet()) {
+                n.record(e.getKey(), e.getValue().outcome, e.getValue().score(), now, p);
+                if (PlumaPathPolicy.passed(e.getValue().outcome)) {
+                    scores.put(e.getKey(), n.state(e.getKey()).effectiveScore());
+                }
+            }
+            n.ranked = now;
+            if (!cur.equals(current)) {
+                // A race moved the path meanwhile; this measurement judged another one.
+                pendingCandidate = null;
+            } else if (!scores.containsKey(cur)) {
+                // The current path did not pass: the best that did, at once.
+                target = PlumaPathPolicy.best(paths, scores);
+                emergency = true;
+            } else {
+                Map<String, Double> others = new HashMap<>(scores);
+                others.remove(cur);
+                String candidate = PlumaPathPolicy.best(paths, others);
+                if (candidate != null) {
+                    boolean confirmed = candidate.equals(pendingCandidate)
+                            && now - pendingAt <= PlumaPathPolicy.CONFIRM_SLACK * p.confirmMs();
+                    switch (PlumaPathPolicy.decide(scores.get(cur), others.get(candidate), confirmed, now - n.switched, p)) {
+                        case SWITCH:
+                            target = candidate;
+                            pendingCandidate = null;
+                            break;
+                        case CONFIRM:
+                            pendingCandidate = candidate;
+                            pendingAt = now;
+                            if (confirm != null) {
+                                confirm.cancel(false);
+                            }
+                            confirm = worker.schedule(PlumaPathProber::rank, p.confirmMs(), TimeUnit.MILLISECONDS);
+                            break;
+                        default:
+                            pendingCandidate = null;
+                    }
+                } else {
+                    pendingCandidate = null;
+                }
+            }
+            memory.prune();
+            store();
+        }
+        if (target != null) {
+            if (emergency) {
+                switchTo(target);
+            } else {
+                switchWhenIdle(target, SystemClock.elapsedRealtime());
+            }
+        }
+    }
+
+    // A switch by measurement waits for a file transfer, at most TRANSFER_DEFER.
+    private static void switchWhenIdle(String target, long since) {
+        if (transferring() && SystemClock.elapsedRealtime() - since < TRANSFER_DEFER) {
+            worker.schedule(() -> switchWhenIdle(target, since), TRANSFER_CHECK, TimeUnit.MILLISECONDS);
+            return;
+        }
+        switchTo(target);
+    }
+
+    private static void switchTo(String target) {
+        // The bridge's lock goes before this one, never inside it.
+        List<String> paths = PlumaEdgeBridge.paths();
+        synchronized (lock) {
+            if (target.equals(current) || !paths.contains(target)) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            PlumaPathPolicy.Network n = memory.network(networkKey);
+            current = target;
+            n.best = target;
+            n.switched = now;
+            n.used = now;
+            store();
+        }
+        PlumaEdgeBridge.reorder(true);
+    }
+
+    // The gateway closed right after resPQ: it does not know the probe, or its limits refused it
+    // (they close the same way, the server's task 113 brief, "Контракт пробы"). The rules of task
+    // 109 hold until another pluma_probe comes or failed_ttl_s passes, whichever is first, so that
+    // a refusal does not stop the probes for good; nothing is remembered.
+    private static void markUnsupported() {
+        synchronized (lock) {
+            unsupportedUntil = System.currentTimeMillis() + params.failedTtlMs();
+            current = null;
+        }
+        PlumaEdgeBridge.reorder(false);
+    }
+
+    private static boolean transferring() {
+        for (int account : PlumaEdgeBridge.attachedAccounts()) {
+            long age = ConnectionsManager.native_getPlumaPathTransferAge(account);
+            if (age >= 0 && age < TRANSFER_RECENT) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Data Saver of the system for this app, or Battery Saver.
+    private static boolean saving() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+                    && connectivity().getRestrictBackgroundStatus() == ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED) {
+                return true;
+            }
+            PowerManager power = (PowerManager) ApplicationLoader.applicationContext.getSystemService(Context.POWER_SERVICE);
+            return power != null && power.isPowerSaveMode();
+        } catch (RuntimeException e) {
+            FileLog.e(e);
+            return false;
+        }
+    }
+
+    // Under the lock.
+    private static void store() {
+        preferences().edit().putString(MEMORY_KEY, memory.toText()).apply();
+    }
+
+    private static SharedPreferences preferences() {
+        return ApplicationLoader.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+    }
+
+    private static ConnectivityManager connectivity() {
+        return (ConnectivityManager) ApplicationLoader.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+    }
+
+    // The part of the network's key the device sees: the kind of the default network, its
+    // gateways and DNS servers, the operator of a mobile one. No SSID, no location: no permission.
+    private static String fingerprint() {
+        String transport = "none";
+        List<String> parts = new ArrayList<>();
+        try {
+            ConnectivityManager manager = connectivity();
+            Network network = manager.getActiveNetwork();
+            NetworkCapabilities capabilities = network != null ? manager.getNetworkCapabilities(network) : null;
+            LinkProperties properties = network != null ? manager.getLinkProperties(network) : null;
+            if (capabilities != null) {
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    transport = "vpn";
+                } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    transport = "wifi";
+                } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    transport = "ethernet";
+                } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    transport = "cellular";
+                    parts.add("op=" + operator());
+                } else {
+                    transport = "other";
+                }
+            }
+            if (properties != null) {
+                for (RouteInfo route : properties.getRoutes()) {
+                    InetAddress gateway = route.getGateway();
+                    if (route.isDefaultRoute() && gateway != null && !gateway.isAnyLocalAddress()) {
+                        parts.add("gw=" + gateway.getHostAddress());
+                    }
+                }
+                for (InetAddress dns : properties.getDnsServers()) {
+                    parts.add("dns=" + dns.getHostAddress());
+                }
+            }
+        } catch (RuntimeException e) {
+            FileLog.e(e);
+        }
+        String key = PlumaPathPolicy.networkKey("", transport, parts);
+        return key.substring(key.indexOf(':'));
+    }
+
+    // The MCC and MNC of the mobile network, "" when the system does not tell them.
+    private static String operator() {
+        try {
+            TelephonyManager telephony = (TelephonyManager) ApplicationLoader.applicationContext.getSystemService(Context.TELEPHONY_SERVICE);
+            String operator = telephony != null ? telephony.getNetworkOperator() : null;
+            return operator != null ? operator : "";
+        } catch (RuntimeException e) {
+            FileLog.e(e);
+            return "";
+        }
+    }
+
+    // --- the race ------------------------------------------------------------------------------
+
+    private static final class Race {
+        final String current;
+        final List<String> first;
+        final List<String> rest;
+        final List<String> last;
+        final PlumaPathPolicy.Params p;
+        final LinkedBlockingQueue<Probe> results = new LinkedBlockingQueue<>();
+        final List<Probe> running = new ArrayList<>();
+        final Map<String, PlumaPathPolicy.Outcome> outcomes = new LinkedHashMap<>();
+        final Map<String, Double> scores = new HashMap<>();
+        String winner;
+        boolean unsupported;
+
+        Race(String current, List<String> first, List<String> rest, List<String> last, PlumaPathPolicy.Params p) {
+            this.current = current;
+            this.first = first;
+            this.rest = rest;
+            this.last = last;
+            this.p = p;
+        }
+
+        void run() {
+            long start = SystemClock.elapsedRealtime();
+            launch(first);
+            boolean restStarted = rest.isEmpty();
+            boolean lastStarted = last.isEmpty();
+            String passed = null;
+            long passedAt = 0;
+            try {
+                while (true) {
+                    long now = SystemClock.elapsedRealtime();
+                    if (passed != null && (passed.equals(current) || outcomes.containsKey(current)
+                            && !PlumaPathPolicy.passed(outcomes.get(current)) || now - passedAt >= p.raceStaggerMs())) {
+                        winner = outcomes.get(current) == PlumaPathPolicy.Outcome.OK ? current : passed;
+                        break;
+                    }
+                    boolean firstOut = true;
+                    for (String path : first) {
+                        firstOut &= outcomes.containsKey(path);
+                    }
+                    if (!restStarted && passed == null && (firstOut || now - start >= p.raceStaggerMs())) {
+                        launch(rest);
+                        restStarted = true;
+                    }
+                    if (restStarted && !lastStarted && passed == null && outcomes.size() == running.size()) {
+                        launch(last);
+                        lastStarted = true;
+                    }
+                    if (restStarted && lastStarted && outcomes.size() == running.size()) {
+                        break;
+                    }
+                    long wait = passed != null ? passedAt + p.raceStaggerMs() - now
+                            : restStarted ? p.deadlineMs() : start + p.raceStaggerMs() - now;
+                    Probe probe = results.poll(Math.max(1, wait), TimeUnit.MILLISECONDS);
+                    if (probe == null) {
+                        continue;
+                    }
+                    outcomes.put(probe.path, probe.outcome);
+                    if (probe.outcome == PlumaPathPolicy.Outcome.UNSUPPORTED) {
+                        unsupported = true;
+                        break;
+                    }
+                    if (PlumaPathPolicy.passed(probe.outcome)) {
+                        scores.put(probe.path, probe.score());
+                    }
+                    if (probe.outcome == PlumaPathPolicy.Outcome.OK && passed == null) {
+                        passed = probe.path;
+                        passedAt = SystemClock.elapsedRealtime();
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                for (Probe probe : running) {
+                    probe.cancel();
+                }
+            }
+        }
+
+        private void launch(List<String> paths) {
+            for (String path : paths) {
+                Probe probe = new Probe(path, p.gateDown(), p);
+                running.add(probe);
+                io.execute(() -> results.add(probe.execute()));
+            }
+        }
+    }
+
+    // --- one probe -----------------------------------------------------------------------------
+
+    private static final class Probe extends WebSocketAdapter {
+        final String path;
+        final int down;
+        final PlumaPathPolicy.Params p;
+        final PlumaPathPolicy.Measure measure;
+        private final byte[] requestNonce = new byte[16];
+        private final byte[] probeNonce = new byte[16];
+        private final PlumaPathPolicy.Reader reader;
+        private PlumaPathPolicy.Obfuscation obfuscation;
+        private Socket socket;
+        private WebSocket webSocket;
+        private boolean cancelled;
+        private boolean closing;
+        PlumaPathPolicy.Outcome outcome;
+
+        Probe(String path, int down, PlumaPathPolicy.Params p) {
+            this.path = path;
+            this.down = down;
+            this.p = p;
+            this.measure = new PlumaPathPolicy.Measure(p, SystemClock.elapsedRealtime());
+            random.nextBytes(requestNonce);
+            random.nextBytes(probeNonce);
+            this.reader = new PlumaPathPolicy.Reader(requestNonce, probeNonce, down);
+        }
+
+        static Probe run(String path, int down, PlumaPathPolicy.Params p) {
+            return new Probe(path, down, p).execute();
+        }
+
+        double score() {
+            return PlumaPathPolicy.score(measure.rtt(), measure.bytesPerSecond());
+        }
+
+        // Runs the probe on this thread and returns it with its outcome. A write that blocks on
+        // a frozen path is cut by closing the socket a second after the deadline; the outcome is
+        // then what the measure says at that time.
+        Probe execute() {
+            ScheduledFuture<?> watchdog = worker.schedule(this::cancel, p.deadlineMs() + 1000, TimeUnit.MILLISECONDS);
+            try {
+                obfuscation = PlumaPathPolicy.Obfuscation.create(random);
+                if (path.equals(DIRECT)) {
+                    direct();
+                } else {
+                    edge();
+                }
+            } catch (IOException | WebSocketException | GeneralSecurityException | RuntimeException e) {
+                synchronized (this) {
+                    if (outcome == null && !cancelled) {
+                        measure.failed();
+                    }
+                }
+            } finally {
+                watchdog.cancel(false);
+                close();
+            }
+            synchronized (this) {
+                if (outcome == null) {
+                    outcome = measure.outcome(SystemClock.elapsedRealtime());
+                    if (outcome == null) {
+                        outcome = PlumaPathPolicy.Outcome.FAILED;
+                    }
+                }
+            }
+            return this;
+        }
+
+        // The request: the obfuscated2 header and req_pq_multi in one write.
+        private byte[] request() {
+            byte[] sealed = obfuscation.seal(PlumaPathPolicy.frame(PlumaPathPolicy.reqPqMulti(
+                    PlumaPathPolicy.msgId(System.currentTimeMillis()), requestNonce)));
+            byte[] out = new byte[64 + sealed.length];
+            System.arraycopy(obfuscation.header, 0, out, 0, 64);
+            System.arraycopy(sealed, 0, out, 64, sealed.length);
+            return out;
+        }
+
+        private byte[] probeMessage() {
+            byte[] pad = new byte[Math.min(p.up(), PlumaPathPolicy.MAX_UP)];
+            random.nextBytes(pad);
+            return obfuscation.seal(PlumaPathPolicy.frame(PlumaPathPolicy.probe(
+                    PlumaPathPolicy.msgId(System.currentTimeMillis()), probeNonce, down, pad)));
+        }
+
+        // Bytes of the gateway; returns the probe to send once resPQ came, null otherwise.
+        private synchronized byte[] received(byte[] data, int length) {
+            byte[] plain = obfuscation.open(data, 0, length);
+            boolean before = reader.resPq;
+            int answer = reader.feed(plain, 0, plain.length);
+            measure.received(SystemClock.elapsedRealtime(), plain.length, answer, reader);
+            if (!before && reader.resPq && reader.error == null && !measure.probeSent()) {
+                measure.probeSent(SystemClock.elapsedRealtime());
+                return probeMessage();
+            }
+            return null;
+        }
+
+        // The outcome once there is one; a cancelled probe stops with what its measure says then.
+        private synchronized PlumaPathPolicy.Outcome check() {
+            if (outcome == null) {
+                PlumaPathPolicy.Outcome now = measure.outcome(SystemClock.elapsedRealtime());
+                outcome = now == null && cancelled ? PlumaPathPolicy.Outcome.FAILED : now;
+            }
+            return outcome;
+        }
+
+        // obfuscated2 over TCP to the direct address of DC 1, as tgnet goes; IPv6 if IPv4 has no
+        // route.
+        private void direct() throws IOException {
+            Socket s = new Socket();
+            synchronized (this) {
+                if (cancelled) {
+                    return;
+                }
+                socket = s;
+            }
+            try {
+                s.connect(new InetSocketAddress(InetAddress.getByName(DIRECT_IPV4), DIRECT_PORT), (int) p.deadlineMs());
+            } catch (SocketTimeoutException e) {
+                throw e;
+            } catch (IOException e) {
+                if (DIRECT_IPV6.isEmpty()) {
+                    throw e;
+                }
+                s.close();
+                s = new Socket();
+                synchronized (this) {
+                    if (cancelled) {
+                        return;
+                    }
+                    socket = s;
+                }
+                s.connect(new InetSocketAddress(InetAddress.getByName(DIRECT_IPV6), DIRECT_PORT), (int) p.deadlineMs());
+            }
+            measure.connected(SystemClock.elapsedRealtime(), false);
+            s.setTcpNoDelay(true);
+            s.setSoTimeout(READ_SLICE);
+            OutputStream out = s.getOutputStream();
+            InputStream in = s.getInputStream();
+            out.write(request());
+            measure.requestSent(SystemClock.elapsedRealtime());
+            byte[] buffer = new byte[READ_BUFFER];
+            while (check() == null) {
+                int count;
+                try {
+                    count = in.read(buffer);
+                } catch (SocketTimeoutException e) {
+                    continue;
+                }
+                if (count < 0) {
+                    synchronized (this) {
+                        measure.closed();
+                    }
+                    continue;
+                }
+                byte[] probe = received(buffer, count);
+                if (probe != null) {
+                    out.write(probe);
+                }
+            }
+        }
+
+        // The edge's WebSocket, as PlumaEdgeBridge opens it.
+        private void edge() throws IOException, WebSocketException {
+            WebSocket ws = new WebSocketFactory()
+                    .setConnectionTimeout((int) p.deadlineMs())
+                    .setSocketTimeout((int) p.deadlineMs())
+                    .setServerName(URI.create(path).getHost())
+                    .createSocket(path);
+            ws.addProtocol("binary");
+            ws.addHeader("User-Agent", "Pluma");
+            ws.addListener(this);
+            synchronized (this) {
+                if (cancelled) {
+                    return;
+                }
+                webSocket = ws;
+            }
+            ws.connect();
+            synchronized (this) {
+                measure.connected(SystemClock.elapsedRealtime(), true);
+                ws.sendBinary(request());
+                measure.requestSent(SystemClock.elapsedRealtime());
+            }
+            synchronized (this) {
+                while (check() == null) {
+                    try {
+                        wait(READ_SLICE);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        measure.failed();
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void onBinaryMessage(WebSocket websocket, byte[] binary) {
+            byte[] probe = received(binary, binary.length);
+            if (probe != null) {
+                websocket.sendBinary(probe);
+            }
+            synchronized (this) {
+                notifyAll();
+            }
+        }
+
+        // A close of the edge's side; one of our own is not the gateway's answer.
+        @Override
+        public void onDisconnected(WebSocket websocket, WebSocketFrame serverCloseFrame, WebSocketFrame clientCloseFrame, boolean closedByServer) {
+            synchronized (this) {
+                if (!closing && !cancelled) {
+                    measure.closed();
+                }
+                notifyAll();
+            }
+        }
+
+        // From the race: it ended, this probe is not needed any more.
+        void cancel() {
+            synchronized (this) {
+                cancelled = true;
+                notifyAll();
+            }
+            close();
+        }
+
+        private void close() {
+            Socket s;
+            WebSocket ws;
+            synchronized (this) {
+                closing = true;
+                s = socket;
+                ws = webSocket;
+            }
+            if (s != null) {
+                try {
+                    s.close();
+                } catch (IOException ignore) {
+                    // Closing a probe's socket; nothing is left to do with it.
+                }
+            }
+            if (ws != null) {
+                ws.disconnect();
+                Socket raw = ws.getSocket();
+                if (raw != null) {
+                    try {
+                        raw.close();
+                    } catch (IOException ignore) {
+                        // As above.
+                    }
+                }
+            }
+        }
+    }
+}
+"""
+PATH_DIRECT_LINES = ('    private static final String DIRECT_IPV4 = "";\n'
+                     '    private static final String DIRECT_IPV6 = "";\n'
+                     '    private static final int DIRECT_PORT = 0;\n')
+
 EDGE_EDITS = (
     # DC 1: the labels after A-002's direct addresses, none until the bridge gives them.
     (EDGE_MANAGER_CPP,
@@ -1094,19 +3171,60 @@ EDGE_EDITS = (
      f'static const char *const PLUMA_EDGE_LABEL = "{EDGE_LABEL}";\n'
      f"static const size_t PLUMA_MAX_EDGES = {EDGE_URLS_LIMIT};\n"
      "\n"
-     "void ConnectionsManager::setPlumaEdges(std::vector<uint16_t> ports, bool edgesFirst) {\n"
+     "// The order of the paths of DC 1 (A-129, PlumaPathProber.java): 0 is the direct addresses, n + 1\n"
+     "// the edge n; anything but a permutation of them is the default order, the direct addresses first.\n"
+     "// suspectMs: a request of the generic connection that waits this long with no byte is reported\n"
+     "// (onPlumaPathSuspect), 0 never. With reconnect, a new order drops the connections of DC 1, which\n"
+     "// open again on its first path, as a new proxy does (setProxySettings).\n"
+     "void ConnectionsManager::setPlumaEdges(std::vector<uint16_t> ports, std::vector<int32_t> order, int32_t suspectMs, bool reconnect) {\n"
      "    if (ports.size() > PLUMA_MAX_EDGES) {\n"
      "        ports.resize(PLUMA_MAX_EDGES);\n"
      "    }\n"
-     "    scheduleTask([&, ports, edgesFirst] {\n"
+     "    std::vector<bool> seen(ports.size() + 1, false);\n"
+     "    bool valid = order.size() == ports.size() + 1;\n"
+     "    for (size_t a = 0; valid && a < order.size(); a++) {\n"
+     "        valid = order[a] >= 0 && (size_t) order[a] <= ports.size() && !seen[order[a]];\n"
+     "        if (valid) {\n"
+     "            seen[order[a]] = true;\n"
+     "        }\n"
+     "    }\n"
+     "    if (!valid) {\n"
+     "        order.clear();\n"
+     "        for (size_t a = 0; a <= ports.size(); a++) {\n"
+     "            order.push_back((int32_t) a);\n"
+     "        }\n"
+     "    }\n"
+     "    scheduleTask([&, ports, order, suspectMs, reconnect] {\n"
+     "        bool changed = plumaEdgePorts != ports || plumaPathOrder != order;\n"
      "        plumaEdgePorts = ports;\n"
-     "        plumaEdgesFirst = edgesFirst;\n"
+     "        plumaPathOrder = order;\n"
+     "        plumaPathSuspectMs = suspectMs > 0 ? suspectMs : 0;\n"
      "        Datacenter *datacenter = getDatacenterWithId(1);\n"
      "        if (datacenter != nullptr) {\n"
      "            datacenter->applyPlumaEdges();\n"
      "            saveConfig();\n"
+     "            if (reconnect && changed) {\n"
+     "                datacenter->suspendConnections(true);\n"
+     "                if (datacenter->isHandshakingAny()) {\n"
+     "                    datacenter->beginHandshake(HandshakeTypeCurrent, true);\n"
+     "                }\n"
+     "                processRequestQueue(0, 0);\n"
+     "            }\n"
      "        }\n"
      "    });\n"
+     "}\n"
+     "\n"
+     "// pluma: how long ago a file transfer last received data, in ms, -1 if never (A-129). Called from\n"
+     "// Java: it reads the clock of getCurrentTimeMonotonicMillis itself, whose buffer is the network\n"
+     "// thread's.\n"
+     "int64_t ConnectionsManager::plumaPathTransferAge() {\n"
+     "    int64_t last = plumaPathLastTransfer.load();\n"
+     "    if (last == 0) {\n"
+     "        return -1;\n"
+     "    }\n"
+     "    struct timespec now;\n"
+     "    clock_gettime(CLOCK_BOOTTIME, &now);\n"
+     "    return (int64_t) now.tv_sec * 1000 + (int64_t) now.tv_nsec / 1000000 - last;\n"
      "}\n"
      "\n"
      "// pluma: sticky_s after the client went through an edge, the next connection of DC 1 tries the\n"
@@ -1146,17 +3264,21 @@ EDGE_EDITS = (
      "    void setProxySettings(std::string address, uint16_t port, std::string username, std::string password, std::string secret);\n",
      "    void setProxySettings(std::string address, uint16_t port, std::string username, std::string password, std::string secret);\n"
      "    // pluma: the edges of the server (A-128, PlumaEdgeBridge.java).\n"
-     "    void setPlumaEdges(std::vector<uint16_t> ports, bool edgesFirst);\n"
+     "    void setPlumaEdges(std::vector<uint16_t> ports, std::vector<int32_t> order, int32_t suspectMs, bool reconnect);\n"
+     "    int64_t plumaPathTransferAge();\n"
      "    void returnFromPlumaEdge();\n"
      "    static int32_t plumaEdgeIndex(const std::string &address);\n"
      "    static std::string plumaEdgeLabel(size_t index);\n"),
     (EDGE_MANAGER_H,
      "    uint16_t proxyPort = 1080;\n",
      "    uint16_t proxyPort = 1080;\n"
-     "    // pluma: the ports of the edge bridges in the order of the edges, and whether the edges\n"
-     "    // go before the direct addresses of DC 1 (A-128).\n"
+     "    // pluma: the ports of the edge bridges in the order of the edges (A-128); the order of the\n"
+     "    // paths of DC 1, the wait of a request that is reported, and the last data of a file\n"
+     "    // transfer, monotonic ms, read by Java (A-129).\n"
      "    std::vector<uint16_t> plumaEdgePorts;\n"
-     "    bool plumaEdgesFirst = false;\n"
+     "    std::vector<int32_t> plumaPathOrder;\n"
+     "    int32_t plumaPathSuspectMs = 0;\n"
+     "    std::atomic<int64_t> plumaPathLastTransfer{0};\n"
      "    uint16_t plumaEdgePort(int32_t index, bool proxied);\n"),
     (EDGE_DATACENTER_H,
      "    bool isRepeatCheckingAddresses();\n",
@@ -1170,7 +3292,7 @@ EDGE_EDITS = (
      "    bool repeatCheckingAddresses = false;\n"
      "    // pluma: the layout of the edge labels last applied, and the frozen direct connections in a row.\n"
      "    size_t plumaEdgeCount = 0;\n"
-     "    bool plumaEdgesFirst = false;\n"
+     "    std::vector<int32_t> plumaPathOrder;\n"
      "    uint32_t plumaFrozenCount = 0;\n"
      "    int64_t plumaLastFrozenTime = 0;\n"
      "    void applyPlumaEdges(std::vector<TcpAddress> &addresses, uint32_t &addressNum, uint32_t &portNum, uint32_t flags, bool layoutChanged);\n"
@@ -1182,18 +3304,25 @@ EDGE_EDITS = (
      "        tryNextPort = (currentAddress->flags & TcpAddressFlagStatic) == 0 && ConnectionsManager::plumaEdgeIndex(currentAddress->address) < 0;\n"),
     (EDGE_DATACENTER_CPP,
      "void Datacenter::replaceAddresses(std::vector<TcpAddress> &newAddresses, uint32_t flags) {\n",
-     "// pluma: the edges of the server (task 109 of the server repository, A-128). The labels go after\n"
-     "// the direct addresses of DC 1, or before them when the server orders the edges first; a list\n"
-     "// without a direct address gets none. A new layout starts the list from its first address, the\n"
-     "// same layout keeps the current one.\n"
+     "// pluma: the edges of the server (task 109 of the server repository, A-128). The paths of DC 1,\n"
+     "// its direct addresses and a label per edge, go in the order PlumaPathProber chose (A-129), the\n"
+     "// direct addresses first by default; a list without a direct address gets no label. A new layout\n"
+     "// starts the list from its first address, the same layout keeps the current one.\n"
      "void Datacenter::applyPlumaEdges() {\n"
      "    if (datacenterId != 1) {\n"
      "        return;\n"
      "    }\n"
      "    ConnectionsManager &manager = ConnectionsManager::getInstance(instanceNum);\n"
-     "    bool layoutChanged = manager.plumaEdgePorts.size() != plumaEdgeCount || manager.plumaEdgesFirst != plumaEdgesFirst;\n"
+     "    std::vector<int32_t> order = manager.plumaPathOrder;\n"
+     "    if (order.size() != manager.plumaEdgePorts.size() + 1) {\n"
+     "        order.clear();\n"
+     "        for (size_t a = 0; a <= manager.plumaEdgePorts.size(); a++) {\n"
+     "            order.push_back((int32_t) a);\n"
+     "        }\n"
+     "    }\n"
+     "    bool layoutChanged = manager.plumaEdgePorts.size() != plumaEdgeCount || order != plumaPathOrder;\n"
      "    plumaEdgeCount = manager.plumaEdgePorts.size();\n"
-     "    plumaEdgesFirst = manager.plumaEdgesFirst;\n"
+     "    plumaPathOrder = order;\n"
      "    applyPlumaEdges(addressesIpv4, currentAddressNumIpv4, currentPortNumIpv4, 0, layoutChanged);\n"
      "    applyPlumaEdges(addressesIpv6, currentAddressNumIpv6, currentPortNumIpv6, TcpAddressFlagIpv6, layoutChanged);\n"
      "    plumaFrozenCount = 0;\n"
@@ -1208,15 +3337,14 @@ EDGE_EDITS = (
      "            direct.push_back(address);\n"
      "        }\n"
      "    }\n"
-     "    std::vector<TcpAddress> edges;\n"
-     "    if (!direct.empty()) {\n"
-     "        for (size_t a = 0; a < plumaEdgeCount; a++) {\n"
-     "            edges.emplace_back(ConnectionsManager::plumaEdgeLabel(a), 443, flags, \"\");\n"
+     "    std::vector<TcpAddress> result;\n"
+     "    for (int32_t path : plumaPathOrder) {\n"
+     "        if (path == 0) {\n"
+     "            result.insert(result.end(), direct.begin(), direct.end());\n"
+     "        } else if (!direct.empty() && (size_t) path <= plumaEdgeCount) {\n"
+     "            result.emplace_back(ConnectionsManager::plumaEdgeLabel((size_t) path - 1), 443, flags, \"\");\n"
      "        }\n"
      "    }\n"
-     "    std::vector<TcpAddress> result = plumaEdgesFirst ? edges : direct;\n"
-     "    std::vector<TcpAddress> &rest = plumaEdgesFirst ? direct : edges;\n"
-     "    result.insert(result.end(), rest.begin(), rest.end());\n"
      "    uint32_t num = 0;\n"
      "    bool found = false;\n"
      "    if (!layoutChanged) {\n"
@@ -1328,20 +3456,31 @@ EDGE_EDITS = (
     # JNI: the ports of the bridges and the return to the direct address.
     (EDGE_WRAPPER,
      "void setProxySettings(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint port, jstring username, jstring password, jstring secret) {\n",
-     "// pluma: the edges of the server (A-128): the ports of the bridges of PlumaEdgeBridge.java.\n"
-     "void setPlumaEdges(JNIEnv *env, jclass c, jint instanceNum, jintArray ports, jboolean edgesFirst) {\n"
-     "    std::vector<uint16_t> values;\n"
-     "    jsize count = ports != nullptr ? env->GetArrayLength(ports) : 0;\n"
+     "// pluma: the edges of the server (A-128): the ports of the bridges of PlumaEdgeBridge.java, and the\n"
+     "// order of the paths PlumaPathProber.java chose (A-129).\n"
+     "static std::vector<int32_t> plumaEdgeInts(JNIEnv *env, jintArray array) {\n"
+     "    std::vector<int32_t> values;\n"
+     "    jsize count = array != nullptr ? env->GetArrayLength(array) : 0;\n"
      "    if (count > 0) {\n"
-     "        jint *elements = env->GetIntArrayElements(ports, nullptr);\n"
+     "        jint *elements = env->GetIntArrayElements(array, nullptr);\n"
      "        if (elements != nullptr) {\n"
-     "            for (jsize a = 0; a < count; a++) {\n"
-     "                values.push_back(elements[a] > 0 && elements[a] < 65536 ? (uint16_t) elements[a] : 0);\n"
-     "            }\n"
-     "            env->ReleaseIntArrayElements(ports, elements, JNI_ABORT);\n"
+     "            values.assign(elements, elements + count);\n"
+     "            env->ReleaseIntArrayElements(array, elements, JNI_ABORT);\n"
      "        }\n"
      "    }\n"
-     "    ConnectionsManager::getInstance(instanceNum).setPlumaEdges(values, edgesFirst);\n"
+     "    return values;\n"
+     "}\n"
+     "\n"
+     "void setPlumaEdges(JNIEnv *env, jclass c, jint instanceNum, jintArray ports, jintArray order, jint suspectMs, jboolean reconnect) {\n"
+     "    std::vector<uint16_t> values;\n"
+     "    for (int32_t port : plumaEdgeInts(env, ports)) {\n"
+     "        values.push_back(port > 0 && port < 65536 ? (uint16_t) port : 0);\n"
+     "    }\n"
+     "    ConnectionsManager::getInstance(instanceNum).setPlumaEdges(values, plumaEdgeInts(env, order), suspectMs, reconnect);\n"
+     "}\n"
+     "\n"
+     "jlong getPlumaPathTransferAge(JNIEnv *env, jclass c, jint instanceNum) {\n"
+     "    return (jlong) ConnectionsManager::getInstance(instanceNum).plumaPathTransferAge();\n"
      "}\n"
      "\n"
      "void returnFromPlumaEdge(JNIEnv *env, jclass c, jint instanceNum) {\n"
@@ -1352,14 +3491,17 @@ EDGE_EDITS = (
     (EDGE_WRAPPER,
      '        {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},\n',
      '        {"native_setProxySettings", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void *) setProxySettings},\n'
-     '        {"native_setPlumaEdges", "(I[IZ)V", (void *) setPlumaEdges},\n'
-     '        {"native_returnFromPlumaEdge", "(I)V", (void *) returnFromPlumaEdge},\n'),
+     '        {"native_setPlumaEdges", "(I[I[IIZ)V", (void *) setPlumaEdges},\n'
+     '        {"native_returnFromPlumaEdge", "(I)V", (void *) returnFromPlumaEdge},\n'
+     '        {"native_getPlumaPathTransferAge", "(I)J", (void *) getPlumaPathTransferAge},\n'),
     (EDGE_MANAGER_JAVA,
      "    public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);\n",
      "    public static native void native_setProxySettings(int currentAccount, String address, int port, String username, String password, String secret);\n"
-     "    // pluma: the edges of the server (A-128, PlumaEdgeBridge).\n"
-     "    public static native void native_setPlumaEdges(int currentAccount, int[] ports, boolean edgesFirst);\n"
-     "    public static native void native_returnFromPlumaEdge(int currentAccount);\n"),
+     "    // pluma: the edges of the server (A-128, PlumaEdgeBridge) and the order of the paths (A-129,\n"
+     "    // PlumaPathProber).\n"
+     "    public static native void native_setPlumaEdges(int currentAccount, int[] ports, int[] order, int suspectMs, boolean reconnect);\n"
+     "    public static native void native_returnFromPlumaEdge(int currentAccount);\n"
+     "    public static native long native_getPlumaPathTransferAge(int currentAccount);\n"),
     # The account's tgnet takes the edges before it starts.
     (EDGE_MANAGER_JAVA,
      "        native_init(currentAccount, ",
@@ -1368,7 +3510,111 @@ EDGE_EDITS = (
     (EDGE_MESSAGES,
      "        changed = config.apply(editor, object);\n",
      "        changed = config.apply(editor, object);\n"
-     "        org.telegram.utils.proxy.PlumaEdgeBridge.applyAppConfig(object); // pluma: pluma_edge (A-128)\n"),
+     "        org.telegram.utils.proxy.PlumaEdgeBridge.applyAppConfig(object); // pluma: pluma_edge (A-128)\n"
+     "        org.telegram.utils.proxy.PlumaPathProber.applyAppConfig(object); // pluma: pluma_probe (A-129)\n"),
+    # A-129: a request of the generic connection of DC 1 that waits suspect_ms with no byte is
+    # reported to PlumaPathProber, which measures the paths at once.
+    (EDGE_SOCKET_H,
+     "    uint16_t overrideProxyPort = 1080;\n",
+     "    uint16_t overrideProxyPort = 1080;\n"
+     "    // pluma: the generic connection of DC 1 reports a request that waits with no byte (A-129);\n"
+     "    // when the oldest unanswered write went out, monotonic ms, 0 if none.\n"
+     "    bool plumaPathWatched = false;\n"
+     "    int64_t plumaPathWaitSince = 0;\n"),
+    (EDGE_SOCKET_CPP,
+     "void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {\n",
+     "void ConnectionSocket::openConnection(std::string address, uint16_t port, std::string secret, bool ipv6, int32_t networkType) {\n"
+     "    plumaPathWaitSince = 0; // pluma: a new connection waits for nothing yet (A-129)\n"),
+    (EDGE_SOCKET_CPP,
+     "void ConnectionSocket::writeBuffer(uint8_t *data, uint32_t size) {\n",
+     "void ConnectionSocket::writeBuffer(uint8_t *data, uint32_t size) {\n"
+     "    if (plumaPathWaitSince == 0) { // pluma: the wait starts (A-129)\n"
+     "        plumaPathWaitSince = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();\n"
+     "    }\n"),
+    (EDGE_SOCKET_CPP,
+     "void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {\n",
+     "void ConnectionSocket::writeBuffer(NativeByteBuffer *buffer) {\n"
+     "    if (plumaPathWaitSince == 0) { // pluma: the wait starts (A-129)\n"
+     "        plumaPathWaitSince = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();\n"
+     "    }\n"),
+    (EDGE_SOCKET_CPP,
+     "                if (readCount > 0) {\n"
+     "                    buffer->limit((uint32_t) readCount);\n"
+     "                    lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();\n",
+     "                if (readCount > 0) {\n"
+     "                    buffer->limit((uint32_t) readCount);\n"
+     "                    lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();\n"
+     "                    plumaPathWaitSince = 0; // pluma: a byte came (A-129)\n"),
+    (EDGE_SOCKET_CPP,
+     "bool ConnectionSocket::checkTimeout(int64_t now) {\n",
+     "bool ConnectionSocket::checkTimeout(int64_t now) {\n"
+     "    // pluma: a request waits suspect_ms with no byte since the write: once per wait, PlumaPathProber\n"
+     "    // measures the paths (A-129). Writes with no request waiting, acknowledgements, end the wait.\n"
+     "    if (plumaPathWatched && plumaPathWaitSince != 0 && onConnectedSent) {\n"
+     "        ConnectionsManager &plumaManager = ConnectionsManager::getInstance(instanceNum);\n"
+     "        if (!hasPendingRequests()) {\n"
+     "            plumaPathWaitSince = 0;\n"
+     "        } else if (plumaManager.plumaPathSuspectMs > 0 && now - plumaPathWaitSince >= plumaManager.plumaPathSuspectMs) {\n"
+     "            plumaPathWaitSince = 0;\n"
+     "            if (plumaManager.delegate != nullptr) {\n"
+     "                plumaManager.delegate->onPlumaPathSuspect(instanceNum);\n"
+     "            }\n"
+     "        }\n"
+     "    }\n"),
+    (EDGE_CONNECTION_CPP,
+     "    connectionType = type;\n    genereateNewSessionId();\n",
+     "    connectionType = type;\n"
+     "    plumaPathWatched = type == ConnectionTypeGeneric && datacenter->getDatacenterId() == 1; // pluma: A-129\n"
+     "    genereateNewSessionId();\n"),
+    (EDGE_CONNECTION_CPP,
+     "    failedConnectionCount = 0;\n\n"
+     "    if (connectionType == ConnectionTypeGeneric || connectionType == ConnectionTypeTemp || connectionType == ConnectionTypeGenericMedia) {\n",
+     "    failedConnectionCount = 0;\n"
+     "\n"
+     "    // pluma: data of a file transfer; PlumaPathProber does not switch the path under it (A-129).\n"
+     "    if ((connectionType & (ConnectionTypeDownload | ConnectionTypeUpload)) != 0) {\n"
+     "        ConnectionsManager &plumaManager = ConnectionsManager::getInstance(currentDatacenter->instanceNum);\n"
+     "        plumaManager.plumaPathLastTransfer = plumaManager.getCurrentTimeMonotonicMillis();\n"
+     "    }\n"
+     "\n"
+     "    if (connectionType == ConnectionTypeGeneric || connectionType == ConnectionTypeTemp || connectionType == ConnectionTypeGenericMedia) {\n"),
+    (EDGE_DEFINES,
+     "    virtual void onProxyError(int32_t instanceNum) = 0;\n",
+     "    virtual void onProxyError(int32_t instanceNum) = 0;\n"
+     "    virtual void onPlumaPathSuspect(int32_t instanceNum) = 0; // pluma: A-129\n"),
+    (EDGE_WRAPPER,
+     "jmethodID jclass_ConnectionsManager_onProxyError;\n",
+     "jmethodID jclass_ConnectionsManager_onProxyError;\n"
+     "jmethodID jclass_ConnectionsManager_onPlumaPathSuspect; // pluma: A-129\n"),
+    (EDGE_WRAPPER,
+     "    void onProxyError(int32_t instanceNum) {\n",
+     "    // pluma: a request of DC 1 waits with no byte (A-129, PlumaPathProber.onSuspect).\n"
+     "    void onPlumaPathSuspect(int32_t instanceNum) {\n"
+     "        jniEnv[instanceNum]->CallStaticVoidMethod(jclass_ConnectionsManager, jclass_ConnectionsManager_onPlumaPathSuspect, instanceNum);\n"
+     "    }\n"
+     "\n"
+     "    void onProxyError(int32_t instanceNum) {\n"),
+    (EDGE_WRAPPER,
+     '    jclass_ConnectionsManager_onProxyError = env->GetStaticMethodID(jclass_ConnectionsManager, "onProxyError", "()V");\n'
+     "    if (jclass_ConnectionsManager_onProxyError == 0) {\n"
+     "        return JNI_FALSE;\n"
+     "    }\n",
+     '    jclass_ConnectionsManager_onProxyError = env->GetStaticMethodID(jclass_ConnectionsManager, "onProxyError", "()V");\n'
+     "    if (jclass_ConnectionsManager_onProxyError == 0) {\n"
+     "        return JNI_FALSE;\n"
+     "    }\n"
+     '    jclass_ConnectionsManager_onPlumaPathSuspect = env->GetStaticMethodID(jclass_ConnectionsManager, "onPlumaPathSuspect", "(I)V");\n'
+     "    if (jclass_ConnectionsManager_onPlumaPathSuspect == 0) {\n"
+     "        return JNI_FALSE;\n"
+     "    }\n"),
+    (EDGE_MANAGER_JAVA,
+     "    public static void onProxyError() {\n",
+     "    // pluma: a request of DC 1 waits with no byte; the paths are measured (A-129).\n"
+     "    public static void onPlumaPathSuspect(int currentAccount) {\n"
+     "        org.telegram.utils.proxy.PlumaPathProber.onSuspect(currentAccount);\n"
+     "    }\n"
+     "\n"
+     "    public static void onProxyError() {\n"),
 )
 
 # What PlumaEdgeBridge relies on in upstream: its package (the WEB proxy's, whose local
@@ -1385,6 +3631,19 @@ EDGE_USES = (
     # request waiting, which makes a frozen direct connection count.
     (EDGE_MANAGER_CPP, "    return ipStrategy;\n}\n\nvoid ConnectionsManager::initDatacenters() {\n"),
     (EDGE_SOCKET_CPP, "        if (!onConnectedSent || hasPendingRequests()) {\n            closeSocket(2, 0);\n"),
+    # A-129: PlumaPathProber reads the proxy of the user as ConnectionsManager.init does, follows
+    # the app's screen, reads the app config again on a new network, and a new order drops the
+    # connections of DC 1 as a new proxy does.
+    (EDGE_MANAGER_JAVA,
+     '        final SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);\n'
+     "        final ProxySettings proxySettings = ProxySettings.fromSharedPreferences(preferences);\n"
+     '        if (preferences.getBoolean("proxy_enabled", false) && proxySettings.isValid()) {\n'),
+    (f"{EDGE_JAVA_DIR}/utils/proxy/ProxySettings.java",
+     "    public static ProxySettings fromSharedPreferences(SharedPreferences preferences) {\n"),
+    (f"{EDGE_JAVA_DIR}/ui/Components/ForegroundDetector.java",
+     "    public interface Listener {\n        void onBecameForeground();\n        void onBecameBackground();\n    }\n"),
+    (EDGE_MESSAGES, "    public void loadAppConfig(boolean force) {\n"),
+    (EDGE_DATACENTER_H, "    void suspendConnections(bool suspendPush);\n"),
 )
 
 
@@ -1394,31 +3653,54 @@ def edge_java(c):
     return EDGE_JAVA.replace(EDGE_BUILT_IN_LINE, f"    private static final String[] BUILT_IN = {{{urls}}};\n")
 
 
+def path_prober_java(c):
+    """PlumaPathProber.java with the build's direct address of DC 1 (A-002's)."""
+    lines = (f'    private static final String DIRECT_IPV4 = "{c.ipv4}";\n'
+             f'    private static final String DIRECT_IPV6 = "{c.ipv6 or ""}";\n'
+             f"    private static final int DIRECT_PORT = {c.port};\n")
+    return PATH_PROBER_JAVA.replace(PATH_DIRECT_LINES, lines)
+
+
+EDGE_FILES = (EDGE_FILE, PATH_POLICY_FILE, PATH_PROBER_FILE)
+
+
+def edge_files(c):
+    """The files the edges add: the bridge (A-128), the path policy and the prober (A-129)."""
+    return {EDGE_FILE: edge_java(c), PATH_POLICY_FILE: PATH_POLICY_JAVA, PATH_PROBER_FILE: path_prober_java(c)}
+
+
 def edges(tree, c):
     # A build without edges gets no edit at all (PLUMA_EDGE_WS_URLS empty).
     if not c.edge_urls:
         return
-    # Every anchor first, and no bridge yet: a tree that is already patched fails before
-    # anything is written twice.
-    if (tree.root / EDGE_FILE).exists():
-        raise PatchError(f"{EDGE_FILE}: the file is already there")
+    # Every anchor first, and none of the files yet: a tree that is already patched fails
+    # before anything is written twice.
+    for rel in EDGE_FILES:
+        if (tree.root / rel).exists():
+            raise PatchError(f"{rel}: the file is already there")
     for rel, old, _ in EDGE_EDITS:
         tree.expect(rel, old)
     for rel, text in EDGE_USES:
         tree.expect(rel, text)
     for rel, old, new in EDGE_EDITS:
         tree.replace(rel, old, new)
-    tree.write(EDGE_FILE, edge_java(c))
+    for rel, text in edge_files(c).items():
+        tree.write(rel, text)
+
+
+def edge_marked(text):
+    """Whether text carries an edit of the edges: A-128's names and label, or A-129's."""
+    return "plumaedge" in text.lower() or "plumapath" in text.lower() or EDGE_LABEL in text
 
 
 def verify_edges(tree, c):
     java = tree.root / EDGE_FILE
     if not c.edge_urls:
-        if java.exists():
-            raise PatchError(f"{EDGE_FILE}: a build without edges has the bridge")
+        for rel in EDGE_FILES:
+            if (tree.root / rel).exists():
+                raise PatchError(f"{rel}: a build without edges has the bridge or the prober")
         for rel in sorted({rel for rel, _, _ in EDGE_EDITS}):
-            text = tree.read(rel)
-            if "plumaedge" in text.lower() or EDGE_LABEL in text:
+            if edge_marked(tree.read(rel)):
                 raise PatchError(f"{rel}: an edge edit in a build without edges")
         return
     for rel, old, new in EDGE_EDITS:
@@ -1430,6 +3712,9 @@ def verify_edges(tree, c):
         tree.expect(rel, used)
     if not java.is_file() or java.read_text(encoding="utf-8") != edge_java(c):
         raise PatchError(f"{EDGE_FILE}: not the bridge of this build's edges")
+    for rel, text in edge_files(c).items():
+        if rel != EDGE_FILE and (not (tree.root / rel).is_file() or tree.read(rel) != text):
+            raise PatchError(f"{rel}: not the path prober of this build")
     # The contract: the build's edges are wss://, the direct address goes first by default, and
     # one label prefix ties tgnet to the bridge.
     text = java.read_text(encoding="utf-8")
@@ -1441,6 +3726,15 @@ def verify_edges(tree, c):
     manager = tree.read(EDGE_MANAGER_CPP)
     if manager.count(f'PLUMA_EDGE_LABEL = "{EDGE_LABEL}";') != 1 or manager.count("datacenters[1]->applyPlumaEdges();") != 1:
         raise PatchError(f"{EDGE_MANAGER_CPP}: DC 1 has no edge labels")
+    # The prober goes to the direct address the tgnet edit gives DC 1 (A-002), and probes nothing
+    # with a proxy of the user on.
+    prober = tree.read(PATH_PROBER_FILE)
+    direct = re.findall(r'DIRECT_IPV4 = "([^"]*)";\n.*DIRECT_IPV6 = "([^"]*)";\n.*DIRECT_PORT = (\d+);', prober, re.S)
+    if direct != [(c.ipv4, c.ipv6 or "", str(c.port))]:
+        raise PatchError(f"{PATH_PROBER_FILE}: the direct address is not DC 1's")
+    if (prober.count("return started && !unsupported() && !proxied();") != 1
+            or prober.count('return main.getBoolean("proxy_enabled", false) && ProxySettings.fromSharedPreferences(main).isValid();') != 1):
+        raise PatchError(f"{PATH_PROBER_FILE}: probes with a proxy of the user on")
 
 
 # --- birthdays ---------------------------------------------------------------
