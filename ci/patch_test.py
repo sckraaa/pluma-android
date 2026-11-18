@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import patch  # noqa: E402
@@ -2846,6 +2847,78 @@ class EdgesTest(unittest.TestCase):
                         patch.verify_edges(tree, c)
                     tree.write(rel, patched[rel])
             patch.verify_edges(tree, c)
+
+
+class PathSelectionTest(unittest.TestCase):
+    """The choice of the path by the gateway's probe (task 113 of the server repository, A-129)."""
+
+    # pluma_probe of the brief's section 7: the defaults the client carries, with the ranges bff
+    # accepts (app/bff/configuration/internal/appconfig/probe.go of the server repository).
+    PLUMA_PROBE = {
+        "gate_down": (65536, 16384, 524288), "rank_down": (196608, 16384, 524288), "up": (20480, 0, 65536),
+        "stall_ms": (1500, 300, 10000), "deadline_ms": (6000, 1000, 30000), "suspect_ms": (4000, 1000, 30000),
+        "reprobe_s": (21600, 600, 604800), "rank_min_interval_s": (1800, 60, 86400), "min_dwell_s": (600, 0, 86400),
+        "switch_ratio": (0.7, 0.05, 0.95), "switch_ratio_now": (0.25, 0.05, 0.95),
+        "edge_probe_if_direct_ms": (1500, 100, 60000), "bad_ttl_s": (86400, 60, 604800),
+        "failed_ttl_s": (300, 10, 86400), "race_stagger_ms": (800, 0, 10000), "confirm_s": (60, 10, 3600),
+    }
+    JVM_TEST = ROOT / "ci" / "PlumaPathPolicyTest.java"
+
+    @staticmethod
+    def array(text, name, kind):
+        found = re.findall(rf"static final {kind}\[\] {name} = \{{(.*?)\}};", text, re.S)
+        if len(found) != 1:
+            raise AssertionError(f"{name}: {len(found)} definitions")
+        return [x.strip().strip('"') for x in found[0].split(",")]
+
+    def test_constructors(self):
+        # The constructors are the CRC32 of the TL lines, as the gateway counts them.
+        java = patch.PATH_POLICY_JAVA
+        for name, line in (
+            ("REQ_PQ_MULTI", "req_pq_multi nonce:int128 = ResPQ"),
+            ("RES_PQ", "resPQ nonce:int128 server_nonce:int128 pq:string server_public_key_fingerprints:Vector long = ResPQ"),
+            ("PROBE", "pluma.probe nonce:int128 down:int pad:bytes = pluma.Probe"),
+            ("PROBE_DATA", "pluma.probeData nonce:int128 seq:int total:int server_ms:long pad:bytes = pluma.ProbeData"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(java.count(f"static final int {name} = 0x{zlib.crc32(line.encode()):08x};"), 1)
+
+    def test_policy_contract(self):
+        java = patch.PATH_POLICY_JAVA
+        names = self.array(java, "NAMES", "String")
+        self.assertEqual(names, list(self.PLUMA_PROBE))
+        for i, column in enumerate(("DEFAULTS", "MIN", "MAX")):
+            values = [float(x) for x in self.array(java, column, "double")]
+            self.assertEqual(values, [float(v[i]) for v in self.PLUMA_PROBE.values()], column)
+        for line in (
+            "static final int CHUNK = 16384;", "static final int MIN_DOWN = 16384;", "static final int MAX_DOWN = 524288;",
+            "static final int MAX_UP = 65536;", "static final byte TAG = (byte) 0xee;",
+            "static final int SCORE_BYTES = 256 * 1024;", "static final double TIE = 1.3;",
+            "static final int LOSS_WINDOW = 4;", "static final int LOSS_LIMIT = 2;", "static final int MAX_NETWORKS = 16;",
+            "static final long FRESH_MS = 7L * 24 * 60 * 60 * 1000;",
+            'Cipher.getInstance("AES/CTR/NoPadding")',
+            'MessageDigest.getInstance("SHA-256")',
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(java.count(line), 1)
+        # No Android in the policy: it runs on a JVM.
+        self.assertNotRegex(java, r"import (android|org\.telegram|com\.neovisionaries)")
+
+    @unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "no JDK")
+    def test_policy_on_jvm(self):
+        # The rules, the probe's bytes and the memory, run as the device runs them.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "PlumaPathPolicy.java").write_text(patch.PATH_POLICY_JAVA, encoding="utf-8")
+            shutil.copyfile(self.JVM_TEST, root / "PlumaPathPolicyTest.java")
+            build = subprocess.run(["javac", "-Xlint:all", "-Werror", "-d", str(root / "out"),
+                                    str(root / "PlumaPathPolicy.java"), str(root / "PlumaPathPolicyTest.java")],
+                                   capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            run = subprocess.run(["java", "-cp", str(root / "out"), "org.telegram.utils.proxy.PlumaPathPolicyTest"],
+                                 capture_output=True, text=True, timeout=120)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertRegex(run.stdout, r"PlumaPathPolicyTest: \d+ checks passed")
 
 
 class CallColoursTest(unittest.TestCase):

@@ -1077,6 +1077,876 @@ public final class PlumaEdgeBridge {
 }
 """
 
+# A-129 (task 113 of the server repository, ADR 0073): the rules of the choice of the path by the
+# gateway's probe, the probe's bytes and the memory per network, plain Java that ci/patch_test.py
+# runs on a JVM (ci/PlumaPathPolicyTest.java).
+PATH_POLICY_JAVA = r"""package org.telegram.utils.proxy;
+
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
+// The rules of the choice of the path to the server (task 113 of the Pluma server, ADR 0073):
+// the probe the gateway answers before the key exchange, the measure of one probe, the score of a
+// path, the memory per network and the decisions that switch paths. Plain Java, no Android: it
+// runs as it is on a JVM.
+final class PlumaPathPolicy {
+    static final String DIRECT = "direct";
+    // The score is the time of an answer of this size (an average piece of media).
+    static final int SCORE_BYTES = 256 * 1024;
+    // Scores within 30 % of the best are a tie, which pluma_edge's order breaks.
+    static final double TIE = 1.3;
+    // A path with 2 probes that were not ok among its last 4 in a network scores twice as high.
+    static final int LOSS_WINDOW = 4;
+    static final int LOSS_LIMIT = 2;
+    static final int MAX_NETWORKS = 16;
+    static final long FRESH_MS = 7L * 24 * 60 * 60 * 1000;
+    // A second winning measurement confirms the first within this many confirm_s.
+    static final int CONFIRM_SLACK = 3;
+
+    private PlumaPathPolicy() {
+    }
+
+    // --- pluma_probe ------------------------------------------------------------------------
+
+    // The settings of pluma_probe: the numbers of the brief's section 7, with its defaults and
+    // the ranges bff accepts (app/bff/configuration/internal/appconfig/probe.go).
+    static final class Params {
+        static final String[] NAMES = {"gate_down", "rank_down", "up", "stall_ms", "deadline_ms", "suspect_ms",
+                "reprobe_s", "rank_min_interval_s", "min_dwell_s", "switch_ratio", "switch_ratio_now",
+                "edge_probe_if_direct_ms", "bad_ttl_s", "failed_ttl_s", "race_stagger_ms", "confirm_s"};
+        static final double[] DEFAULTS = {65536, 196608, 20480, 1500, 6000, 4000,
+                21600, 1800, 600, 0.7, 0.25,
+                1500, 86400, 300, 800, 60};
+        static final double[] MIN = {16384, 16384, 0, 300, 1000, 1000,
+                600, 60, 0, 0.05, 0.05,
+                100, 60, 10, 0, 10};
+        static final double[] MAX = {524288, 524288, 65536, 10000, 30000, 30000,
+                604800, 86400, 86400, 0.95, 0.95,
+                60000, 604800, 86400, 10000, 3600};
+        private static final int SWITCH_RATIO = 9;
+        private static final int SWITCH_RATIO_NOW = 10;
+
+        final String country;
+        private final double[] values;
+
+        private Params(String country, double[] values) {
+            this.country = country;
+            this.values = values;
+        }
+
+        static Params defaults() {
+            return new Params("", DEFAULTS.clone());
+        }
+
+        // pluma_probe as a map of its fields (numbers as Double, strings as String); null if it
+        // is not valid. A field it does not have takes its default; a field it has must be in
+        // range, a whole number but for the ratios; the deadline is longer than the stall and
+        // the ratio that switches at once is below the one that switches after two probes.
+        static Params of(Map<String, Object> fields) {
+            Object version = fields.get("v");
+            if (!(version instanceof Double) || (Double) version != 1) {
+                return null;
+            }
+            String country = "";
+            Object c = fields.get("country");
+            if (c != null) {
+                if (!(c instanceof String) || !((String) c).isEmpty() && !((String) c).matches("[A-Z]{2}")) {
+                    return null;
+                }
+                country = (String) c;
+            }
+            double[] values = new double[NAMES.length];
+            for (int i = 0; i < NAMES.length; i++) {
+                Object x = fields.get(NAMES[i]);
+                double value = x == null ? DEFAULTS[i] : x instanceof Double ? (Double) x : Double.NaN;
+                boolean ratio = i == SWITCH_RATIO || i == SWITCH_RATIO_NOW;
+                if (!(value >= MIN[i] && value <= MAX[i]) || !ratio && value != Math.rint(value)) {
+                    return null;
+                }
+                values[i] = value;
+            }
+            Params p = new Params(country, values);
+            if (p.deadlineMs() <= p.stallMs() || p.switchRatioNow() >= p.switchRatio()) {
+                return null;
+            }
+            return p;
+        }
+
+        int gateDown() { return (int) values[0]; }
+        int rankDown() { return (int) values[1]; }
+        int up() { return (int) values[2]; }
+        long stallMs() { return (long) values[3]; }
+        long deadlineMs() { return (long) values[4]; }
+        int suspectMs() { return (int) values[5]; }
+        long reprobeMs() { return (long) values[6] * 1000; }
+        long rankMinIntervalMs() { return (long) values[7] * 1000; }
+        long minDwellMs() { return (long) values[8] * 1000; }
+        double switchRatio() { return values[SWITCH_RATIO]; }
+        double switchRatioNow() { return values[SWITCH_RATIO_NOW]; }
+        double edgeProbeIfDirectMs() { return values[11]; }
+        long badTtlMs() { return (long) values[12] * 1000; }
+        long failedTtlMs() { return (long) values[13] * 1000; }
+        long raceStaggerMs() { return (long) values[14]; }
+        long confirmMs() { return (long) values[15] * 1000; }
+
+        // One "name=value" per line, the country first; read back by fromText.
+        String toText() {
+            StringBuilder out = new StringBuilder("country=").append(country).append('\n');
+            for (int i = 0; i < NAMES.length; i++) {
+                out.append(NAMES[i]).append('=').append(values[i]).append('\n');
+            }
+            return out.toString();
+        }
+
+        // null if the text is not one toText wrote.
+        static Params fromText(String text) {
+            Map<String, Object> fields = new HashMap<>();
+            fields.put("v", 1.0);
+            for (String line : text.split("\n")) {
+                int eq = line.indexOf('=');
+                if (eq < 0) {
+                    return null;
+                }
+                String name = line.substring(0, eq);
+                String value = line.substring(eq + 1);
+                if (name.equals("country")) {
+                    fields.put(name, value);
+                } else {
+                    try {
+                        fields.put(name, Double.parseDouble(value));
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                }
+            }
+            return of(fields);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Params && country.equals(((Params) o).country) && Arrays.equals(values, ((Params) o).values);
+        }
+
+        @Override
+        public int hashCode() {
+            return country.hashCode() * 31 + Arrays.hashCode(values);
+        }
+    }
+
+    // --- the probe ------------------------------------------------------------------------------
+    // Both messages are unencrypted MTProto messages (auth_key_id 0, msg_id, length, data), one
+    // per frame of the transport, little-endian; the constructors are the CRC32 of their TL lines
+    // (the gateway's pkg/mtserver/handshake/probe.go):
+    //   pluma.probe#5c316d30 nonce:int128 down:int pad:bytes = pluma.Probe;
+    //   pluma.probeData#6ab3780b nonce:int128 seq:int total:int server_ms:long pad:bytes = pluma.ProbeData;
+    // The client sends req_pq_multi, waits for resPQ and sends pluma.probe on the same
+    // connection; the gateway answers with ceil(D / 16384) pluma.probeData in seq order, D being
+    // down clamped to [16384, 524288], each pad 16384 bytes but the last, which holds the rest.
+
+    static final int REQ_PQ_MULTI = 0xbe7e8ef1;
+    static final int RES_PQ = 0x05162463;
+    static final int PROBE = 0x5c316d30;
+    static final int PROBE_DATA = 0x6ab3780b;
+    static final int CHUNK = 16384;
+    static final int MIN_DOWN = 16384;
+    static final int MAX_DOWN = 524288;
+    static final int MAX_UP = 65536;
+    // The intermediate transport inside obfuscated2: 0xeeeeeeee.
+    static final byte TAG = (byte) 0xee;
+    // Larger than any frame of a probe's answer.
+    static final int MAX_FRAME = 64 * 1024;
+
+    static int clampDown(int down) {
+        return Math.max(MIN_DOWN, Math.min(MAX_DOWN, down));
+    }
+
+    static int chunks(int down) {
+        return (clampDown(down) + CHUNK - 1) / CHUNK;
+    }
+
+    // A client msg_id of unixMs: seconds in the high half, a fraction in the low, a multiple of 4.
+    static long msgId(long unixMs) {
+        return (unixMs / 1000) << 32 | ((unixMs % 1000) << 32) / 1000 & ~3L;
+    }
+
+    static byte[] reqPqMulti(long msgId, byte[] nonce) {
+        ByteBuffer body = little(20);
+        body.putInt(REQ_PQ_MULTI).put(nonce);
+        return unencrypted(msgId, body.array());
+    }
+
+    static byte[] probe(long msgId, byte[] nonce, int down, byte[] pad) {
+        byte[] bytes = tlBytes(pad);
+        ByteBuffer body = little(24 + bytes.length);
+        body.putInt(PROBE).put(nonce).putInt(down).put(bytes);
+        return unencrypted(msgId, body.array());
+    }
+
+    static byte[] unencrypted(long msgId, byte[] body) {
+        ByteBuffer out = little(20 + body.length);
+        out.putLong(0).putLong(msgId).putInt(body.length).put(body);
+        return out.array();
+    }
+
+    // TL bytes: a length byte under 254, else 0xfe and 3 bytes of length; the data; zeros to a
+    // multiple of 4.
+    static byte[] tlBytes(byte[] data) {
+        int head = data.length < 254 ? 1 : 4;
+        byte[] out = new byte[(head + data.length + 3) / 4 * 4];
+        if (head == 1) {
+            out[0] = (byte) data.length;
+        } else {
+            out[0] = (byte) 0xfe;
+            out[1] = (byte) data.length;
+            out[2] = (byte) (data.length >> 8);
+            out[3] = (byte) (data.length >> 16);
+        }
+        System.arraycopy(data, 0, out, head, data.length);
+        return out;
+    }
+
+    static int tlBytesLength(int length) {
+        return ((length < 254 ? 1 : 4) + length + 3) / 4 * 4;
+    }
+
+    // A frame of the intermediate transport: the length, little-endian, and the payload.
+    static byte[] frame(byte[] payload) {
+        return little(4 + payload.length).putInt(payload.length).put(payload).array();
+    }
+
+    private static ByteBuffer little(int size) {
+        return ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+    }
+
+    // obfuscated2 without a secret, as tgnet makes it (Connection.cpp, sendData): 64 random
+    // bytes that do not look like another protocol, the tag at 56; the client encrypts with the
+    // key and IV of bytes 8-55 and decrypts with those of the same bytes reversed; the header
+    // goes out with its last 8 bytes encrypted.
+    static final class Obfuscation {
+        final byte[] header;
+        private final Cipher encrypt;
+        private final Cipher decrypt;
+
+        private Obfuscation(byte[] header, Cipher encrypt, Cipher decrypt) {
+            this.header = header;
+            this.encrypt = encrypt;
+            this.decrypt = decrypt;
+        }
+
+        static Obfuscation create(SecureRandom random) throws GeneralSecurityException {
+            byte[] bytes = new byte[64];
+            while (true) {
+                random.nextBytes(bytes);
+                ByteBuffer b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+                int first = b.getInt(0);
+                if (bytes[0] != (byte) 0xef && first != 0x44414548 && first != 0x54534f50 && first != 0x20544547
+                        && first != 0x4954504f && first != 0xeeeeeeee && first != 0xdddddddd && first != 0x02010316
+                        && b.getInt(4) != 0) {
+                    break;
+                }
+            }
+            bytes[56] = bytes[57] = bytes[58] = bytes[59] = TAG;
+            byte[] reversed = new byte[48];
+            for (int a = 0; a < 48; a++) {
+                reversed[a] = bytes[55 - a];
+            }
+            Cipher encrypt = ctr(Arrays.copyOfRange(bytes, 8, 40), Arrays.copyOfRange(bytes, 40, 56));
+            Cipher decrypt = ctr(Arrays.copyOfRange(reversed, 0, 32), Arrays.copyOfRange(reversed, 32, 48));
+            byte[] sealed = encrypt.update(bytes);
+            byte[] header = bytes.clone();
+            System.arraycopy(sealed, 56, header, 56, 8);
+            return new Obfuscation(header, encrypt, decrypt);
+        }
+
+        static Cipher ctr(byte[] key, byte[] iv) throws GeneralSecurityException {
+            Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
+            return cipher;
+        }
+
+        byte[] seal(byte[] plain) {
+            byte[] out = encrypt.update(plain);
+            return out != null ? out : new byte[0];
+        }
+
+        byte[] open(byte[] data, int offset, int length) {
+            byte[] out = decrypt.update(data, offset, length);
+            return out != null ? out : new byte[0];
+        }
+    }
+
+    // The answer of the gateway, decrypted, as it comes: frames of the intermediate transport,
+    // resPQ to req_pq_multi first, then pluma.probeData. Anything else is a protocol error.
+    static final class Reader {
+        private final byte[] requestNonce;
+        private final byte[] probeNonce;
+        private final int total;
+        private final int lastPad;
+        private final byte[] head = new byte[4];
+        private int headFill;
+        private byte[] body;
+        private int bodyFill;
+        boolean resPq;
+        int received;
+        boolean done;
+        String error;
+
+        Reader(byte[] requestNonce, byte[] probeNonce, int down) {
+            this.requestNonce = requestNonce;
+            this.probeNonce = probeNonce;
+            int d = clampDown(down);
+            this.total = chunks(d);
+            this.lastPad = d - CHUNK * (total - 1);
+        }
+
+        // Feeds the bytes and returns how many of them are the probe's answer: the bytes after
+        // the frame of resPQ.
+        int feed(byte[] data, int offset, int length) {
+            int answer = 0;
+            int end = offset + length;
+            while (offset < end && error == null && !done) {
+                boolean answering = resPq;
+                int before = offset;
+                if (body == null) {
+                    int n = Math.min(4 - headFill, end - offset);
+                    System.arraycopy(data, offset, head, headFill, n);
+                    headFill += n;
+                    offset += n;
+                    if (headFill == 4) {
+                        int size = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN).getInt();
+                        if (size < 20 + 4 || size > MAX_FRAME || size % 4 != 0) {
+                            error = "frame of " + size + " bytes";
+                        } else {
+                            body = new byte[size];
+                            bodyFill = 0;
+                        }
+                    }
+                } else {
+                    int n = Math.min(body.length - bodyFill, end - offset);
+                    System.arraycopy(data, offset, body, bodyFill, n);
+                    bodyFill += n;
+                    offset += n;
+                    if (bodyFill == body.length) {
+                        message(body);
+                        body = null;
+                        headFill = 0;
+                    }
+                }
+                if (answering) {
+                    answer += offset - before;
+                }
+            }
+            return answer;
+        }
+
+        private void message(byte[] frame) {
+            ByteBuffer b = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN);
+            long authKeyId = b.getLong();
+            b.getLong();
+            int length = b.getInt();
+            if (authKeyId != 0 || length < 4 || length > frame.length - 20) {
+                error = "not an unencrypted message";
+                return;
+            }
+            int constructor = b.getInt();
+            if (!resPq) {
+                if (constructor != RES_PQ || length < 20 || !nonce(b, requestNonce)) {
+                    error = "not resPQ to the request";
+                    return;
+                }
+                resPq = true;
+                return;
+            }
+            if (constructor != PROBE_DATA || length < 36 || !nonce(b, probeNonce)) {
+                error = "not pluma.probeData of the probe";
+                return;
+            }
+            int seq = b.getInt();
+            int count = b.getInt();
+            b.getLong();
+            int pad = seq == total - 1 ? lastPad : CHUNK;
+            if (seq != received || count != total || length != 36 + tlBytesLength(pad) || !padLength(b, pad)) {
+                error = "chunk " + seq + " of " + count;
+                return;
+            }
+            received++;
+            done = received == total;
+        }
+
+        private static boolean nonce(ByteBuffer b, byte[] expected) {
+            byte[] nonce = new byte[16];
+            b.get(nonce);
+            return Arrays.equals(nonce, expected);
+        }
+
+        private static boolean padLength(ByteBuffer b, int pad) {
+            int first = b.get() & 0xff;
+            if (pad < 254) {
+                return first == pad;
+            }
+            int length = (b.get() & 0xff) | (b.get() & 0xff) << 8 | (b.get() & 0xff) << 16;
+            return first == 0xfe && length == pad;
+        }
+    }
+
+    // --- one probe ------------------------------------------------------------------------------
+
+    enum Outcome {
+        // All of the answer came.
+        OK,
+        // At the deadline part of the answer came, and it was still coming.
+        SLOW,
+        // The path gave a byte, then stall_ms passed with none and the answer is not complete.
+        FROZEN,
+        // No connection, a close, a protocol error, or no byte by the deadline.
+        FAILED,
+        // The gateway closed the connection right after a valid resPQ: it does not know the probe.
+        UNSUPPORTED
+    }
+
+    // The times of one probe, in ms of one monotonic clock, and its outcome (the brief's section 2).
+    static final class Measure {
+        private final long stallMs;
+        private final long deadlineMs;
+        private final long start;
+        private long connected = -1;
+        private long lastByte = -1;
+        private long requestSent = -1;
+        private long resPqAt = -1;
+        private long probeSent = -1;
+        private long firstAnswer = -1;
+        private long firstAnswerBytes;
+        private long answerBytes;
+        private boolean done;
+        private boolean closed;
+        private boolean error;
+
+        Measure(Params p, long start) {
+            this.stallMs = p.stallMs();
+            this.deadlineMs = p.deadlineMs();
+            this.start = start;
+        }
+
+        // The connection is up; answered: the path gave bytes on the way (the WebSocket handshake).
+        void connected(long now, boolean answered) {
+            connected = now;
+            if (answered) {
+                lastByte = now;
+            }
+        }
+
+        void requestSent(long now) {
+            requestSent = now;
+        }
+
+        void probeSent(long now) {
+            probeSent = now;
+        }
+
+        // Bytes came: count of them, answer of which belong to the probe's answer.
+        void received(long now, int count, int answer, Reader reader) {
+            if (count <= 0) {
+                return;
+            }
+            if (resPqAt < 0) {
+                resPqAt = now;
+            }
+            lastByte = now;
+            if (answer > 0) {
+                if (firstAnswer < 0) {
+                    firstAnswer = now;
+                    firstAnswerBytes = answer;
+                }
+                answerBytes += answer;
+            }
+            if (reader.error != null) {
+                error = true;
+            }
+            done = reader.done;
+        }
+
+        void closed() {
+            closed = true;
+        }
+
+        void failed() {
+            error = true;
+        }
+
+        boolean probeSent() {
+            return probeSent >= 0;
+        }
+
+        // The outcome at now, null while the probe runs.
+        Outcome outcome(long now) {
+            if (done) {
+                return Outcome.OK;
+            }
+            if (error) {
+                return Outcome.FAILED;
+            }
+            if (closed) {
+                return probeSent >= 0 && answerBytes == 0 && resPqAt >= 0 ? Outcome.UNSUPPORTED : Outcome.FAILED;
+            }
+            if (lastByte >= 0) {
+                // The stall counts from the last byte, or from the write of the request plus the
+                // time an answer takes, whichever is later: a request lost on its way up stalls too.
+                long anchor = lastByte;
+                if (probeSent >= 0) {
+                    anchor = Math.max(anchor, probeSent + rtt());
+                } else if (requestSent >= 0 && connected >= 0) {
+                    anchor = Math.max(anchor, requestSent + (connected - start));
+                }
+                if (now - anchor >= stallMs) {
+                    return Outcome.FROZEN;
+                }
+            }
+            if (now - start >= deadlineMs) {
+                return answerBytes > 0 ? Outcome.SLOW : Outcome.FAILED;
+            }
+            return null;
+        }
+
+        // From the write of req_pq_multi to the first byte of resPQ.
+        long rtt() {
+            return resPqAt >= 0 && requestSent >= 0 ? resPqAt - requestSent : -1;
+        }
+
+        // The answer's bytes after its first read over the time from that read to the last;
+        // all of it over the time from the probe's write when it came in one read.
+        double bytesPerSecond() {
+            if (answerBytes == 0) {
+                return 0;
+            }
+            if (lastByte > firstAnswer && answerBytes > firstAnswerBytes) {
+                return (answerBytes - firstAnswerBytes) * 1000.0 / (lastByte - firstAnswer);
+            }
+            return answerBytes * 1000.0 / Math.max(1, lastByte - probeSent);
+        }
+
+        long answerBytes() {
+            return answerBytes;
+        }
+    }
+
+    // --- scores and decisions -------------------------------------------------------------------
+
+    // rtt + 256 KiB at the path's speed, in ms.
+    static double score(long rttMs, double bytesPerSecond) {
+        if (rttMs < 0 || !(bytesPerSecond > 0)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        return rttMs + SCORE_BYTES * 1000.0 / bytesPerSecond;
+    }
+
+    static boolean passed(Outcome outcome) {
+        return outcome == Outcome.OK || outcome == Outcome.SLOW;
+    }
+
+    // The path with the lowest score of those scored; among the scores within TIE of the lowest,
+    // the first in order (pluma_edge's). null if none is scored.
+    static String best(List<String> order, Map<String, Double> scores) {
+        double min = Double.POSITIVE_INFINITY;
+        for (String path : order) {
+            Double s = scores.get(path);
+            if (s != null && s < min) {
+                min = s;
+            }
+        }
+        if (min == Double.POSITIVE_INFINITY) {
+            return null;
+        }
+        for (String path : order) {
+            Double s = scores.get(path);
+            if (s != null && s <= min * TIE) {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    enum Decision {
+        STAY,
+        // A win by switch_ratio: measure again after confirm_s.
+        CONFIRM,
+        SWITCH
+    }
+
+    // Whether a measured candidate takes the place of the current path (the brief's section 4):
+    // switch_ratio_now of the current score at once, switch_ratio twice in a row (confirmed), and
+    // not within min_dwell_s of the last switch.
+    static Decision decide(double current, double candidate, boolean confirmed, long sinceSwitchMs, Params p) {
+        if (sinceSwitchMs < p.minDwellMs() || !(candidate < Double.POSITIVE_INFINITY)) {
+            return Decision.STAY;
+        }
+        if (candidate <= p.switchRatioNow() * current) {
+            return Decision.SWITCH;
+        }
+        if (candidate <= p.switchRatio() * current) {
+            return confirmed ? Decision.SWITCH : Decision.CONFIRM;
+        }
+        return Decision.STAY;
+    }
+
+    // Whether a rank measures the edges besides the direct path and the current one: the country
+    // puts the edges first, or the direct path did not pass or scores above edge_probe_if_direct_ms.
+    static boolean rankEdges(boolean edgesFirst, Outcome direct, double directScore, Params p) {
+        return edgesFirst || !passed(direct) || directScore > p.edgeProbeIfDirectMs();
+    }
+
+    // --- memory per network ---------------------------------------------------------------------
+
+    static final class PathState {
+        double score = Double.NaN;
+        Outcome last;
+        long time;
+        // The last LOSS_WINDOW probes, newest in bit 0, 1 for one that was not ok.
+        int history;
+        int count;
+        long excludedUntil;
+
+        double effectiveScore() {
+            if (Double.isNaN(score)) {
+                return Double.POSITIVE_INFINITY;
+            }
+            int window = (1 << Math.min(count, LOSS_WINDOW)) - 1;
+            return Integer.bitCount(history & window) >= LOSS_LIMIT ? score * 2 : score;
+        }
+    }
+
+    static final class Network {
+        String best;
+        long used;
+        long ranked;
+        long switched;
+        final Map<String, PathState> paths = new LinkedHashMap<>();
+
+        PathState state(String path) {
+            PathState s = paths.get(path);
+            if (s == null) {
+                s = new PathState();
+                paths.put(path, s);
+            }
+            return s;
+        }
+
+        boolean excluded(String path, long now) {
+            PathState s = paths.get(path);
+            return s != null && s.excludedUntil > now;
+        }
+
+        boolean fresh(long now) {
+            return used > 0 && now >= used && now - used <= FRESH_MS;
+        }
+
+        // A probe of path ended: frozen excludes it from races for bad_ttl_s, failed for
+        // failed_ttl_s, ok clears both. The caller records nothing when every path of a race
+        // failed: that is the network, not the paths.
+        void record(String path, Outcome outcome, double score, long now, Params p) {
+            PathState s = state(path);
+            s.last = outcome;
+            s.time = now;
+            s.history = (s.history << 1 | (outcome == Outcome.OK ? 0 : 1)) & ((1 << LOSS_WINDOW) - 1);
+            s.count = Math.min(LOSS_WINDOW, s.count + 1);
+            if (passed(outcome)) {
+                s.score = score;
+            }
+            if (outcome == Outcome.OK) {
+                s.excludedUntil = 0;
+            } else if (outcome == Outcome.FROZEN) {
+                s.excludedUntil = now + p.badTtlMs();
+            } else if (outcome == Outcome.FAILED) {
+                s.excludedUntil = Math.max(s.excludedUntil, now + p.failedTtlMs());
+            }
+            used = now;
+        }
+
+        // The paths in the order tgnet tries them: the remembered best while the memory is fresh,
+        // then the others in order (pluma_edge's), those excluded last.
+        List<String> order(List<String> paths, long now) {
+            List<String> out = new ArrayList<>();
+            if (fresh(now) && best != null && paths.contains(best) && !excluded(best, now)) {
+                out.add(best);
+            }
+            for (String path : paths) {
+                if (!out.contains(path) && !excluded(path, now)) {
+                    out.add(path);
+                }
+            }
+            for (String path : paths) {
+                if (!out.contains(path)) {
+                    out.add(path);
+                }
+            }
+            return out;
+        }
+
+        // The paths a race starts at once: the remembered best while fresh, else the first group
+        // of pluma_edge's order (the edges when the country puts them first, else the direct
+        // path), without those excluded; all paths not excluded if that leaves none.
+        List<String> firstGroup(List<String> paths, long now) {
+            if (fresh(now) && best != null && paths.contains(best) && !excluded(best, now)) {
+                return Collections.singletonList(best);
+            }
+            boolean edgesFirst = !paths.isEmpty() && !paths.get(0).equals(DIRECT);
+            List<String> group = new ArrayList<>();
+            for (String path : paths) {
+                if (path.equals(DIRECT) != edgesFirst && !excluded(path, now)) {
+                    group.add(path);
+                }
+            }
+            if (group.isEmpty()) {
+                for (String path : paths) {
+                    if (!excluded(path, now)) {
+                        group.add(path);
+                    }
+                }
+            }
+            return group;
+        }
+    }
+
+    // The networks by key, at most MAX_NETWORKS, the one used longest ago going first.
+    static final class Memory {
+        final Map<String, Network> networks = new LinkedHashMap<>();
+
+        Network network(String key) {
+            Network n = networks.get(key);
+            if (n == null) {
+                n = new Network();
+                networks.put(key, n);
+            }
+            return n;
+        }
+
+        void prune() {
+            while (networks.size() > MAX_NETWORKS) {
+                String oldest = null;
+                long used = Long.MAX_VALUE;
+                for (Map.Entry<String, Network> e : networks.entrySet()) {
+                    if (e.getValue().used < used) {
+                        used = e.getValue().used;
+                        oldest = e.getKey();
+                    }
+                }
+                networks.remove(oldest);
+            }
+        }
+
+        // A line per network ("n key best used ranked switched") followed by a line per path
+        // ("p path score outcome time history count excludedUntil"), the strings URL-encoded.
+        String toText() {
+            StringBuilder out = new StringBuilder();
+            for (Map.Entry<String, Network> e : networks.entrySet()) {
+                Network n = e.getValue();
+                out.append("n ").append(encode(e.getKey())).append(' ').append(n.best == null ? "-" : encode(n.best))
+                        .append(' ').append(n.used).append(' ').append(n.ranked).append(' ').append(n.switched).append('\n');
+                for (Map.Entry<String, PathState> p : n.paths.entrySet()) {
+                    PathState s = p.getValue();
+                    out.append("p ").append(encode(p.getKey())).append(' ').append(s.score).append(' ')
+                            .append(s.last == null ? "-" : s.last.name()).append(' ').append(s.time).append(' ')
+                            .append(s.history).append(' ').append(s.count).append(' ').append(s.excludedUntil).append('\n');
+                }
+            }
+            return out.toString();
+        }
+
+        // An empty memory if the text is not one toText wrote: a lost memory costs one race.
+        static Memory fromText(String text) {
+            Memory m = new Memory();
+            try {
+                Network n = null;
+                for (String line : text.split("\n")) {
+                    if (line.isEmpty()) {
+                        continue;
+                    }
+                    String[] f = line.split(" ", -1);
+                    if (f[0].equals("n") && f.length == 6) {
+                        n = m.network(decode(f[1]));
+                        n.best = f[2].equals("-") ? null : decode(f[2]);
+                        n.used = Long.parseLong(f[3]);
+                        n.ranked = Long.parseLong(f[4]);
+                        n.switched = Long.parseLong(f[5]);
+                    } else if (f[0].equals("p") && f.length == 8 && n != null) {
+                        PathState s = n.state(decode(f[1]));
+                        s.score = Double.parseDouble(f[2]);
+                        s.last = f[3].equals("-") ? null : Outcome.valueOf(f[3]);
+                        s.time = Long.parseLong(f[4]);
+                        s.history = Integer.parseInt(f[5]) & ((1 << LOSS_WINDOW) - 1);
+                        s.count = Math.max(0, Math.min(LOSS_WINDOW, Integer.parseInt(f[6])));
+                        s.excludedUntil = Long.parseLong(f[7]);
+                    } else {
+                        return new Memory();
+                    }
+                }
+            } catch (IllegalArgumentException e) {
+                return new Memory();
+            }
+            m.prune();
+            return m;
+        }
+
+        private static String encode(String s) {
+            try {
+                return URLEncoder.encode(s, "UTF-8");
+            } catch (UnsupportedEncodingException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        private static String decode(String s) {
+            try {
+                return URLDecoder.decode(s, "UTF-8");
+            } catch (UnsupportedEncodingException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    // The key of a network: the country of the client's address the server last gave, and a hash
+    // of what the device sees of the network (the kind of transport and the parts the caller
+    // gives: gateways, DNS servers, operator). Raw addresses are never kept.
+    static String networkKey(String country, String transport, Collection<String> parts) {
+        List<String> sorted = new ArrayList<>(parts);
+        Collections.sort(sorted);
+        StringBuilder text = new StringBuilder(transport);
+        for (String part : sorted) {
+            text.append('\n').append(part);
+        }
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(country).append(':');
+            for (int i = 0; i < 8; i++) {
+                hex.append(String.format("%02x", hash[i] & 0xff));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}
+"""
+
 EDGE_EDITS = (
     # DC 1: the labels after A-002's direct addresses, none until the bridge gives them.
     (EDGE_MANAGER_CPP,
