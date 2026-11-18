@@ -98,6 +98,7 @@ jobs:
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
           GOOGLE_SERVICES_JSON: ${{ vars.PLUMA_GOOGLE_SERVICES_JSON }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
           ABIS: ${{ inputs.abis }}
           DEV_SERVER_IPV4: ${{ inputs.dev_address }}
           CCACHE: "1"

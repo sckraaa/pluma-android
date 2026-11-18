@@ -115,6 +115,7 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_SERVER_IPV6` | Optional. The server's IPv6 address. |
 | `PLUMA_RSA_PUBLIC_KEY` | The server key as a PKCS#1 PEM: `openssl rsa -in server_pkcs1.key -RSAPublicKey_out` |
 | `PLUMA_GOOGLE_SERVICES_JSON` | Optional. The Firebase config of `chat.pluma.app`, for push notifications. |
+| `PLUMA_EDGE_WS_URLS` | Optional. The server's edges, 1 to 4 `wss://<host>/apiws` URLs separated by commas in the order tried: the client goes through them when the direct address does not answer. Empty: no edges. Development builds take `DEV_EDGE_WS_URLS` instead. |
 | `PLUMA_SIGNING_CERT_SHA256` | Optional. The SHA-256 of the release certificate. Signing with any other key fails. |
 | `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Signing](#signing). |
 
