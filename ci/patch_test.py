@@ -2644,10 +2644,20 @@ class EdgesTest(unittest.TestCase):
             self.assertIn('    private static final String[] BUILT_IN = {"wss://e2x.gcorecdn.com/apiws", '
                           '"wss://ru.pluma.chat/apiws"};\n', self.java(tree))
             self.assertIn('static const char *const PLUMA_EDGE_LABEL = "pluma-edge-";\n', tree.read(patch.EDGE_MANAGER_CPP))
-            self.assertIn('{"native_setPlumaEdges", "(I[IZ)V", (void *) setPlumaEdges},\n', tree.read(patch.EDGE_WRAPPER))
-            # A second run stops before it writes anything twice.
+            self.assertIn('{"native_setPlumaEdges", "(I[I[IIZ)V", (void *) setPlumaEdges},\n', tree.read(patch.EDGE_WRAPPER))
+            self.assertEqual(tree.read(patch.PATH_POLICY_FILE), patch.PATH_POLICY_JAVA)
+            self.assertIn('    private static final String DIRECT_IPV4 = "203.0.113.7";\n'
+                          '    private static final String DIRECT_IPV6 = "";\n'
+                          '    private static final int DIRECT_PORT = 443;\n', tree.read(patch.PATH_PROBER_FILE))
+            # A second run stops before it writes anything twice, whichever file is there.
             with self.assertRaisesRegex(patch.PatchError, "already there"):
                 patch.edges(tree, c)
+            for rel in patch.EDGE_FILES:
+                with tempfile.TemporaryDirectory() as e:
+                    fresh = self.tree(pathlib.Path(e))
+                    fresh.write(rel, "")
+                    with self.assertRaisesRegex(patch.PatchError, re.escape(rel) + ": the file is already there"):
+                        patch.edges(fresh, c)
 
     def test_no_edges(self):
         # An empty PLUMA_EDGE_WS_URLS makes no edit at all, and the check holds it to that.
@@ -2658,23 +2668,29 @@ class EdgesTest(unittest.TestCase):
             patch.edges(tree, c)
             patch.verify_edges(tree, c)
             self.assertEqual({rel: tree.read(rel) for rel in before}, before)
-            self.assertFalse((tree.root / patch.EDGE_FILE).exists())
+            for rel in patch.EDGE_FILES:
+                self.assertFalse((tree.root / rel).exists())
             for rel, old, new in patch.EDGE_EDITS:
                 with self.subTest(edit=new.strip().splitlines()[-1][:60]):
                     tree.write(rel, before[rel].replace(old, new))
-                    if "plumaedge" in new.lower() or patch.EDGE_LABEL in new:
-                        with self.assertRaisesRegex(patch.PatchError, "build without edges"):
-                            patch.verify_edges(tree, c)
+                    with self.assertRaisesRegex(patch.PatchError, "build without edges"):
+                        patch.verify_edges(tree, c)
                     tree.write(rel, before[rel])
-            tree.write(patch.EDGE_FILE, patch.edge_java(config(edge_ws_urls=self.URLS)))
-            with self.assertRaisesRegex(patch.PatchError, "build without edges has the bridge"):
-                patch.verify_edges(tree, c)
+            for rel, text in patch.edge_files(config(edge_ws_urls=self.URLS)).items():
+                with self.subTest(file=rel):
+                    tree.write(rel, text)
+                    with self.assertRaisesRegex(patch.PatchError, "build without edges has the bridge or the prober"):
+                        patch.verify_edges(tree, c)
+                    (tree.root / rel).unlink()
+            patch.verify_edges(tree, c)
 
     def test_every_edit_names_the_edges(self):
-        # So that a build without edges can be told apart from one with an edit left behind.
+        # So that a build without edges can be told apart from one with an edit left behind: each
+        # edit names the edges (A-128) or the path (A-129), and no upstream anchor does.
         for rel, old, new in patch.EDGE_EDITS:
             with self.subTest(edit=new.strip().splitlines()[-1][:60]):
-                self.assertTrue("plumaedge" in new.lower() or patch.EDGE_LABEL in new)
+                self.assertTrue(patch.edge_marked(new))
+                self.assertFalse(patch.edge_marked(old))
 
     def test_upstream_changed(self):
         # DAMAGE: each anchor of the edits (DC 1, the labels, the frozen connection, the socket,
@@ -2734,6 +2750,37 @@ class EdgesTest(unittest.TestCase):
             with self.assertRaisesRegex(patch.PatchError, "not the bridge"):
                 patch.verify_edges(tree, c)
             tree.write(patch.EDGE_FILE, java)
+            patch.verify_edges(tree, c)
+            # DAMAGE in the path files (A-129): another build's direct address, a stray line, a
+            # file missing.
+            for rel in (patch.PATH_POLICY_FILE, patch.PATH_PROBER_FILE):
+                text = tree.read(rel)
+                for damaged in (text + "\n", text.replace("SWITCH_RATIO_NOW = 10", "SWITCH_RATIO_NOW = 9"),
+                                patch.path_prober_java(config(edge_ws_urls=self.URLS, server_ipv4="198.51.100.1"))):
+                    if damaged == text or rel == patch.PATH_POLICY_FILE and "DIRECT_IPV4" in damaged:
+                        continue
+                    tree.write(rel, damaged)
+                    with self.subTest(file=rel, damage=damaged[-40:]), self.assertRaisesRegex(patch.PatchError, "not the path prober"):
+                        patch.verify_edges(tree, c)
+                (tree.root / rel).unlink()
+                with self.assertRaisesRegex(patch.PatchError, "not the path prober"):
+                    patch.verify_edges(tree, c)
+                tree.write(rel, text)
+            patch.verify_edges(tree, c)
+            # The contract checks of the prober, on a file that matches its template: the direct
+            # address is DC 1's, and a proxy of the user stops the probes.
+            prober = tree.read(patch.PATH_PROBER_FILE)
+            for old, new in (('DIRECT_IPV4 = "203.0.113.7";', 'DIRECT_IPV4 = "198.51.100.1";'),
+                             ("DIRECT_PORT = 443;", "DIRECT_PORT = 8443;"),
+                             ("return started && !unsupported && !proxied();",
+                              "return started && !unsupported;")):
+                damaged = prober.replace(old, new)
+                self.assertNotEqual(damaged, prober)
+                tree.write(patch.PATH_PROBER_FILE, damaged)
+                with self.subTest(contract=new), unittest.mock.patch.object(patch, "path_prober_java", lambda _c, text=damaged: text):
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_edges(tree, c)
+            tree.write(patch.PATH_PROBER_FILE, prober)
             patch.verify_edges(tree, c)
             # The contract checks themselves, on a file that matches its template.
             for old, new in (("return new Settings(Arrays.asList(BUILT_IN), false, BUILT_IN_STICKY_S);",
@@ -2903,6 +2950,49 @@ class PathSelectionTest(unittest.TestCase):
                 self.assertEqual(java.count(line), 1)
         # No Android in the policy: it runs on a JVM.
         self.assertNotRegex(java, r"import (android|org\.telegram|com\.neovisionaries)")
+
+    def test_prober_contract(self):
+        prober = patch.PATH_PROBER_JAVA
+        for line in (
+            'private static final String APP_CONFIG_KEY = "pluma_probe";',
+            'private static final String PREFERENCES = "pluma_paths";',
+            "private static final long LAUNCH_RANK_DELAY = 5_000;",
+            "private static final long BACKGROUND_RANK = 30 * 60_000L;",
+            "private static final long NETWORK_RANK_INTERVAL = 120_000;",
+            "private static final long SUSPECT_INTERVAL = 60_000;",
+            "private static final long TRANSFER_DEFER = 120_000;",
+            'ws.addProtocol("binary");',
+            'ws.addHeader("User-Agent", "Pluma");',
+            "return started && !unsupported && !proxied();",
+            'return main.getBoolean("proxy_enabled", false) && ProxySettings.fromSharedPreferences(main).isValid();',
+            "manager.registerDefaultNetworkCallback(callback);",
+            "connectivity().getRestrictBackgroundStatus() == ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED",
+            "power.isPowerSaveMode()",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(prober.count(line), 1)
+        self.assertEqual(prober.count(patch.PATH_DIRECT_LINES), 1)
+        # Logs carry exceptions only; no SSID, no location, no text message to an edge.
+        for log in re.findall(r"FileLog\.\w\((.*)\);", prober):
+            with self.subTest(log=log):
+                self.assertEqual(log, "e")
+        for word in ("getSSID", "WifiManager", "LocationManager", "sendText("):
+            self.assertNotIn(word, prober)
+        # The bridge leaves sticky_s to the prober while it chooses, and gives tgnet its order.
+        bridge = patch.EDGE_JAVA
+        self.assertIn("if (settings.edgesFirst || stickyReturn != null || PlumaPathProber.selecting()) {", bridge)
+        self.assertIn("            if (PlumaPathProber.selecting()) {\n                return;\n            }\n", bridge)
+        self.assertEqual(bridge.count("PlumaPathProber.order(settings.urls, settings.edgesFirst)"), 2)
+        self.assertEqual(bridge.count("PlumaPathProber.start();"), 1)
+        # tgnet: a new order reconnects DC 1 as a new proxy does; a request that waits with no byte
+        # is reported once per wait.
+        cpp = "".join(new for _, _, new in patch.EDGE_EDITS)
+        self.assertIn("            if (reconnect && changed) {\n                datacenter->suspendConnections(true);\n", cpp)
+        self.assertIn("now - plumaPathWaitSince >= plumaManager.plumaPathSuspectMs", cpp)
+        self.assertIn('{"native_setPlumaEdges", "(I[I[IIZ)V", (void *) setPlumaEdges},', cpp)
+        self.assertIn('{"native_getPlumaPathTransferAge", "(I)J", (void *) getPlumaPathTransferAge},', cpp)
+        self.assertIn('GetStaticMethodID(jclass_ConnectionsManager, "onPlumaPathSuspect", "(I)V")', cpp)
+        self.assertIn("public static void onPlumaPathSuspect(int currentAccount) {", cpp)
 
     @unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "no JDK")
     def test_policy_on_jvm(self):
