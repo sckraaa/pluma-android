@@ -423,6 +423,7 @@ def patch(tree, c):
     links(tree)
     brand(tree)
     login_screens(tree)
+    bundled_strings(tree)
 
 
 # --- the server's edges -------------------------------------------------------
@@ -7490,6 +7491,7 @@ def verify(tree, c):
     verify_links(tree)
     verify_brand(tree)
     verify_login_screens(tree)
+    verify_bundled_strings(tree)
 
 
 
@@ -8178,6 +8180,160 @@ def verify_login_screens(tree):
         for key, texts in LOGIN_STRINGS.items():
             if xml.count(f'    <string name="{key}">{texts[p.parent.name]}</string>\n') != 1:
                 raise PatchError(f"{p.relative_to(tree.root)}: {key} is not the text of task 076")
+
+# --- Strings shown before the language pack ----------------------------------
+# Until the server's language pack has loaded (a fresh install, the login
+# screens) the app shows the strings it bundles for the language of the
+# system, and so for any key the pack does not have: LocaleController.getStringV2
+# falls back to localizationInternal, the bundled strings of the language
+# (LocaleController.java 4783-4848), a plural to its _other form (1593-1603).
+# Upstream bundles little beyond English: values-ru has 257 of 11 537 strings
+# and none of the permission rationales or common buttons, so a phone in
+# Russian showed them in English until the pack loaded (task 114 of the
+# server repository). The patch adds to every bundled language the strings
+# it lacks of the intro and login screens, the permission rationales and the
+# common buttons:
+# Telegram's own translations (langpack.getStrings of the pack "android"),
+# with the replacements of Telegram by Pluma the server makes in its packs
+# (pkg/langpack RebrandValue of the server repository), written as resource
+# text by resource_text into ci/strings/<folder>.json. The keys are taken
+# from the patched tree: a key upstream adds to these screens or starts to
+# bundle stops the patch, which names it, until the data is refreshed.
+BUNDLED_STRINGS = pathlib.Path(__file__).resolve().parent / "strings"
+BUNDLED_CLASSES = ("ui/LoginActivity.java", "ui/IntroActivity.java", "ui/CountrySelectActivity.java")
+BUNDLED_PREFIXES = ("Allow", "Permission")
+BUNDLED_BUTTONS = ("OK", "Cancel", "Continue", "Done", "Next", "Close", "Back", "Save", "Delete", "Retry", "Open",
+                   "Settings", "Send", "Edit", "Copy", "Search", "Remove", "Confirm", "Apply", "GotIt", "Accept",
+                   "Decline")
+# Keys of these screens that stay English: the debug menu, and the consent
+# screen of Firebase's number verification, which Telegram's packs do not
+# translate (FpnvConsent*: langpack.getStrings answers langPackStringDeleted).
+BUNDLED_EXCLUDED = ("DebugMenuDisableLogs", "DebugMenuEnableLogs", "DebugMenuLoginToast", "DebugSendLogs",
+                    "DebugTestBackend", "SettingsDebug", "FpnvConsentCarrier", "FpnvConsentContinue",
+                    "FpnvConsentCountry", "FpnvConsentMccMnc", "FpnvConsentPhoneNumber", "FpnvConsentSimSlot",
+                    "FpnvConsentSimSlotValue", "FpnvConsentText", "FpnvConsentTitle")
+PLURAL_FORMS = ("zero", "one", "two", "few", "many", "other")
+STRING_KEY_USE = re.compile(r'R\.string\.(\w+)|\b(?:getString|formatString)\("(\w+)"')
+PLURAL_KEY_USE = re.compile(r'\bformatPluralString\w*\("(\w+)"')
+FORMAT_SPEC = re.compile(r"%(?:\d+\$)?[-#+ 0,(]*\d*(?:\.\d+)?[a-zA-Z]")
+# The app reads its bundled strings from assets the build writes from the
+# strings.xml files (buildSrc TelegramStringsTask.kt 340-401): the text of
+# the element as Groovy's XmlParser gives it, then "\n" is a line break and
+# every backslash goes, so a backslash cannot be written and surrounding
+# double quotes would show. Resource text that both this and aapt2 read the
+# same: entities and the escapes \' \" \n \@ \?, no bare quote, apostrophe or
+# line break, no space at either end (aapt2 trims it).
+RESOURCE_TEXT = re.compile(r"""(?:[^\\'"<>&\n]|\\['"n@?]|&(?:amp|lt|gt);)*""")
+
+
+def resource_text(value):
+    """A string of a language pack as the text of a <string> element: the
+    spaces at its ends go, as the build would drop them."""
+    if "\\" in value:
+        raise PatchError(f"a backslash cannot be bundled: {value[:80]!r}")
+    text = (value.strip(" \t").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n"))
+    return "\\" + text if text[:1] in ("@", "?") else text
+
+
+def valid_resource_text(text):
+    return (text != "" and RESOURCE_TEXT.fullmatch(text) is not None and text == text.strip(" \t")
+            and text[:1] not in ("@", "?"))
+
+
+def format_specs(text):
+    return collections.Counter(FORMAT_SPEC.findall(text.replace("%%", "")))
+
+
+def bundled_data():
+    """{folder: {name: resource text}} of ci/strings."""
+    data = {}
+    for p in sorted(BUNDLED_STRINGS.glob("*.json")):
+        texts = json.loads(p.read_text(encoding="utf-8"))
+        if list(texts) != sorted(texts):
+            raise PatchError(f"ci/strings/{p.name}: the keys are not sorted")
+        data[p.stem] = texts
+    return data
+
+
+def bundled_scope(tree, english):
+    """The keys the bundled languages must have: {key: plural}, a plural key
+    by its name without the form."""
+    scope = {}
+    for rel in BUNDLED_CLASSES:
+        text = tree.read(f"{JAVA}/{rel}")
+        for m in STRING_KEY_USE.finditer(text):
+            key = m.group(1) or m.group(2)
+            if key in english:
+                scope[key] = False
+        for key in PLURAL_KEY_USE.findall(text):
+            if f"{key}_other" not in english:
+                raise PatchError(f"{JAVA}/{rel}: the plural {key} has no English {key}_other")
+            scope[key] = True
+    scope.update((key, False) for key in english if key.startswith(BUNDLED_PREFIXES))
+    for key in BUNDLED_BUTTONS:
+        if key not in english:
+            raise PatchError(f"{RES}/values/strings.xml: no button {key}; upstream changed it")
+        scope[key] = False
+    for key in BUNDLED_EXCLUDED:
+        scope.pop(key, None)
+    return scope
+
+
+def _bundled_key(name, scope):
+    """The key of the scope a bundled string belongs to: a plural form names its key."""
+    base, _, form = name.rpartition("_")
+    return base if form in PLURAL_FORMS and scope.get(base) else name
+
+
+def bundled_strings(tree):
+    """Runs after brand() and login_screens(): the texts name Pluma already,
+    and the keys are those of the patched screens."""
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    if set(files) != set(STRING_RENAMES):
+        raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, expected {', '.join(sorted(STRING_RENAMES))}")
+    data = bundled_data()
+    if set(data) != set(files) - {"values"}:
+        raise PatchError(f"ci/strings: {', '.join(sorted(data))}, expected {', '.join(sorted(set(files) - {'values'}))}")
+    english = dict(STRING_ELEMENT.findall(tree.read(files["values"])))
+    scope = bundled_scope(tree, english)
+    for folder, texts in sorted(data.items()):
+        rel = files[folder]
+        xml = tree.read(rel)
+        have = {_bundled_key(key, scope) for key, _ in STRING_ELEMENT.findall(xml)}
+        missing = {key for key in scope if key not in have}
+        given = {_bundled_key(name, scope) for name in texts}
+        if given != missing:
+            raise PatchError(f"{rel}: ci/strings/{folder}.json has {sorted(given - missing)} the file has or the "
+                             f"screens do not use, lacks {sorted(missing - given)}; refresh it")
+        lines = []
+        for name, text in texts.items():
+            key = _bundled_key(name, scope)
+            if not valid_resource_text(text):
+                raise PatchError(f"ci/strings/{folder}.json: {name} is not resource text: {text[:80]!r}")
+            if scope[key]:
+                if f"{key}_other" not in texts:
+                    raise PatchError(f"ci/strings/{folder}.json: the plural {key} has no _other form")
+                allowed = sum((format_specs(english[f"{key}_{form}"]) for form in PLURAL_FORMS
+                               if f"{key}_{form}" in english), collections.Counter())
+                allowed = collections.Counter(set(allowed.elements()))
+            else:
+                allowed = format_specs(english[key])
+            if format_specs(text) - allowed:
+                raise PatchError(f"ci/strings/{folder}.json: {name} has the arguments {sorted(format_specs(text))}, "
+                                 f"English only {sorted(allowed.elements())}")
+            lines.append(f'    <string name="{name}">{text}</string>\n')
+        tree.replace(rel, "</resources>", "".join(lines) + "</resources>")
+
+
+def verify_bundled_strings(tree):
+    for folder, texts in bundled_data().items():
+        rel = f"{RES}/{folder}/strings.xml"
+        xml = tree.read(rel)
+        for name, text in texts.items():
+            if xml.count(f'    <string name="{name}">{text}</string>\n') != 1 or xml.count(f'<string name="{name}">') != 1:
+                raise PatchError(f"{rel}: {name} is not the bundled string of ci/strings once")
+
 
 # --- What the server does not serve ------------------------------------------
 # Every way into a service Pluma does not have, not only the visible one. The

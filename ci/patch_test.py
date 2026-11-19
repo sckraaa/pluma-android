@@ -3737,5 +3737,164 @@ class MapsTest(unittest.TestCase):
                     self.assertEqual(text.count("GoogleMapsProvider"), 1)
 
 
+class BundledStringsTest(unittest.TestCase):
+    # The login screen uses a string, a plural and a button; the intro and the
+    # country list use nothing; English has every string, Russian none.
+    LOGIN = ('getString(R.string.SentSmsCode, phone);\n'
+             'LocaleController.formatPluralString("Hours", 2);\n'
+             'getString("DebugSendLogs");\n'
+             'preferences.getString("phone", null);\n')
+    ENGLISH = {"SentSmsCode": "We sent a code to **%1$s**.", "Hours_one": "%1$d hour", "Hours_other": "%1$d hours",
+               "DebugSendLogs": "Send Logs", "AllowReadCall": "Please allow Pluma to receive calls.",
+               "PermissionOpenSettings": "Settings", **{key: key for key in patch.BUNDLED_BUTTONS}}
+    RUSSIAN = {"SentSmsCode": "Мы отправили код на **%1$s**.", "Hours_one": "%1$d час", "Hours_few": "%1$d часа",
+               "Hours_many": "%1$d часов", "Hours_other": "%1$d часа", "AllowReadCall": "Разрешите Pluma принимать звонки.",
+               "PermissionOpenSettings": "Настройки", **{key: key.upper() for key in patch.BUNDLED_BUTTONS}}
+
+    def tree(self, root, data=None):
+        files = {f"{patch.JAVA}/{patch.BUNDLED_CLASSES[0]}": self.LOGIN}
+        files.update((f"{patch.JAVA}/{rel}", "") for rel in patch.BUNDLED_CLASSES[1:])
+        for folder in patch.STRING_RENAMES:
+            strings = self.ENGLISH if folder == "values" else {}
+            files[f"{patch.RES}/{folder}/strings.xml"] = (
+                "<resources>\n" + "".join(f'    <string name="{k}">{v}</string>\n' for k, v in strings.items())
+                + "</resources>\n")
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        strings = root / "ci-strings"
+        strings.mkdir()
+        for folder in patch.STRING_RENAMES:
+            if folder != "values":
+                texts = self.RUSSIAN if data is None else data
+                (strings / f"{folder}.json").write_text(json.dumps(dict(sorted(texts.items())), ensure_ascii=False))
+        return patch.Tree(root), strings
+
+    def run_step(self, root, data=None, before=None):
+        tree, strings = self.tree(root, data)
+        if before:
+            before(tree)
+        with unittest.mock.patch.object(patch, "BUNDLED_STRINGS", strings):
+            patch.bundled_strings(tree)
+            patch.verify_bundled_strings(tree)
+        return tree, strings
+
+    def test_adds_missing_strings(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree, strings = self.run_step(pathlib.Path(d))
+            ru = tree.read(f"{patch.RES}/values-ru/strings.xml")
+            self.assertIn('    <string name="Hours_many">%1$d часов</string>\n', ru)
+            self.assertIn('    <string name="OK">OK</string>\n', ru)
+            self.assertNotIn("DebugSendLogs", ru)
+            self.assertEqual(tree.read(f"{patch.RES}/values/strings.xml").count("<string "), len(self.ENGLISH))
+            # A second run adds nothing twice: the strings are there now.
+            with unittest.mock.patch.object(patch, "BUNDLED_STRINGS", strings):
+                with self.assertRaisesRegex(patch.PatchError, "the file has or the screens do not use"):
+                    patch.bundled_strings(tree)
+                patch.verify_bundled_strings(tree)
+            self.assertEqual(tree.read(f"{patch.RES}/values-ru/strings.xml"), ru)
+
+    def test_data_must_match_the_screens(self):
+        with tempfile.TemporaryDirectory() as d:
+            data = {k: v for k, v in self.RUSSIAN.items() if k != "AllowReadCall"}
+            with self.assertRaisesRegex(patch.PatchError, r"lacks \['AllowReadCall'\]"):
+                self.run_step(pathlib.Path(d), data)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(patch.PatchError, r"has \['DebugSendLogs'\]"):
+                self.run_step(pathlib.Path(d), {**self.RUSSIAN, "DebugSendLogs": "Отправить логи"})
+
+    def test_upstream_bundles_a_string(self):
+        def bundle(tree):
+            rel = f"{patch.RES}/values-uk/strings.xml"
+            tree.replace(rel, "</resources>", '    <string name="Hours_one">%1$d година</string>\n</resources>')
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(patch.PatchError, r"values-uk/strings.xml: .*has \['Hours'\]"):
+                self.run_step(pathlib.Path(d), before=bundle)
+
+    def test_arguments_and_text_are_checked(self):
+        for name, text, error in (("SentSmsCode", "Код на **%1$s**, %2$s", "arguments"),
+                                  ("SentSmsCode", "Код на **%1$d**", "arguments"),
+                                  ("Hours_few", "%1$s часа", "arguments"),
+                                  ("OK", "Л'", "not resource text"),
+                                  ("OK", "ОК ", "not resource text"),
+                                  ("OK", "a\\b", "not resource text")):
+            with self.subTest(name=name, text=text), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(patch.PatchError, error):
+                    self.run_step(pathlib.Path(d), {**self.RUSSIAN, name: text})
+        # A translation may leave out an argument, as Telegram's SMSFee1TextCountry does.
+        with tempfile.TemporaryDirectory() as d:
+            self.run_step(pathlib.Path(d), {**self.RUSSIAN, "SentSmsCode": "Мы отправили код."})
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(patch.PatchError, "no _other form"):
+                self.run_step(pathlib.Path(d), {k: v for k, v in self.RUSSIAN.items() if k != "Hours_other"})
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree, strings = self.run_step(pathlib.Path(d))
+            rel = f"{patch.RES}/values-nl/strings.xml"
+            xml = tree.read(rel)
+            with unittest.mock.patch.object(patch, "BUNDLED_STRINGS", strings):
+                for damaged in (xml.replace(">%1$d часов<", ">%1$d uur<"),
+                                xml.replace("</resources>", '    <string name="OK">OK</string>\n</resources>')):
+                    tree.write(rel, damaged)
+                    with self.assertRaisesRegex(patch.PatchError, "OK|Hours_many"):
+                        patch.verify_bundled_strings(tree)
+                tree.write(rel, xml)
+                patch.verify_bundled_strings(tree)
+
+    def test_resource_text(self):
+        # What the build makes of the text (TelegramStringsTask.normalizeXmlString
+        # after the XML parser) is the string of the pack, without the spaces at its ends.
+        def built(text):
+            text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+            return text.replace("\\n", "\n").replace("\\", "")
+        for value in ("Tap Settings > Battery & \"Allow\"", "It's <b>\n\nnext", "@name", "?", " Подтвердить ",
+                      "Volver a poner el código  >"):
+            with self.subTest(value=value):
+                text = patch.resource_text(value)
+                self.assertTrue(patch.valid_resource_text(text), text)
+                self.assertEqual(built(text), value.strip())
+        with self.assertRaisesRegex(patch.PatchError, "backslash"):
+            patch.resource_text("C:\\")
+
+    def test_data(self):
+        data = patch.bundled_data()
+        self.assertEqual(set(data), set(patch.STRING_RENAMES) - {"values"})
+        for folder, texts in data.items():
+            for name, text in texts.items():
+                with self.subTest(folder=folder, name=name):
+                    self.assertTrue(patch.valid_resource_text(text), text)
+                    self.assertIsNone(patch.TELEGRAM_WORD.search(text))
+                    self.assertIsNone(re.search("|".join(patch.LOCAL_NAMES), text))
+                    self.assertIsNone(re.search(r"(?i)telegram|телеграм|t\.me/", text))
+                    self.assertNotIn(name, patch.BUNDLED_EXCLUDED)
+        for name in ("OK", "Cancel", "Continue", "Done", "AllowReadCall", "AllowFillNumber",
+                     "PermissionOpenSettings", "Hours_few", "Hours_many"):
+            self.assertIn(name, data["values-ru"])
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_upstream(self):
+        # Every bundled language of the upstream gets every string of the
+        # screens it lacks, with the arguments of English.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in patch.BUNDLED_CLASSES:
+                (root / patch.JAVA / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(UPSTREAM / patch.JAVA / rel, root / patch.JAVA / rel)
+            for p in sorted((UPSTREAM / patch.RES).glob("values*/strings.xml")):
+                (root / patch.RES / p.parent.name).mkdir(parents=True)
+                shutil.copy(p, root / patch.RES / p.parent.name / "strings.xml")
+            tree = patch.Tree(root)
+            patch.bundled_strings(tree)
+            patch.verify_bundled_strings(tree)
+            english = dict(patch.STRING_ELEMENT.findall(tree.read(f"{patch.RES}/values/strings.xml")))
+            scope = patch.bundled_scope(tree, english)
+            for folder in patch.bundled_data():
+                with self.subTest(folder=folder):
+                    names = {k for k, _ in patch.STRING_ELEMENT.findall(tree.read(f"{patch.RES}/{folder}/strings.xml"))}
+                    for key, plural in scope.items():
+                        self.assertIn(f"{key}_other" if plural else key, names)
+
+
 if __name__ == "__main__":
     unittest.main()
