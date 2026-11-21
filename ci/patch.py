@@ -6730,6 +6730,54 @@ BRAND_COLOURS = (
      "{111 / 255.0f, 143 / 255.0f, 114 / 255.0f, 1}", 1),
     ("TMessagesProj/jni/intro/IntroRenderer.c", "{47 / 255.f, 90 / 255.f, 131 / 255.f, 1}",
      "{79 / 255.f, 110 / 255.f, 82 / 255.f, 1}", 1),
+    # The story editor, always dark (task 118): the share button and the round
+    # of the caption's send button fill sage under white; the crop button, the
+    # link sheet's icon, progress, title, handles and cursor take the dark accent;
+    # the "everyone" privacy gradient takes the connected set's.
+    (f"{JAVA}/ui/Stories/recorder/PreviewButtons.java", "0xff199cff", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Stories/recorder/CaptionContainerView.java", "0xff1A9CFF", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Stories/recorder/CaptionStory.java", "0xFF1A9CFF", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Stories/recorder/CropEditor.java", "0xff199cff", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/recorder/CropInlineEditor.java", "0xff199cff", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/recorder/StoryLinkSheet.java", "0xFF1A9CFF", "0xff9dbb9f", 3),
+    (f"{JAVA}/ui/Stories/recorder/StoryLinkSheet.java", "0xFF419FE8", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/recorder/StoryLinkSheet.java", "0xff54a1db", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/StoryPrivacyButton.java", "0xFF16A5F2, 0xFF1180F7", "0xff6f8f72, 0xff4f6e52", 2),
+    (f"{JAVA}/ui/Stories/recorder/StoryPrivacyBottomSheet.java", "0xFF16A5F2, 0xFF1180F7", "0xff6f8f72, 0xff4f6e52", 1),
+    # The media viewer, always dark: repeat and casting when on, the compression
+    # steps of a video, the caption's links, the round "done" of its editor and
+    # the bluish grey of its sheets.
+    (f"{JAVA}/ui/PhotoViewer.java", "0xFF73B4EC", "0xff9dbb9f", 4),
+    (f"{JAVA}/ui/PhotoViewer.java", "0xff53aeef", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/PhotoViewer.java", "0xff79c4fc", "0xffb2ceb4", 1),
+    (f"{JAVA}/ui/PhotoViewer.java", "0xff1C2229", "0xff1f2620", 3),
+    (f"{JAVA}/ui/Components/PhotoViewerCaptionEnterView.java", "0xff76c2f1", "0xffb2ceb4", 1),
+    (f"{JAVA}/ui/Components/PhotoViewerCaptionEnterView.java", "0xff66bffa", "0xff5b7a5e", 1),
+    # The links of the caption field of the story editor and the media viewer
+    # (EditTextEmoji.STYLE_STORY and STYLE_PHOTOVIEWER).
+    (f"{JAVA}/ui/Components/EditTextEmoji.java", "0xFF46A3EB", "0xffb2ceb4", 1),
+    # The playback speed of videos and stories, on their dark menus.
+    (f"{JAVA}/ui/ChooseSpeedLayout.java", "0xff6BB6F9", "0xff9dbb9f", 2),
+    (f"{JAVA}/ui/SpeedButtonsLayout.java", "0xff6BB6F9", "0xff9dbb9f", 2),
+    # Light screens without a theme colour: the buttons of the light picker
+    # bar, the progress of the photo pickers (Telegram's former brand blue, as
+    # in styles.xml above), the terms of service, the default text cursor.
+    (f"{JAVA}/ui/Components/PickerBottomLayoutViewer.java", "0xff19a7e8", "0xff5b7a5e", 4),
+    (f"{JAVA}/ui/PhotoPickerActivity.java", "0xff527da3", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/PhotoAlbumPickerActivity.java", "0xff527da3", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Components/TermsOfServiceView.java", "0xff50a8eb", "0xff5b7a5e", 2),
+    (f"{JAVA}/ui/Components/TermsOfServiceView.java", "0xff439bde", "0xff4f6e52", 1),
+    (f"{JAVA}/ui/Components/EditTextBoldCursor.java", "0xff54a1db", "0xff5b7a5e", 4),
+    # Either theme: the progress of the embedded video player, the unread dot
+    # of a featured sticker set; the proximity alert circle on the map, the
+    # dark accent on a dark map and the light one on a light map, alpha kept.
+    (f"{JAVA}/ui/Components/WebPlayerView.java", "0xff19a7e8", "0xff7fa082", 1),
+    (f"{JAVA}/ui/Cells/FeaturedStickerSetCell.java", "0xff44a8ea", "0xff7fa082", 1),
+    (f"{JAVA}/ui/Cells/FeaturedStickerSetCell2.java", "0xff44a8ea", "0xff7fa082", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x9666A3D7", "0x969DBB9F", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x1c66A3D7", "0x1c9DBB9F", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x964286F5", "0x965B7A5E", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x1c4286F5", "0x1c5B7A5E", 1),
 )
 
 
