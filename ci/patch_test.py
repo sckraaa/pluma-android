@@ -3432,6 +3432,147 @@ class CallColoursTest(unittest.TestCase):
             self.assertGreaterEqual(sum(map(patch.telegram_blue, defaults.values())), 100)
 
 
+class SaveFoldersTest(unittest.TestCase):
+    """The folders the app keeps and saves files in have Pluma's name."""
+
+    # The line of ImageLoader the move follows, as upstream writes it.
+    PRIVATE_ROOT = ("                    newPath = ApplicationLoader.applicationContext.getExternalFilesDir(null);\n"
+                    '                    telegramPath = new File(newPath, "Telegram");\n'
+                    "                } else {\n")
+
+    def tree(self, root, names=patch.SAVE_FOLDER_NAMES):
+        files = {}
+        for rel, old, _, count in names:
+            lines = [f"        x({old})\n"] * count
+            if rel == "messenger/ImageLoader.java" and old == ', "Telegram");':
+                lines[0] = self.PRIVATE_ROOT
+            files[f"{patch.JAVA}/{rel}"] = files.get(f"{patch.JAVA}/{rel}", "") + "".join(lines)
+        files[patch.IMAGE_LOADER] += "\n    @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)\n    private File getPublicStorageDir() {\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_names(self):
+        # Each old name becomes the same name with Pluma's; the picker's recent list also
+        # keeps looking into the old Download/Telegram.
+        for rel, old, new, _ in patch.SAVE_FOLDER_NAMES:
+            with self.subTest(old=old):
+                self.assertIn('"Telegram', old)
+                if "getName()" in old:
+                    self.assertIn('file.getName().equals("Pluma") || file.getName().equals("Telegram")', new)
+                else:
+                    self.assertEqual(new, old.replace('"Telegram', '"Pluma'))
+        # The cache folders that move are the four found by folder and file name only.
+        self.assertEqual(patch.SAVE_FOLDER_CACHES, ("Images", "Video", "Audio", "Documents"))
+        method = patch.SAVE_FOLDER_METHOD
+        self.assertIn('String[] names = {"Images", "Video", "Audio", "Documents"};', method)
+        self.assertIn("!to.exists() && !from.renameTo(to)", method)
+        self.assertNotIn("delete", method)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_save_folders(tree)
+            patch.save_folders(tree)
+            patch.verify_save_folders(tree)
+            loader = tree.read(patch.IMAGE_LOADER)
+            self.assertIn('                    telegramPath = new File(newPath, "Pluma");\n'
+                          '                    moveOldCacheFolders(new File(newPath, "Telegram"), telegramPath);\n', loader)
+            self.assertIn('x("Pluma Stories")', loader)
+            self.assertNotIn('"Telegram"', tree.read(f"{patch.JAVA}/messenger/MediaController.java"))
+            # A second run finds no upstream name and writes nothing.
+            before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+            with self.assertRaises(patch.PatchError):
+                patch.save_folders(tree)
+            self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+
+    def test_upstream_changed(self):
+        # One more or one fewer place with a name stops the patch before anything is written.
+        for i, (rel, old, new, count) in enumerate(patch.SAVE_FOLDER_NAMES):
+            for n in (count - 1, count + 1):
+                if n == 0 and rel == "messenger/ImageLoader.java" and old == ', "Telegram");':
+                    continue
+                names = tuple((r, o, w, n if j == i else c) for j, (r, o, w, c) in enumerate(patch.SAVE_FOLDER_NAMES))
+                with self.subTest(old=old, count=n), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d), names)
+                    before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+                    with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                        patch.save_folders(tree)
+                    self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+        # The anchor of the move changed.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            tree.write(patch.IMAGE_LOADER, tree.read(patch.IMAGE_LOADER).replace("getExternalFilesDir(null);", "getFilesDir();"))
+            with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                patch.save_folders(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.save_folders(tree)
+            # DAMAGE: a name taken back, a new place with Telegram's name, the move gone or doubled.
+            for rel, old, new, _ in patch.SAVE_FOLDER_NAMES:
+                rel = f"{patch.JAVA}/{rel}"
+                text = tree.read(rel)
+                for damaged in (text.replace(new, old, 1), text + 'x(new File(dir, "Telegram Backup"));\n'):
+                    with self.subTest(file=rel, new=new):
+                        tree.write(rel, damaged)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_save_folders(tree)
+                tree.write(rel, text)
+            text = tree.read(patch.IMAGE_LOADER)
+            for rel, old, new in patch.SAVE_FOLDER_EDITS:
+                for damaged in (text.replace(new, old), text + new):
+                    with self.subTest(edit=new[:60]):
+                        tree.write(rel, damaged)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_save_folders(tree)
+            tree.write(patch.IMAGE_LOADER, text)
+            patch.verify_save_folders(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = sorted({f"{patch.JAVA}/{rel}" for rel, _, _, _ in patch.SAVE_FOLDER_NAMES})
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            (root / "TMessagesProj").mkdir(exist_ok=True)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            # Upstream names its folders Telegram in exactly these files and lines (the user
+            # agent and the mini app API are other files); the third line of the picker is
+            # the title of its folder, which brand renames (JAVA_NAMES).
+            lines = {rel: sum(1 for l in original[rel].splitlines() if patch.JAVA_NAME_LITERAL.search(l)) for rel in rels}
+            self.assertEqual({rel[len(patch.JAVA) + 1:]: n for rel, n in lines.items()},
+                             {"messenger/AndroidUtilities.java": 1, "messenger/FilesMigrationService.java": 3,
+                              "messenger/ImageLoader.java": 12, "messenger/MediaController.java": 11,
+                              "messenger/SharedConfig.java": 3, "ui/Components/ChatAttachAlertDocumentLayout.java": 3})
+            patch.save_folders(tree)
+            for rel, old, new, count in patch.JAVA_NAMES:
+                if f"{patch.JAVA}/{rel}" in original:
+                    tree.replace(f"{patch.JAVA}/{rel}", old, new, count)
+            patch.verify_save_folders(tree)
+            # Nothing else changed: each file is upstream's once its edits are taken back.
+            for rel in rels:
+                text = tree.read(rel)
+                for r, old, new in reversed(patch.SAVE_FOLDER_EDITS):
+                    if r == rel:
+                        text = text.replace(new, old)
+                for r, old, new, _ in patch.SAVE_FOLDER_NAMES + tuple(patch.JAVA_NAMES):
+                    if f"{patch.JAVA}/{r}" == rel:
+                        text = text.replace(new, old)
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # The move comes before the root is made, on the branch of the app's own folder.
+            loader = tree.read(patch.IMAGE_LOADER)
+            self.assertLess(loader.index("moveOldCacheFolders(new File(newPath"), loader.index("telegramPath.mkdirs();"))
+            self.assertLess(loader.index("if (Build.VERSION.SDK_INT >= 30) {"), loader.index("moveOldCacheFolders(new File(newPath"))
+
+
 class BusinessTest(unittest.TestCase):
     """The Business rows are upstream's again; the ads switch of the screen is hidden."""
 

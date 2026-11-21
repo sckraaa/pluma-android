@@ -18,7 +18,8 @@ no way into the AI message editor, no group call joined without its key, no
 way into RTMP streams, live stories or call recording, none of Telegram's
 colours on the call screens, the server's HTTPS CDN reached over https://
 only in a server build, maps drawn by MapLibre from the server's tiles with
-no source on Google's maps and no key for them in a manifest).
+no source on Google's maps and no key for them in a manifest, folders with
+Pluma's name).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -425,6 +426,7 @@ def patch(tree, c):
     login_screens(tree)
     bundled_strings(tree)
     ui_texts(tree)
+    save_folders(tree)
 
 
 # --- the server's edges -------------------------------------------------------
@@ -5625,17 +5627,13 @@ JAVA_NAMES = (
     ("ui/SessionsActivity.java", 'session.app_name = "Telegram Android";', 'session.app_name = "Pluma Android";', 1),
     ("ui/ThemePreviewActivity.java", '"Telegram Beta Chat"', '"Pluma Beta Chat"', 1),
 )
-# The name in Java literals that stays, per file under JAVA: directories on the
-# device's storage, the mini app API and the user agent, none of them read by
-# the user. A new literal with the name stops the build until it is read and
-# put either in JAVA_NAMES or here.
+# The name in Java literals that stays, per file under JAVA: the old folders on
+# the device's storage (SAVE_FOLDER_KEEP), the mini app API and the user agent,
+# none of them read by the user. A new literal with the name stops the build
+# until it is read and put either in JAVA_NAMES or here.
 JAVA_NAMES_KEEP = {
-    "messenger/AndroidUtilities.java": 1,
-    "messenger/FilesMigrationService.java": 3,
-    "messenger/ImageLoader.java": 12,
-    "messenger/MediaController.java": 11,
-    "messenger/SharedConfig.java": 3,
-    "ui/Components/ChatAttachAlertDocumentLayout.java": 2,
+    "messenger/ImageLoader.java": 2,
+    "ui/Components/ChatAttachAlertDocumentLayout.java": 1,
     "ui/bots/BotSensors.java": 4,
     "ui/web/BotWebViewContainer.java": 4,
 }
@@ -7573,6 +7571,7 @@ def verify(tree, c):
     verify_login_screens(tree)
     verify_bundled_strings(tree)
     verify_ui_texts(tree)
+    verify_save_folders(tree)
 
 
 
@@ -8542,6 +8541,141 @@ def verify_ui_texts(tree):
             if (p.parent.name not in texts or xml.count(_ui_text_line(key, p.parent.name)) != 1
                     or xml.count(f'<string name="{key}">') != 1):
                 raise PatchError(f"{p.relative_to(tree.root)}: {key} is not the text of task 118")
+
+
+# --- Save folders --------------------------------------------------------------
+# The folders the app keeps and saves files in have Pluma's name, not
+# Telegram's (owner's decision of 2026-11-21, task 118 of the server
+# repository). Upstream (7be672ea) names them in these places:
+# - ImageLoader.createMediaPaths (2440-2630): the root "Telegram" (2484, 2491,
+#   2500, 2510) and in it "Telegram Images", "Telegram Video", "Telegram
+#   Audio", "Telegram Documents", "Telegram Files", "Telegram Stories"
+#   (2519-2587); on Android 11+ the root is in the app's own folder
+#   (getExternalFilesDir, 2490-2491), below it on the shared storage; the
+#   public copies of photos and videos the gallery shows are "Telegram Images"
+#   and "Telegram Video" of Android/media/<package>/Telegram (2484, 2602, 2615);
+# - SharedConfig.checkSaveToGalleryFiles (1564-1567): the same root and the two
+#   public folders, made visible to the gallery or hidden by .nomedia;
+# - FilesMigrationService (106, 107, 213): the move of the root from the shared
+#   storage into the app's own folder on Android 11+;
+# - MediaController: "Save to gallery", "Save to downloads" and "Save to music"
+#   (5878, 5900, 6120-6134, 6279, 6301, 6432-6456): Pictures/Telegram,
+#   Movies/Telegram, Download/Telegram, Music/Telegram, through MediaStore's
+#   RELATIVE_PATH on Android 10+, as files below;
+# - AndroidUtilities.generatePicturePath's legacy folder Pictures/Telegram
+#   (3765);
+# - ChatAttachAlertDocumentLayout: the app's folder in the file picker (1366)
+#   and Download/Telegram, whose files the recent list shows as if they lay in
+#   Download itself (992).
+# New files go to the new folders; the old ones stay where they are:
+# - files found by the path the file database keeps (FileLoader.getPathToAttach
+#   1434-1437: the public copies, files saved under their own names, stories)
+#   open from there;
+# - the cache folders of photos, videos, audio and documents of the app's own
+#   folder (Android 11+) are found by folder and file name only
+#   (getPathToAttach 1439), so these four folders move into the new root once,
+#   before it has them: a rename inside the app's own folder, no data copied;
+# - the folders on the shared storage (Pictures/Telegram and the others, the
+#   root below Android 11) may be the official app's too, so they are not
+#   touched, and the move of FilesMigrationService takes Pluma's root;
+# - the file picker's recent list goes on showing Download/Telegram next to
+#   Download/Pluma.
+IMAGE_LOADER = f"{JAVA}/messenger/ImageLoader.java"
+SAVE_FOLDER_NAMES = (
+    ("messenger/MediaController.java", ', "Telegram");', ', "Pluma");', 11),
+    ("messenger/AndroidUtilities.java", ', "Telegram");', ', "Pluma");', 1),
+    ("messenger/FilesMigrationService.java", ', "Telegram");', ', "Pluma");', 3),
+    ("messenger/SharedConfig.java", ', "Telegram");', ', "Pluma");', 1),
+    ("messenger/SharedConfig.java", '"Telegram Images"', '"Pluma Images"', 1),
+    ("messenger/SharedConfig.java", '"Telegram Video"', '"Pluma Video"', 1),
+    ("messenger/ImageLoader.java", ', "Telegram");', ', "Pluma");', 4),
+    ("messenger/ImageLoader.java", '"Telegram Images"', '"Pluma Images"', 2),
+    ("messenger/ImageLoader.java", '"Telegram Video"', '"Pluma Video"', 2),
+    ("messenger/ImageLoader.java", '"Telegram Audio"', '"Pluma Audio"', 1),
+    ("messenger/ImageLoader.java", '"Telegram Documents"', '"Pluma Documents"', 1),
+    ("messenger/ImageLoader.java", '"Telegram Files"', '"Pluma Files"', 1),
+    ("messenger/ImageLoader.java", '"Telegram Stories"', '"Pluma Stories"', 1),
+    ("ui/Components/ChatAttachAlertDocumentLayout.java",
+     'new File(ApplicationLoader.applicationContext.getExternalFilesDir(null), "Telegram");',
+     'new File(ApplicationLoader.applicationContext.getExternalFilesDir(null), "Pluma");', 1),
+    ("ui/Components/ChatAttachAlertDocumentLayout.java",
+     'if (file.isDirectory() && file.getName().equals("Telegram")) {',
+     'if (file.isDirectory() && (file.getName().equals("Pluma") || file.getName().equals("Telegram"))) {'
+     " // pluma: and the files saved before the folder took Pluma's name", 1),
+)
+# The cache folders that move, without the old "Telegram " and the new "Pluma ".
+SAVE_FOLDER_CACHES = ("Images", "Video", "Audio", "Documents")
+SAVE_FOLDER_METHOD = (
+    "    // pluma: until the folders took Pluma's name, the app kept its cache under Telegram's. Its\n"
+    "    // photos, videos, audio and documents are found by folder and file name, so those four\n"
+    "    // folders move into the new root once, while it does not have them; a rename inside the\n"
+    "    // app's own folder copies nothing. Files saved under their own names and stories are found\n"
+    "    // by the path the file database keeps and stay where they are.\n"
+    "    private static void moveOldCacheFolders(File oldRoot, File newRoot) {\n"
+    "        if (!oldRoot.isDirectory() || !newRoot.isDirectory() && !newRoot.mkdirs()) {\n"
+    "            return;\n"
+    "        }\n"
+    "        String[] names = {" + ", ".join(f'"{n}"' for n in SAVE_FOLDER_CACHES) + "};\n"
+    "        for (String name : names) {\n"
+    '            File from = new File(oldRoot, "Telegram " + name);\n'
+    '            File to = new File(newRoot, "Pluma " + name);\n'
+    "            if (from.isDirectory() && !to.exists() && !from.renameTo(to)) {\n"
+    "                FileLog.d(\"can't move \" + from + \" to \" + to);\n"
+    "            }\n"
+    "        }\n"
+    "    }\n"
+    "\n"
+)
+SAVE_FOLDER_EDITS = (
+    # The move, on Android 11+, where the root is in the app's own folder; after
+    # SAVE_FOLDER_NAMES.
+    (IMAGE_LOADER,
+     "                    newPath = ApplicationLoader.applicationContext.getExternalFilesDir(null);\n"
+     '                    telegramPath = new File(newPath, "Pluma");\n'
+     "                } else {\n",
+     "                    newPath = ApplicationLoader.applicationContext.getExternalFilesDir(null);\n"
+     '                    telegramPath = new File(newPath, "Pluma");\n'
+     '                    moveOldCacheFolders(new File(newPath, "Telegram"), telegramPath);\n'
+     "                } else {\n"),
+    (IMAGE_LOADER,
+     "    @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)\n"
+     "    private File getPublicStorageDir() {\n",
+     SAVE_FOLDER_METHOD
+     + "    @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)\n"
+     "    private File getPublicStorageDir() {\n"),
+)
+# The lines that keep the name Telegram afterwards, per file under JAVA: the
+# old root and folders of the move and Download/Telegram of the picker.
+SAVE_FOLDER_KEEP = {"messenger/ImageLoader.java": 2, "ui/Components/ChatAttachAlertDocumentLayout.java": 1}
+
+
+def save_folders(tree):
+    # Every anchor first, so that a changed upstream fails before anything is written.
+    for rel, old, _, count in SAVE_FOLDER_NAMES:
+        tree.expect(f"{JAVA}/{rel}", old, count)
+    for rel, old, new, count in SAVE_FOLDER_NAMES:
+        tree.replace(f"{JAVA}/{rel}", old, new, count)
+    for rel, old, new in SAVE_FOLDER_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_save_folders(tree):
+    """Pluma's folder names everywhere, the move of the old cache folders, and
+    the name Telegram only where SAVE_FOLDER_KEEP leaves it (the title of the
+    picker's folder is brand's, JAVA_NAMES)."""
+    for rel, old, new, count in SAVE_FOLDER_NAMES:
+        text = tree.read(f"{JAVA}/{rel}")
+        if old in text or text.count(new) != count:
+            raise PatchError(f"{JAVA}/{rel}: the folder {old!r} is still there, or {new!r} is not there {count} times")
+    for rel, _, new in SAVE_FOLDER_EDITS:
+        if tree.read(rel).count(new) != 1:
+            raise PatchError(f"{rel}: the move of the old cache folders is not there")
+    if tree.read(IMAGE_LOADER).count("moveOldCacheFolders(") != 2:
+        raise PatchError(f"{IMAGE_LOADER}: moveOldCacheFolders is not defined and called once")
+    for rel in sorted({rel for rel, _, _, _ in SAVE_FOLDER_NAMES}):
+        lines = sum(1 for line in tree.read(f"{JAVA}/{rel}").splitlines() if JAVA_NAME_LITERAL.search(line))
+        if lines != SAVE_FOLDER_KEEP.get(rel, 0):
+            raise PatchError(f"{JAVA}/{rel}: {lines} lines name Telegram, expected {SAVE_FOLDER_KEEP.get(rel, 0)}")
 
 
 # --- What the server does not serve ------------------------------------------
