@@ -3287,6 +3287,43 @@ class CallColoursTest(unittest.TestCase):
             with self.assertRaisesRegex(patch.PatchError, "the call screen is gone"):
                 patch.verify_call_colours(tree)
 
+    def test_dark_sheets(self):
+        # By meaning: a fill under white, text and controls, links, the bluish greys.
+        table = {(rel, key): new for rel, key, _, new in patch._DARK_SHEET_COLOURS}
+        self.assertEqual(table[(patch.DARK_THEME_PROVIDER, "featuredStickers_addButton")], patch.CALL_CONNECTED[0])
+        self.assertEqual(table[(patch.DARK_BLUE_PROVIDER, "checkbox")], patch.CALL_CONNECTED[0])
+        self.assertEqual(table[(patch.DARK_THEME_PROVIDER, "radioBackgroundChecked")], patch.CALL_ACCENT)
+        self.assertEqual(table[(patch.DARK_BLUE_PROVIDER, "windowBackgroundWhiteBlueIcon")], patch.CALL_ACCENT)
+        self.assertEqual(table[(patch.DARK_THEME_PROVIDER, "dialogTextLink")], patch.CALL_LINK)
+        self.assertEqual(table[(patch.DARK_BLUE_PROVIDER, "actionBarDefaultSubmenuBackground")], 0xFF364137)
+        for (rel, key), colour in table.items():
+            with self.subTest(file=rel, key=key):
+                self.assertFalse(patch.telegram_call_colour(colour), f"{colour:08X}")
+                self.assertNotIn(key, patch.DARK_SHEET_KEPT)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_colours(tree)
+            patch.verify_call_colours(tree)
+            text = tree.read(patch.DARK_BLUE_PROVIDER)
+            # A Telegram colour in decimal or in hex (the literals of the call screens), in a
+            # key the table maps or a new one.
+            for line, error in (
+                ("        sparseIntArray.put(Theme.key_dialogButton, -10177041);\n", "-10177041 is still there in dialogButton"),
+                ("        sparseIntArray.put(Theme.key_newKey, 0xFF1A9CFF);\n", "0xff1a9cff is still there"),
+            ):
+                with self.subTest(line=line):
+                    tree.write(patch.DARK_BLUE_PROVIDER, text + line)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_call_colours(tree)
+            # The kept reds and the green of a secret chat pass; a provider the check cannot read fails.
+            tree.write(patch.DARK_BLUE_PROVIDER, text + "        sparseIntArray.put(Theme.key_color_red, -832444);\n"
+                       "        sparseIntArray.put(Theme.key_chats_secretName, -9316522);\n")
+            patch.verify_call_colours(tree)
+            # A way of setting the colours the check cannot read stops it.
+            with unittest.mock.patch.object(patch, "DARK_SHEET_PUT", re.compile(r"sparseIntArray\.set\((\w+), (\w+)\)")):
+                with self.assertRaisesRegex(patch.PatchError, "reads no colours"):
+                    patch.verify_call_colours(tree)
+
     @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
     def test_real_upstream(self):
         java = pathlib.Path(patch.JAVA)

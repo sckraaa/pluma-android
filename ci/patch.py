@@ -10261,6 +10261,7 @@ GRADIENT_LAYOUT = f"{VOIP_UI}/VoIpGradientLayout.java"
 PREVIEW_DIALOG = f"{VOIP_UI}/PrivateVideoPreviewDialog.java"
 PREVIEW_DIALOG_NEW = f"{VOIP_UI}/PrivateVideoPreviewDialogNew.java"
 RECORD_ALERT = f"{UI}/Components/GroupCallRecordAlert.java"
+CONFERENCE_UI = f"{UI}/Components/conference"
 NO_VIDEO = ("0xff212E3A", "0xff2B5B4D", "0xff245863", "0xff274558")
 
 # The background of a private call, VoIpGradientLayout's constructor. Each
@@ -10427,18 +10428,116 @@ _CALL_LITERALS = (
      {"0xff658ffe": C4, "0xff956ffd": C2}, 1),
     # The notification of a call: Android 8 and later colour it with this.
     (VOIP_SERVICE, "builder.setColor(0xff282e31);", {"0xff282e31": call_neutral(0xFF282E31)}, 1),
+    # A message of the group call and the conference: its links, the bubble.
+    (f"{CONFERENCE_UI}/message/GroupCallMessageCell.java", "messageTextView.setLinkTextColor(0xFF4db8ff);",
+     {"0xFF4db8ff": CALL_LINK}, 1),
+    (f"{CONFERENCE_UI}/message/GroupCallMessageCell.java", "bgPaint.setColor(0xFF2B333B);",
+     {"0xFF2B333B": call_neutral(0xFF2B333B)}, 1),
 )
+
+# The dark sheets of the calls and the conferences (task 118). The group call
+# and the conference draw their sheet, menus, rows, message field and the
+# sheets they open (add people, the call link, a restricted call) with
+# DarkBlueThemeResourcesProvider (GroupCallActivity.java 1888, 3722, 3808,
+# 5351, 5535, 6607, 8767, 8771, 10367, 10504; VoIPFragment.java 1213;
+# VoIPService.java 2584, 2678); it extends Stories/DarkThemeResourceProvider,
+# which the new call and the join sheet of a conference use as they are
+# (CreateGroupCallSheet.java 64, GroupCallSheet.java 148), as do the story
+# viewer and editor, the media viewer and other dark sheets. Their colours by
+# meaning: a fill under white (the main button, checkboxes, the switch, the
+# recorded voice) the connected set's #5B7A5E, white reading about 2:1 on the
+# dark accent; text, icons, cursors, progress and radio buttons the dark
+# accent; links the dark link colour; the avatar of Saved Messages the soft
+# accent of the dark themes; the bluish greys the sage grey of the same
+# lightness, as the group call's own. Each line: (file, key, upstream value,
+# Pluma's).
+DARK_THEME_PROVIDER = f"{UI}/Stories/DarkThemeResourceProvider.java"
+DARK_BLUE_PROVIDER = f"{UI}/DarkBlueThemeResourcesProvider.java"
+_DARK_SHEET_COLOURS = (
+    (DARK_THEME_PROVIDER, "statisticChartSignature", "-1214008894", call_neutral(0xB7A3B1C2)),
+    (DARK_THEME_PROVIDER, "statisticChartActiveLine", "-665229191", call_neutral(0xD8596879)),
+    (DARK_THEME_PROVIDER, "statisticChartInactivePickerChart", "-667862461", call_neutral(0xD8313A43)),
+    (DARK_THEME_PROVIDER, "statisticChartActivePickerChart", "-665229191", call_neutral(0xD8596879)),
+    (DARK_THEME_PROVIDER, "dialogButton", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_emojiPanelBackground", "0xFF20242A", call_neutral(0xFF20242A)),
+    (DARK_THEME_PROVIDER, "chat_recordedVoiceBackground", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "chat_recordVoiceCancel", "-10638868", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_messageLinkOut", "-5316609", CALL_LINK),
+    (DARK_THEME_PROVIDER, "chat_messagePanelBackground", "0xFF20242A", call_neutral(0xFF20242A)),
+    (DARK_THEME_PROVIDER, "dialog_inlineProgressBackground", "-15393241", call_neutral(0xFF151E27)),
+    (DARK_THEME_PROVIDER, "progressCircle", "-10177027", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_emojiPanelStickerPackSelector", "181267199", call_neutral(0x0ACDEAFF)),
+    (DARK_THEME_PROVIDER, "chat_emojiPanelStickerPackSelectorLine", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_editMediaButton", "-15033089", G1),
+    (DARK_THEME_PROVIDER, "windowBackgroundWhiteBlueHeader", "0xFF1A9CFF", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "windowBackgroundWhiteInputFieldActivated", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "windowBackgroundWhiteInputField", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "undo_background", "0xFF212426", call_neutral(0xFF212426)),
+    (DARK_THEME_PROVIDER, "undo_cancelColor", "0xFF8BC8F5", CALL_LINK),
+    (DARK_THEME_PROVIDER, "voipgroup_inviteMembersBackground", "0xff222A33", call_neutral(0xFF222A33)),
+    (DARK_THEME_PROVIDER, "dialogScrollGlow", "0xff222A33", call_neutral(0xFF222A33)),
+    (DARK_THEME_PROVIDER, "chat_serviceBackground", "-2110438831", call_neutral(0x82354251)),
+    (DARK_THEME_PROVIDER, "switchTrackChecked", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "dialogRoundCheckBox", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "dialogRadioBackgroundChecked", "0xFF1A9CFF", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "dialogTextBlue2", "0xFF1A9CFF", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "checkbox", "-12692893", call_neutral(0xFF3E5263)),
+    (DARK_THEME_PROVIDER, "groupcreate_cursor", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "fastScrollActive", "-13133079", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "featuredStickers_addButton", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "dialogTextLink", "-10177041", CALL_LINK),
+    (DARK_THEME_PROVIDER, "chat_messageLinkIn", "0xFF46A3EB", CALL_LINK),
+    (DARK_THEME_PROVIDER, "location_actionActiveIcon", "-8796932", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "radioBackgroundChecked", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "avatar_backgroundSaved", "0xFF5CADF6", G4),
+    (DARK_THEME_PROVIDER, "avatar_background2Saved", "0xFF408BCF", G4),
+    (DARK_THEME_PROVIDER, "player_progress", "-11292689", CALL_ACCENT),
+    (DARK_BLUE_PROVIDER, "windowBackgroundWhite", "0xff222b33", call_neutral(0xFF222B33)),
+    (DARK_BLUE_PROVIDER, "dialogBackground", "0xff222B33", call_neutral(0xFF222B33)),
+    (DARK_BLUE_PROVIDER, "windowBackgroundGray", "0xff303B47", call_neutral(0xFF303B47)),
+    (DARK_BLUE_PROVIDER, "graySection", "0xff28323B", call_neutral(0xFF28323B)),
+    (DARK_BLUE_PROVIDER, "graySectionText", "0xff848D94", call_neutral(0xFF848D94)),
+    (DARK_BLUE_PROVIDER, "groupcreate_spanBackground", "0xff28323B", call_neutral(0xFF28323B)),
+    (DARK_BLUE_PROVIDER, "actionBarDefaultSubmenuBackground", "0xFF303B47", call_neutral(0xFF303B47)),
+    (DARK_BLUE_PROVIDER, "actionBarDefaultSubmenuSeparator", "-14733761", call_neutral(0xFF1F2E3F)),
+    (DARK_BLUE_PROVIDER, "undo_background", "-231982259", call_neutral(0xF22C3B4D)),
+    (DARK_BLUE_PROVIDER, "windowBackgroundWhiteBlueIcon", "0xFF4DB8FF", CALL_ACCENT),
+    (DARK_BLUE_PROVIDER, "windowBackgroundWhiteBlueButton", "0xFF5DAFEE", CALL_ACCENT),
+    (DARK_BLUE_PROVIDER, "checkboxSquareBackground", "-12692893", call_neutral(0xFF3E5263)),
+    (DARK_BLUE_PROVIDER, "checkbox", "0xFF1A9CFF", G1),
+)
+# Kept as Telegram has them: the reds of destructive actions and of the
+# recording dot, the green name of a secret chat (the themes keep both).
+DARK_SHEET_KEPT = ("text_RedBold", "text_RedRegular", "chat_recordedVoiceDot", "color_red", "chats_secretName")
+DARK_SHEET_PUT = re.compile(r"sparseIntArray\.put\(Theme\.key_(\w+), (-?0x[0-9A-Fa-f]{1,8}|-?\d+)\);")
+
+
+def _dark_sheet_line(key, value):
+    return f"        sparseIntArray.put(Theme.key_{key}, {value});\n"
+
+
+# The emoji status of a participant: Telegram paints it with its Premium blue
+# (GroupCallUserCell.java 505, 545); the chat list paints it with the accent
+# of the verified badge, sage in Pluma, where everyone has one (ADR 0041).
+_EMOJI_STATUS_EDITS = tuple(
+    (f"{UI}/Cells/GroupCallUserCell.java", f"            {side}.setColor(Theme.getColor(Theme.key_premiumGradient1));\n",
+     f"            {side}.setColor({jhex(CALL_ACCENT)}); // pluma: the sage accent, as in the chat list\n", 1)
+    for side in ("rightDrawable", "leftDrawable"))
 
 CALL_COLOUR_EDITS = (
     tuple((rel, old, _recoloured(old, colours), count) for rel, old, colours, count in _CALL_LITERALS)
+    + tuple((rel, _dark_sheet_line(key, old), _dark_sheet_line(key, jhex(new)), 1)
+            for rel, key, old, new in _DARK_SHEET_COLOURS)
+    + _EMOJI_STATUS_EDITS
     + ((_GRADIENT_EDIT[0], _GRADIENT_EDIT[1], _GRADIENT_EDIT[2], 1),
        (f"{RES}/drawable/call_notification_bg.xml", '<solid android:color="#282e31"/>',
         f'<solid android:color="#{call_neutral(0xFF282E31) & 0xFFFFFF:06x}"/>', 1))
 )
 
 # The files of the call screens the check reads in full: the private call, the
-# group call with its sheets, cells, bubble and alerts, the chat's call panel,
-# the notifications of a call.
+# group call and the conference with their sheets, cells, messages, bubble and
+# alerts, the dark sheets they draw with, the chat's call panel, the
+# notifications of a call.
 CALL_UI_FILES = (
     f"{UI}/VoIPFragment.java", f"{UI}/GroupCallActivity.java", f"{UI}/GroupCallSheet.java",
     f"{UI}/CreateGroupCallSheet.java", f"{UI}/GroupCallTabletGridAdapter.java",
@@ -10447,8 +10546,10 @@ CALL_UI_FILES = (
     f"{UI}/Components/CapsuleBlobDrawable.java", f"{UI}/Components/FragmentContextView.java",
     f"{UI}/Components/FragmentContextViewWavesDrawable.java", f"{RES}/drawable/call_notification_bg.xml",
     VOIP_SERVICE, f"{VOIP}/VoIPGroupNotification.java", f"{VOIP}/VoIPPreNotificationService.java",
+    DARK_THEME_PROVIDER, DARK_BLUE_PROVIDER,
 )
-CALL_UI_GLOBS = (f"{VOIP_UI}/*.java", f"{UI}/Cells/GroupCall*.java", f"{UI}/Components/GroupCall*.java")
+CALL_UI_GLOBS = (f"{VOIP_UI}/*.java", f"{UI}/Cells/GroupCall*.java", f"{UI}/Components/GroupCall*.java",
+                 f"{CONFERENCE_UI}/**/*.java")
 # The literals kept as Telegram has them (see above), with how many times.
 CALL_COLOURS_KEPT = {
     (f"{UI}/VoIPFragment.java", "0xfff01d2c"): 2,
@@ -10469,6 +10570,8 @@ CALL_COLOURS_KEPT = {
     (f"{VOIP}/VoIPGroupNotification.java", "0xff00aa00"): 1,
     (f"{VOIP}/VoIPPreNotificationService.java", "0xfff44336"): 1,
     (f"{VOIP}/VoIPPreNotificationService.java", "0xff00aa00"): 1,
+    # The red of a destructive action on the dark sheets (DARK_SHEET_KEPT).
+    (DARK_THEME_PROVIDER, "0xffdb4646"): 1,
 }
 
 
@@ -10556,6 +10659,14 @@ def verify_call_colours(tree):
         for (kept_rel, literal), n in CALL_COLOURS_KEPT.items():
             if kept_rel == rel and found[literal] != n:
                 raise PatchError(f"{rel}: {literal}, which the call keeps, is there {found[literal]} times, expected {n}")
+    # Every colour the dark sheets set, written in hex or in decimal.
+    for rel in (DARK_THEME_PROVIDER, DARK_BLUE_PROVIDER):
+        puts = DARK_SHEET_PUT.findall(tree.read(rel))
+        if not puts:
+            raise PatchError(f"{rel}: the check reads no colours; upstream changed it")
+        for key, value in puts:
+            if telegram_call_colour(int(value, 0) & 0xFFFFFFFF) and key not in DARK_SHEET_KEPT:
+                raise PatchError(f"{rel}: Telegram's colour {value} is still there in {key}")
 
 
 # --- HTTPS CDN (task 107 of the server repository, ADR 0071) ---------------------
