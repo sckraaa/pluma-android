@@ -4097,11 +4097,16 @@ class BundledStringsTest(unittest.TestCase):
             for p in sorted((UPSTREAM / patch.RES).glob("values*/strings.xml")):
                 (root / patch.RES / p.parent.name).mkdir(parents=True)
                 shutil.copy(p, root / patch.RES / p.parent.name / "strings.xml")
+            shutil.copytree(UPSTREAM / patch.RES / "xml", root / patch.RES / "xml")
             tree = patch.Tree(root)
             patch.bundled_strings(tree)
             patch.verify_bundled_strings(tree)
             english = dict(patch.STRING_ELEMENT.findall(tree.read(f"{patch.RES}/values/strings.xml")))
             scope = patch.bundled_scope(tree, english)
+            # The texts the system reads from the resources alone: the account's
+            # settings item and the descriptions of the widgets.
+            for key in ("AccountSettings", "EditWidgetChatsInfo", "EditWidgetContactsInfo"):
+                self.assertIn(key, scope)
             for folder in patch.bundled_data():
                 with self.subTest(folder=folder):
                     names = {k for k, _ in patch.STRING_ELEMENT.findall(tree.read(f"{patch.RES}/{folder}/strings.xml"))}

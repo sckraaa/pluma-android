@@ -8279,7 +8279,9 @@ def verify_login_screens(tree):
 # (pkg/langpack RebrandValue of the server repository), written as resource
 # text by resource_text into ci/strings/<folder>.json. The keys are taken
 # from the patched tree: a key upstream adds to these screens or starts to
-# bundle stops the patch, which names it, until the data is refreshed.
+# bundle stops the patch, which names it, until the data is refreshed. The
+# strings the resources name (res/xml) are bundled too (task 118): the system
+# reads them without the app, so the pack never reaches them.
 BUNDLED_STRINGS = pathlib.Path(__file__).resolve().parent / "strings"
 BUNDLED_CLASSES = ("ui/LoginActivity.java", "ui/IntroActivity.java", "ui/CountrySelectActivity.java")
 BUNDLED_PREFIXES = ("Allow", "Permission")
@@ -8356,6 +8358,13 @@ def bundled_scope(tree, english):
         if key not in english:
             raise PatchError(f"{RES}/values/strings.xml: no button {key}; upstream changed it")
         scope[key] = False
+    # The texts the system shows from the resources alone, never through the
+    # language pack: the account's settings item (auth_menu.xml) and the
+    # descriptions of the widgets.
+    for p in sorted((tree.root / RES / "xml").glob("*.xml")):
+        for key in re.findall(r"@string/(\w+)", p.read_text(encoding="utf-8")):
+            if key in english:
+                scope[key] = False
     for key in BUNDLED_EXCLUDED:
         scope.pop(key, None)
     return scope
