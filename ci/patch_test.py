@@ -3432,6 +3432,340 @@ class CallColoursTest(unittest.TestCase):
             self.assertGreaterEqual(sum(map(patch.telegram_blue, defaults.values())), 100)
 
 
+class SaveFoldersTest(unittest.TestCase):
+    """The folders the app keeps and saves files in have Pluma's name."""
+
+    # The line of ImageLoader the move follows, as upstream writes it.
+    PRIVATE_ROOT = ("                    newPath = ApplicationLoader.applicationContext.getExternalFilesDir(null);\n"
+                    '                    telegramPath = new File(newPath, "Telegram");\n'
+                    "                } else {\n")
+
+    def tree(self, root, names=patch.SAVE_FOLDER_NAMES):
+        files = {}
+        for rel, old, _, count in names:
+            lines = [f"        x({old})\n"] * count
+            if rel == "messenger/ImageLoader.java" and old == ', "Telegram");':
+                lines[0] = self.PRIVATE_ROOT
+            files[f"{patch.JAVA}/{rel}"] = files.get(f"{patch.JAVA}/{rel}", "") + "".join(lines)
+        files[patch.IMAGE_LOADER] += "\n    @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)\n    private File getPublicStorageDir() {\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_names(self):
+        # Each old name becomes the same name with Pluma's; the picker's recent list also
+        # keeps looking into the old Download/Telegram.
+        for rel, old, new, _ in patch.SAVE_FOLDER_NAMES:
+            with self.subTest(old=old):
+                self.assertIn('"Telegram', old)
+                if "getName()" in old:
+                    self.assertIn('file.getName().equals("Pluma") || file.getName().equals("Telegram")', new)
+                else:
+                    self.assertEqual(new, old.replace('"Telegram', '"Pluma'))
+        # The cache folders that move are the four found by folder and file name only.
+        self.assertEqual(patch.SAVE_FOLDER_CACHES, ("Images", "Video", "Audio", "Documents"))
+        method = patch.SAVE_FOLDER_METHOD
+        self.assertIn('String[] names = {"Images", "Video", "Audio", "Documents"};', method)
+        self.assertIn("!to.exists() && !from.renameTo(to)", method)
+        self.assertNotIn("delete", method)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_save_folders(tree)
+            patch.save_folders(tree)
+            patch.verify_save_folders(tree)
+            loader = tree.read(patch.IMAGE_LOADER)
+            self.assertIn('                    telegramPath = new File(newPath, "Pluma");\n'
+                          '                    moveOldCacheFolders(new File(newPath, "Telegram"), telegramPath);\n', loader)
+            self.assertIn('x("Pluma Stories")', loader)
+            self.assertNotIn('"Telegram"', tree.read(f"{patch.JAVA}/messenger/MediaController.java"))
+            # A second run finds no upstream name and writes nothing.
+            before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+            with self.assertRaises(patch.PatchError):
+                patch.save_folders(tree)
+            self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+
+    def test_upstream_changed(self):
+        # One more or one fewer place with a name stops the patch before anything is written.
+        for i, (rel, old, new, count) in enumerate(patch.SAVE_FOLDER_NAMES):
+            for n in (count - 1, count + 1):
+                if n == 0 and rel == "messenger/ImageLoader.java" and old == ', "Telegram");':
+                    continue
+                names = tuple((r, o, w, n if j == i else c) for j, (r, o, w, c) in enumerate(patch.SAVE_FOLDER_NAMES))
+                with self.subTest(old=old, count=n), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d), names)
+                    before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+                    with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                        patch.save_folders(tree)
+                    self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+        # The anchor of the move changed.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            tree.write(patch.IMAGE_LOADER, tree.read(patch.IMAGE_LOADER).replace("getExternalFilesDir(null);", "getFilesDir();"))
+            with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                patch.save_folders(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.save_folders(tree)
+            # DAMAGE: a name taken back, a new place with Telegram's name, the move gone or doubled.
+            for rel, old, new, _ in patch.SAVE_FOLDER_NAMES:
+                rel = f"{patch.JAVA}/{rel}"
+                text = tree.read(rel)
+                for damaged in (text.replace(new, old, 1), text + 'x(new File(dir, "Telegram Backup"));\n'):
+                    with self.subTest(file=rel, new=new):
+                        tree.write(rel, damaged)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_save_folders(tree)
+                tree.write(rel, text)
+            text = tree.read(patch.IMAGE_LOADER)
+            for rel, old, new in patch.SAVE_FOLDER_EDITS:
+                for damaged in (text.replace(new, old), text + new):
+                    with self.subTest(edit=new[:60]):
+                        tree.write(rel, damaged)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_save_folders(tree)
+            tree.write(patch.IMAGE_LOADER, text)
+            patch.verify_save_folders(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = sorted({f"{patch.JAVA}/{rel}" for rel, _, _, _ in patch.SAVE_FOLDER_NAMES})
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            (root / "TMessagesProj").mkdir(exist_ok=True)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            # Upstream names its folders Telegram in exactly these files and lines (the user
+            # agent and the mini app API are other files); the third line of the picker is
+            # the title of its folder, which brand renames (JAVA_NAMES).
+            lines = {rel: sum(1 for l in original[rel].splitlines() if patch.JAVA_NAME_LITERAL.search(l)) for rel in rels}
+            self.assertEqual({rel[len(patch.JAVA) + 1:]: n for rel, n in lines.items()},
+                             {"messenger/AndroidUtilities.java": 1, "messenger/FilesMigrationService.java": 3,
+                              "messenger/ImageLoader.java": 12, "messenger/MediaController.java": 11,
+                              "messenger/SharedConfig.java": 3, "ui/Components/ChatAttachAlertDocumentLayout.java": 3})
+            patch.save_folders(tree)
+            for rel, old, new, count in patch.JAVA_NAMES:
+                if f"{patch.JAVA}/{rel}" in original:
+                    tree.replace(f"{patch.JAVA}/{rel}", old, new, count)
+            patch.verify_save_folders(tree)
+            # Nothing else changed: each file is upstream's once its edits are taken back.
+            for rel in rels:
+                text = tree.read(rel)
+                for r, old, new in reversed(patch.SAVE_FOLDER_EDITS):
+                    if r == rel:
+                        text = text.replace(new, old)
+                for r, old, new, _ in patch.SAVE_FOLDER_NAMES + tuple(patch.JAVA_NAMES):
+                    if f"{patch.JAVA}/{r}" == rel:
+                        text = text.replace(new, old)
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # The move comes before the root is made, on the branch of the app's own folder.
+            loader = tree.read(patch.IMAGE_LOADER)
+            self.assertLess(loader.index("moveOldCacheFolders(new File(newPath"), loader.index("telegramPath.mkdirs();"))
+            self.assertLess(loader.index("if (Build.VERSION.SDK_INT >= 30) {"), loader.index("moveOldCacheFolders(new File(newPath"))
+
+
+class PremiumColoursTest(unittest.TestCase):
+    """Premium's gradient in the palette's sage."""
+
+    # The premium keys as ThemeColors of 13.2.1 (7be672ea) defines them; test_real_upstream
+    # checks the table against the checkout.
+    PREMIUM_UPSTREAM = (
+        ("premiumGradient0", "0xff4ACD43"),
+        ("premiumGradient1", "0xff55A5FF"),
+        ("premiumGradient2", "0xffA767FF"),
+        ("premiumGradient3", "0xffDB5C9D"),
+        ("premiumGradient4", "0xffF38926"),
+        ("premiumGradientBackground1", "0xff55A5FF"),
+        ("premiumGradientBackground2", "0xffA767FF"),
+        ("premiumGradientBackground3", "0xffDB5C9D"),
+        ("premiumGradientBackground4", "0xffF38926"),
+        ("premiumGradientBackgroundOverlay", "Color.WHITE"),
+        ("premiumStarGradient1", "0xffFFFFFF"),
+        ("premiumStarGradient2", "0xffE3ECFA"),
+        ("premiumCoinGradient1", "-15436801"),
+        ("premiumCoinGradient2", "-4167942"),
+        ("premiumStartSmallStarsColor", "ColorUtils.setAlphaComponent(Color.WHITE, 90)"),
+        ("premiumStartSmallStarsColor2", "ColorUtils.setAlphaComponent(Color.WHITE, 90)"),
+        ("premiumGradientBottomSheet1", "0xff5B9DE7"),
+        ("premiumGradientBottomSheet2", "0xffAB87DD"),
+        ("premiumGradientBottomSheet3", "0xffE794BE"),
+    )
+    # The shades of the palette (docs/tasks/017-rebranding.md of the server repository).
+    PALETTE = {0xFF4F6E52, 0xFF5B7A5E, 0xFF6F8F72, 0xFF7FA082, 0xFF9DBB9F, 0xFFB2CEB4, 0xFFE3EAE2}
+
+    def tree(self, root, table=None, theme_lines=None):
+        """ThemeColors with the premium keys, a Theme.java that shifts nothing
+        (Blue's accent arrays only) and the five theme files."""
+        table = table or self.PREMIUM_UPSTREAM
+        colors = ["public class ThemeColors {\n"]
+        for key, value in table:
+            colors.append(f"        defaultColors[key_{key}] = {value};\n")
+        for key, _ in table:
+            colors.append(f'        colorKeysMap.put(key_{key}, "{key}");\n')
+        files = {patch.THEME_COLORS: "".join(colors) + "}\n", f"{patch.JAVA}/ui/ActionBar/Theme.java": "class Theme {}\n"}
+        for asset, _, _ in patch.DEFAULT_THEMES.values():
+            files[f"{patch.MAIN}/assets/{asset}"] = "actionBarDefault=-1\n"
+        for asset, key, old, _ in theme_lines if theme_lines is not None else patch.PREMIUM_THEME_FILES:
+            files[f"{patch.MAIN}/assets/{asset}"] += f"{key}={old}\nchats_name=-1\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def check(self, tree):
+        # The theme model of the real Theme.java is test_real_upstream's; here the accent is the base.
+        with unittest.mock.patch.object(patch, "theme_accent", return_value=(0xFF5890C5, 0xFF5890C5)):
+            patch.verify_premium_colours(tree)
+
+    def test_palette(self):
+        # The main gradient runs along the palette's sage by hue, as on the other clients:
+        # green and blue soft, pink and orange deep; blue, purple and pink are Desktop's and
+        # Web K's buttons. Every colour the patch writes is one of the palette's shades, or
+        # the sage grey of the lightness of Telegram's dark grey.
+        self.assertEqual(patch.PREMIUM_RAMP, (0xFF9DBB9F, 0xFF7FA082, 0xFF6F8F72, 0xFF5B7A5E, 0xFF4F6E52))
+        self.assertEqual(patch.PREMIUM_COLOURS["premiumGradient1"], 0xFF7FA082)
+        self.assertEqual(patch.PREMIUM_COLOURS["premiumGradient3"], 0xFF5B7A5E)
+        self.assertEqual(set(patch.PREMIUM_COLOURS.values()) - self.PALETTE, set())
+        for asset, key, old, new in patch.PREMIUM_THEME_FILES:
+            with self.subTest(asset=asset, key=key):
+                if key.startswith("premiumGradientBackground"):
+                    self.assertEqual(new, patch.call_neutral(old & 0xFFFFFFFF))
+                else:
+                    self.assertIn(new | 0xFF000000, self.PALETTE)
+                    self.assertEqual(new >> 24, (old & 0xFFFFFFFF) >> 24)
+        # Telegram's colours are all found by the check, Pluma's none.
+        upstream = dict(self.PREMIUM_UPSTREAM)
+        for key in patch.PREMIUM_COLOURS:
+            with self.subTest(key=key):
+                self.assertTrue(patch.telegram_call_colour(int(upstream[key], 0) & 0xFFFFFFFF))
+                self.assertFalse(patch.telegram_call_colour(patch.PREMIUM_COLOURS[key]))
+        for asset, key, old, new in patch.PREMIUM_THEME_FILES:
+            self.assertFalse(patch.telegram_call_colour(new))
+        # The keys kept are Telegram's white.
+        self.assertEqual({upstream[k] for k in patch.PREMIUM_KEPT},
+                         {"Color.WHITE", "0xffFFFFFF", "ColorUtils.setAlphaComponent(Color.WHITE, 90)"})
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                self.check(tree)
+            patch.premium_colours(tree)
+            self.check(tree)
+            colors = tree.read(patch.THEME_COLORS)
+            self.assertIn("        defaultColors[key_premiumGradient1] = 0xFF7FA082;\n", colors)
+            self.assertIn("        defaultColors[key_premiumStarGradient1] = 0xffFFFFFF;\n", colors)
+            self.assertIn("\npremiumStarGradient1=-5058892\n", tree.read(f"{patch.MAIN}/assets/night.attheme"))
+            # A second run finds no upstream colour and writes nothing.
+            before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+            with self.assertRaises(patch.PatchError):
+                patch.premium_colours(tree)
+            self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+
+    def test_upstream_changed(self):
+        # A new premium key, a key gone, a dark theme's value changed: nothing is written.
+        cases = (
+            ("new key", self.PREMIUM_UPSTREAM + (("premiumGradient5", "0xff55A5FF"),), None),
+            ("key gone", self.PREMIUM_UPSTREAM[1:], None),
+            ("theme value", None, patch.PREMIUM_THEME_FILES[:-1] + (patch.PREMIUM_THEME_FILES[-1][:2] + (-1,) + (0,),)),
+        )
+        for name, table, lines in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), table, lines)
+                before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+                with self.assertRaises(patch.PatchError):
+                    patch.premium_colours(tree)
+                self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.premium_colours(tree)
+            # DAMAGE: a default taken back, a dark theme's value taken back, a light theme
+            # that sets Telegram's colour itself.
+            colors = tree.read(patch.THEME_COLORS)
+            for key, old in self.PREMIUM_UPSTREAM:
+                if key in patch.PREMIUM_COLOURS:
+                    with self.subTest(key=key):
+                        tree.write(patch.THEME_COLORS, re.sub(rf"(defaultColors\[key_{key}\] = )[^;]+;",
+                                                              lambda m: f"{m.group(1)}{old};", colors))
+                        with self.assertRaises(patch.PatchError):
+                            self.check(tree)
+            tree.write(patch.THEME_COLORS, colors)
+            for asset, key, old, new in patch.PREMIUM_THEME_FILES:
+                rel = f"{patch.MAIN}/assets/{asset}"
+                text = tree.read(rel)
+                with self.subTest(asset=asset, key=key):
+                    tree.write(rel, text.replace(f"\n{key}={patch._signed(new)}\n", f"\n{key}={old}\n"))
+                    with self.assertRaises(patch.PatchError):
+                        self.check(tree)
+                tree.write(rel, text)
+            rel = f"{patch.MAIN}/assets/day.attheme"
+            text = tree.read(rel)
+            tree.write(rel, text + "premiumGradientBottomSheet2=-5535779\n")
+            with self.assertRaisesRegex(patch.PatchError, "day.attheme"):
+                self.check(tree)
+            tree.write(rel, text)
+            self.check(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = [patch.THEME_COLORS, f"{patch.JAVA}/ui/ActionBar/Theme.java"] + [
+            f"{patch.MAIN}/assets/{asset}" for asset, _, _ in patch.DEFAULT_THEMES.values()]
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in set(rels) | {rel for rel, _, _, _ in patch.BRAND_COLOURS}:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            # The table of this test is upstream's.
+            self.assertEqual(re.findall(r"defaultColors\[key_(premium\w+)\] = ([^;]+);", original[patch.THEME_COLORS]),
+                             list(self.PREMIUM_UPSTREAM))
+            # No Java file but ThemeColors writes Telegram's premium colours itself.
+            literals = re.compile("|".join(v[4:] for _, v in self.PREMIUM_UPSTREAM if v.startswith("0xff")
+                                           and v != "0xffFFFFFF"), re.I)
+            found = [p for p in sorted((UPSTREAM / patch.JAVA).rglob("*.java"))
+                     if p.name != "ThemeColors.java" and literals.search(p.read_text(encoding="utf-8"))]
+            self.assertEqual(found, [])
+            # The model of the themes is the one of the patched Theme.java (brand).
+            patch.brand_theme(tree)
+            original = {rel: tree.read(rel) for rel in rels}
+            with self.assertRaisesRegex(patch.PatchError, "is not the Premium colour"):
+                patch.verify_premium_colours(tree)
+            patch.premium_colours(tree)
+            patch.verify_premium_colours(tree)
+            # Nothing else changed.
+            for rel in rels:
+                text = tree.read(rel)
+                if rel == patch.THEME_COLORS:
+                    for key, old in self.PREMIUM_UPSTREAM:
+                        text = re.sub(rf"(defaultColors\[key_{key}\] = )[^;]+;", lambda m: f"{m.group(1)}{old};", text)
+                for asset, key, old, new in patch.PREMIUM_THEME_FILES:
+                    if rel.endswith("/" + asset):
+                        text = text.replace(f"\n{key}={patch._signed(new)}\n", f"\n{key}={old}\n")
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # DAMAGE on the real tree: upstream's defaults, or a dark theme file of upstream.
+            patched = {rel: tree.read(rel) for rel in rels}
+            for rel in rels[:1] + rels[-2:]:
+                with self.subTest(damage=rel):
+                    tree.write(rel, original[rel])
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_premium_colours(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_premium_colours(tree)
+
+
 class BusinessTest(unittest.TestCase):
     """The Business rows are upstream's again; the ads switch of the screen is hidden."""
 
