@@ -3627,10 +3627,13 @@ class PremiumColoursTest(unittest.TestCase):
             patch.verify_premium_colours(tree)
 
     def test_palette(self):
-        # The main gradient runs along the palette's sage, from the deep accent to the accent
-        # of the dark themes; every colour the patch writes is one of the palette's shades, or
+        # The main gradient runs along the palette's sage by hue, as on the other clients:
+        # green and blue soft, pink and orange deep; blue, purple and pink are Desktop's and
+        # Web K's buttons. Every colour the patch writes is one of the palette's shades, or
         # the sage grey of the lightness of Telegram's dark grey.
-        self.assertEqual(patch.PREMIUM_RAMP, (0xFF4F6E52, 0xFF5B7A5E, 0xFF6F8F72, 0xFF7FA082, 0xFF9DBB9F))
+        self.assertEqual(patch.PREMIUM_RAMP, (0xFF9DBB9F, 0xFF7FA082, 0xFF6F8F72, 0xFF5B7A5E, 0xFF4F6E52))
+        self.assertEqual(patch.PREMIUM_COLOURS["premiumGradient1"], 0xFF7FA082)
+        self.assertEqual(patch.PREMIUM_COLOURS["premiumGradient3"], 0xFF5B7A5E)
         self.assertEqual(set(patch.PREMIUM_COLOURS.values()) - self.PALETTE, set())
         for asset, key, old, new in patch.PREMIUM_THEME_FILES:
             with self.subTest(asset=asset, key=key):
@@ -3659,7 +3662,7 @@ class PremiumColoursTest(unittest.TestCase):
             patch.premium_colours(tree)
             self.check(tree)
             colors = tree.read(patch.THEME_COLORS)
-            self.assertIn("        defaultColors[key_premiumGradient1] = 0xFF5B7A5E;\n", colors)
+            self.assertIn("        defaultColors[key_premiumGradient1] = 0xFF7FA082;\n", colors)
             self.assertIn("        defaultColors[key_premiumStarGradient1] = 0xffFFFFFF;\n", colors)
             self.assertIn("\npremiumStarGradient1=-5058892\n", tree.read(f"{patch.MAIN}/assets/night.attheme"))
             # A second run finds no upstream colour and writes nothing.

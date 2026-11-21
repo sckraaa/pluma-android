@@ -11022,14 +11022,15 @@ def verify_call_colours(tree):
 # premium keys of ThemeColors (846-865 in 7be672ea): Telegram's green, blue,
 # purple, pink and orange. The owner decided on 2026-11-21 (task 118 of the
 # server repository) to draw them in the palette's sage, a ramp of its shades
-# from the deep accent to the dark themes' accent, in the order of Telegram's
-# stops. No Java file writes these colours itself (checked: no literal of them
+# by hue, as the other clients do: the cool end (green, blue) soft, the warm
+# end (pink, orange) deep, so blue, purple and pink are the soft sage, the
+# accent and the deep sage of Desktop's and Web K's buttons. No Java file writes these colours itself (checked: no literal of them
 # outside ThemeColors). The accent engine leaves the keys alone
 # (Theme.themeAccentExclusionKeys), so each theme gets the defaults below or
 # what its file sets; of the five default themes only the two dark ones set
 # some: the background of the Premium screen, in Telegram's blue greys, and the
 # 3D star and its sparks in blue and purple.
-PREMIUM_RAMP = (CALL_CONNECTED[2], CALL_CONNECTED[0], CALL_CONNECTED[1], CALL_CONNECTED[3], CALL_ACCENT)
+PREMIUM_RAMP = (CALL_ACCENT, CALL_CONNECTED[3], CALL_CONNECTED[1], CALL_CONNECTED[0], CALL_CONNECTED[2])
 # The pale sage of the light outgoing bubble (PALETTE_LIGHT, chat_outBubble).
 PREMIUM_PALE = 0xFFE3EAE2
 PREMIUM_COLOURS = {
@@ -11039,13 +11040,14 @@ PREMIUM_COLOURS = {
     # The 3D star of the light themes: white to Telegram's bluish white, the pale sage.
     "premiumStarGradient2": PREMIUM_PALE,
     # The 3D star on the white Premium screen (PremiumPreviewFragment 2242): Telegram's
-    # blue to purple.
-    "premiumCoinGradient1": PREMIUM_RAMP[0],
-    "premiumCoinGradient2": PREMIUM_RAMP[4],
-    # The softer gradient of a feature's sheet: the main one, a stop lighter.
-    "premiumGradientBottomSheet1": PREMIUM_RAMP[2],
-    "premiumGradientBottomSheet2": PREMIUM_RAMP[3],
-    "premiumGradientBottomSheet3": PREMIUM_RAMP[4],
+    # blue to purple, the shading of a solid star, from the deep sage to the soft.
+    "premiumCoinGradient1": PREMIUM_RAMP[4],
+    "premiumCoinGradient2": PREMIUM_RAMP[0],
+    # The softer gradient of a feature's sheet (blue, purple, pink): the main one, a
+    # stop lighter.
+    "premiumGradientBottomSheet1": PREMIUM_RAMP[0],
+    "premiumGradientBottomSheet2": PREMIUM_RAMP[1],
+    "premiumGradientBottomSheet3": PREMIUM_RAMP[2],
 }
 # The keys kept as Telegram has them: the white of the overlay, the star and
 # the sparks.
