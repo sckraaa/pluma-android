@@ -19,7 +19,7 @@ way into RTMP streams, live stories or call recording, none of Telegram's
 colours on the call screens, the server's HTTPS CDN reached over https://
 only in a server build, maps drawn by MapLibre from the server's tiles with
 no source on Google's maps and no key for them in a manifest, folders with
-Pluma's name).
+Pluma's name, Premium's gradient in the palette's sage).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -407,6 +407,7 @@ def patch(tree, c):
     call_parameters(tree)
     group_calls_e2e(tree)
     call_colours(tree)
+    premium_colours(tree)
     birthdays(tree)
     sticker_sets(tree)
     saved_tags(tree)
@@ -7552,6 +7553,7 @@ def verify(tree, c):
     verify_call_parameters(tree)
     verify_group_calls_e2e(tree)
     verify_call_colours(tree)
+    verify_premium_colours(tree)
     verify_birthdays(tree)
     verify_sticker_sets(tree)
     verify_saved_tags(tree)
@@ -11010,6 +11012,111 @@ def verify_call_colours(tree):
         for key, value in puts:
             if telegram_call_colour(int(value, 0) & 0xFFFFFFFF) and key not in DARK_SHEET_KEPT:
                 raise PatchError(f"{rel}: Telegram's colour {value} is still there in {key}")
+
+
+# --- Premium's gradient -------------------------------------------------------
+# Everybody has Premium (ADR 0041), but its look stays: the Premium star and
+# badge, the buttons, the 3D star and coin, the Premium screen and
+# sheets, the animated gradients (PremiumGradient, PremiumButtonView,
+# StarParticlesView, GLIconRenderer). They all take their colours from the
+# premium keys of ThemeColors (846-865 in 7be672ea): Telegram's green, blue,
+# purple, pink and orange. The owner decided on 2026-11-21 (task 118 of the
+# server repository) to draw them in the palette's sage, a ramp of its shades
+# from the deep accent to the dark themes' accent, in the order of Telegram's
+# stops. No Java file writes these colours itself (checked: no literal of them
+# outside ThemeColors). The accent engine leaves the keys alone
+# (Theme.themeAccentExclusionKeys), so each theme gets the defaults below or
+# what its file sets; of the five default themes only the two dark ones set
+# some: the background of the Premium screen, in Telegram's blue greys, and the
+# 3D star and its sparks in blue and purple.
+PREMIUM_RAMP = (CALL_CONNECTED[2], CALL_CONNECTED[0], CALL_CONNECTED[1], CALL_CONNECTED[3], CALL_ACCENT)
+# The pale sage of the light outgoing bubble (PALETTE_LIGHT, chat_outBubble).
+PREMIUM_PALE = 0xFFE3EAE2
+PREMIUM_COLOURS = {
+    # The main gradient, stop by stop; the screen's background takes the same.
+    **{f"premiumGradient{i}": c for i, c in enumerate(PREMIUM_RAMP)},
+    **{f"premiumGradientBackground{i}": PREMIUM_RAMP[i] for i in range(1, 5)},
+    # The 3D star of the light themes: white to Telegram's bluish white, the pale sage.
+    "premiumStarGradient2": PREMIUM_PALE,
+    # The 3D star on the white Premium screen (PremiumPreviewFragment 2242): Telegram's
+    # blue to purple.
+    "premiumCoinGradient1": PREMIUM_RAMP[0],
+    "premiumCoinGradient2": PREMIUM_RAMP[4],
+    # The softer gradient of a feature's sheet: the main one, a stop lighter.
+    "premiumGradientBottomSheet1": PREMIUM_RAMP[2],
+    "premiumGradientBottomSheet2": PREMIUM_RAMP[3],
+    "premiumGradientBottomSheet3": PREMIUM_RAMP[4],
+}
+# The keys kept as Telegram has them: the white of the overlay, the star and
+# the sparks.
+PREMIUM_KEPT = ("premiumGradientBackgroundOverlay", "premiumStarGradient1", "premiumStartSmallStarsColor",
+                "premiumStartSmallStarsColor2")
+# What the dark theme files set: (theme file, key, upstream value, Pluma's).
+# The background's blue greys become the sage greys of their lightness (black
+# stays); the 3D star runs from the dark themes' link to the accent, its sparks
+# are the dark themes' accent with Telegram's alpha.
+PREMIUM_THEME_FILES = tuple(
+    [(asset, key, old, call_neutral(old & 0xFFFFFFFF)) for asset, key, old in (
+        ("night.attheme", "premiumGradientBackground1", -16578545),
+        ("night.attheme", "premiumGradientBackground2", -16645625),
+        ("darkblue.attheme", "premiumGradientBackground1", -14604747),
+        ("darkblue.attheme", "premiumGradientBackground2", -15394271),
+        ("darkblue.attheme", "premiumGradientBackground3", -15525343),
+        ("darkblue.attheme", "premiumGradientBackground4", -15328990))]
+    + [(asset, key, old, new) for asset in ("night.attheme", "darkblue.attheme") for key, old, new in (
+        ("premiumStarGradient1", {"night.attheme": -2342678, "darkblue.attheme": -15436801}[asset], CALL_LINK),
+        ("premiumStarGradient2", {"night.attheme": -9992961, "darkblue.attheme": -4167942}[asset], CALL_CONNECTED[0]),
+        ("premiumStartSmallStarsColor", {"night.attheme": -8290049, "darkblue.attheme": 1904435967}[asset],
+         {"night.attheme": 0xFF000000, "darkblue.attheme": 0x71000000}[asset] | CALL_ACCENT & 0xFFFFFF))]
+)
+PREMIUM_KEY = re.compile(r"premium\w*")
+
+
+def premium_colours(tree):
+    # Every anchor first, so that a changed upstream fails before anything is written.
+    colours = tree.read(THEME_COLORS)
+    _, defaults = theme_defaults(colours)
+    keys = {k[4:]: v for k, v in defaults.items() if PREMIUM_KEY.fullmatch(k[4:])}
+    if set(keys) != set(PREMIUM_COLOURS) | set(PREMIUM_KEPT):
+        raise PatchError(f"{THEME_COLORS}: the premium keys are {', '.join(sorted(keys))}, the patch maps "
+                         f"{', '.join(sorted(set(PREMIUM_COLOURS) | set(PREMIUM_KEPT)))}; upstream changed them")
+    for key in PREMIUM_COLOURS:
+        if len(re.findall(rf"        defaultColors\[key_{key}\] = [^;]+;\n", colours)) != 1:
+            raise PatchError(f"{THEME_COLORS}: the default of {key} is not set once; upstream changed it")
+    for asset, key, old, _ in PREMIUM_THEME_FILES:
+        tree.expect(f"{MAIN}/assets/{asset}", f"\n{key}={old}\n")
+    for key, colour in PREMIUM_COLOURS.items():
+        line = re.search(rf"        defaultColors\[key_{key}\] = ([^;]+);\n", tree.read(THEME_COLORS))
+        tree.replace(THEME_COLORS, line.group(0), _voipgroup_line(key, jhex(colour)))
+    for asset, key, old, new in PREMIUM_THEME_FILES:
+        tree.replace(f"{MAIN}/assets/{asset}", f"\n{key}={old}\n", f"\n{key}={_signed(new)}\n")
+
+
+def verify_premium_colours(tree):
+    """The premium keys as each default theme answers them, with every accent
+    it shows before the user picks a colour (the theme file, the accent engine
+    and the defaults, as verify_theme models them): Pluma's colours, none of
+    Telegram's."""
+    theme_java, colours = tree.read(f"{JAVA}/ui/ActionBar/Theme.java"), tree.read(THEME_COLORS)
+    names, defaults = theme_defaults(colours)
+    for key, colour in PREMIUM_COLOURS.items():
+        if defaults.get(f"key_{key}") != colour:
+            raise PatchError(f"{THEME_COLORS}: {key} is not the Premium colour of Pluma")
+    for asset, key, _, new in PREMIUM_THEME_FILES:
+        if f"\n{key}={_signed(new)}\n" not in tree.read(f"{MAIN}/assets/{asset}"):
+            raise PatchError(f"{asset}: {key} is not the Premium colour of Pluma")
+    fallback, excluded = theme_engine(theme_java)
+    premium = [k for k, n in names.items() if PREMIUM_KEY.fullmatch(n)]
+    if len(premium) != len(PREMIUM_COLOURS) + len(PREMIUM_KEPT):
+        raise PatchError(f"{THEME_COLORS}: the check reads {len(premium)} premium keys; upstream changed them")
+    for theme, (asset, accent_ids, dark) in DEFAULT_THEMES.items():
+        for accent_id in accent_ids:
+            base, accent = theme_accent(theme_java, theme, accent_id)
+            answers = theme_colours(tree.read(f"{MAIN}/assets/{asset}"), names, defaults, fallback, excluded,
+                                    base, accent, dark)
+            for key in sorted(premium):
+                if telegram_call_colour(answers[key]):
+                    raise PatchError(f"{asset}: Telegram's Premium colour {answers[key]:#010x} in {names[key]}")
 
 
 # --- HTTPS CDN (task 107 of the server repository, ADR 0071) ---------------------
