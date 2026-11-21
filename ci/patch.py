@@ -6196,6 +6196,11 @@ PALETTE_LIGHT = (
     ("chat_outSentClockSelected", -260332598, "#5B7A5E"),
     ("chat_outViews", -259216707, "#5B7A5E"),
     ("chat_outViewsSelected", -260332598, "#5B7A5E"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's blue to green: sage
+    ("stories_circle1", None, "#5B7A5E"),
+    ("stories_circle2", None, "#7FA082"),
+    ("stories_circle_dialog1", None, "#5B7A5E"),
+    ("stories_circle_dialog2", None, "#7FA082"),
 )
 # darkblue.attheme ("Dark Blue").
 PALETTE_DARK = (
@@ -6321,6 +6326,11 @@ PALETTE_DARK = (
     ("chat_outSentClockSelected", -4268038, "#B2CEB4"),
     ("chat_outViews", -7357217, "#B2CEB4"),
     ("chat_outViewsSelected", -4268038, "#B2CEB4"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's green to blue: sage
+    ("stories_circle1", -12984516, "#9DBB9F"),
+    ("stories_circle2", -11682817, "#B2CEB4"),
+    ("stories_circle_dialog1", -11866795, "#9DBB9F"),
+    ("stories_circle_dialog2", -11680769, "#B2CEB4"),
 )
 # day.attheme ("Day"): the keys of PALETTE_LIGHT, except in the outgoing
 # bubble. Day and Arctic Blue colour that bubble and write on it in white, as
@@ -6422,6 +6432,11 @@ PALETTE_DAY = (
     ("chat_outVenueInfoText", -3676417, "#E3EAE2"),
     ("chat_outVenueInfoSelectedText", -3676417, "#E3EAE2"),
     ("chat_outContactPhoneText", -3676417, "#E3EAE2"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's blue to green: sage
+    ("stories_circle1", None, "#5B7A5E"),
+    ("stories_circle2", None, "#7FA082"),
+    ("stories_circle_dialog1", None, "#5B7A5E"),
+    ("stories_circle_dialog2", None, "#7FA082"),
 )
 # arctic.attheme ("Arctic Blue"): as PALETTE_DAY; its outgoing bubble has no
 # gradient.
@@ -6505,6 +6520,11 @@ PALETTE_ARCTIC = (
     ("chat_inBubbleSelected", -1706753, "#E3EAE2"),
     ("chat_outBubble", -13332245, "#5B7A5E"),
     ("chat_outBubbleSelected", -13332255, "#4F6E52"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's blue to green: sage
+    ("stories_circle1", None, "#5B7A5E"),
+    ("stories_circle2", None, "#7FA082"),
+    ("stories_circle_dialog1", None, "#5B7A5E"),
+    ("stories_circle_dialog2", None, "#7FA082"),
 )
 # night.attheme ("Night"): the keys of PALETTE_DARK, except the neutral greys
 # of its bars, menus, sections and dialogs, which are Night's own and not
@@ -6620,6 +6640,11 @@ PALETTE_NIGHT = (
     ("chat_outSentClockSelected", -4268038, "#B2CEB4"),
     ("chat_outViews", -7357217, "#B2CEB4"),
     ("chat_outViewsSelected", -4268038, "#B2CEB4"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's green to blue: sage
+    ("stories_circle1", -12984516, "#9DBB9F"),
+    ("stories_circle2", -11682817, "#B2CEB4"),
+    ("stories_circle_dialog1", -11866795, "#9DBB9F"),
+    ("stories_circle_dialog2", -11680769, "#B2CEB4"),
 )
 # The theme files and their tables.
 THEME_FILES = {
@@ -6925,10 +6950,14 @@ def telegram_blue(c):
 #   (UserObject.getColorId), now sage and teal; the other five keep
 #   Telegram's colours;
 # - Telegram's blue and light blue as plain colours and the internal storage
-#   of the file picker.
+#   of the file picker;
+# - the ring of unseen stories around avatars, in the chat list and in
+#   profiles (StoriesUtilities); the rings of close friends and of a live
+#   story keep Telegram's green and red.
 ALSO_CHECKED = ("avatar_backgroundBlue", "avatar_background2Blue", "avatar_nameInMessageBlue",
                 "avatar_backgroundCyan", "avatar_background2Cyan", "avatar_nameInMessageCyan",
-                "color_blue", "color_lightblue", "chat_attachGalleryBackground")
+                "color_blue", "color_lightblue", "chat_attachGalleryBackground",
+                "stories_circle1", "stories_circle2", "stories_circle_dialog1", "stories_circle_dialog2")
 
 
 def default_theme_blues(theme_java, colors_java, theme_files):

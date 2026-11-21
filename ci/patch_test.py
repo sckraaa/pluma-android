@@ -1524,6 +1524,50 @@ class ThemeTest(unittest.TestCase):
             with self.assertRaisesRegex(patch.PatchError, "is still there"):
                 patch.verify_theme(patch.Tree(root))
 
+    def test_story_ring_tables(self):
+        # Every default theme gives the ring of unseen stories the sage of its
+        # kind, and the check reads the ring although the accent engine skips it.
+        ring = ("stories_circle1", "stories_circle2", "stories_circle_dialog1", "stories_circle_dialog2")
+        self.assertLessEqual(set(ring), set(patch.ALSO_CHECKED))
+        for asset, _, dark in patch.DEFAULT_THEMES.values():
+            rows = {key: new for key, _, new in patch.THEME_FILES[asset]}
+            with self.subTest(theme=asset):
+                self.assertEqual([rows.get(k) for k in ring],
+                                 ["#9DBB9F", "#B2CEB4"] * 2 if dark else ["#5B7A5E", "#7FA082"] * 2)
+
+    @staticmethod
+    def brand_theme_tree(root):
+        rels = ({f"{patch.JAVA}/ui/ActionBar/Theme.java", patch.THEME_COLORS}
+                | {f"{patch.MAIN}/assets/{asset}" for asset, _, _ in patch.DEFAULT_THEMES.values()}
+                | {rel for rel, _, _, _ in patch.BRAND_COLOURS})
+        for rel in rels:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(UPSTREAM / rel, root / rel)
+        return patch.Tree(root)
+
+    @unittest.skipUnless((ROOT / "upstream" / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.brand_theme_tree(pathlib.Path(d))
+            patch.brand_theme(tree)
+            patch.verify_theme(tree)
+            # DAMAGE: each colour literal taken back.
+            for rel, old, new, _ in patch.BRAND_COLOURS:
+                with self.subTest(file=rel, literal=old[:40]):
+                    text = tree.read(rel)
+                    tree.write(rel, text.replace(new, old, 1))
+                    with self.assertRaisesRegex(patch.PatchError, "is still there"):
+                        patch.verify_theme(tree)
+                    tree.write(rel, text)
+        # Without the ring in the tables, Telegram's blue is left in it in every theme.
+        tables = {asset: tuple(row for row in table if not row[0].startswith("stories_circle"))
+                  for asset, table in patch.THEME_FILES.items()}
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(patch, "THEME_FILES", tables):
+            tree = self.brand_theme_tree(pathlib.Path(d))
+            patch.brand_theme(tree)
+            with self.assertRaisesRegex(patch.PatchError, "stories_circle"):
+                patch.verify_theme(tree)
+
 
 class GoogleServicesTest(unittest.TestCase):
     def test_placeholder_is_well_formed(self):
