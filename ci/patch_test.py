@@ -1524,6 +1524,50 @@ class ThemeTest(unittest.TestCase):
             with self.assertRaisesRegex(patch.PatchError, "is still there"):
                 patch.verify_theme(patch.Tree(root))
 
+    def test_story_ring_tables(self):
+        # Every default theme gives the ring of unseen stories the sage of its
+        # kind, and the check reads the ring although the accent engine skips it.
+        ring = ("stories_circle1", "stories_circle2", "stories_circle_dialog1", "stories_circle_dialog2")
+        self.assertLessEqual(set(ring), set(patch.ALSO_CHECKED))
+        for asset, _, dark in patch.DEFAULT_THEMES.values():
+            rows = {key: new for key, _, new in patch.THEME_FILES[asset]}
+            with self.subTest(theme=asset):
+                self.assertEqual([rows.get(k) for k in ring],
+                                 ["#9DBB9F", "#B2CEB4"] * 2 if dark else ["#5B7A5E", "#7FA082"] * 2)
+
+    @staticmethod
+    def brand_theme_tree(root):
+        rels = ({f"{patch.JAVA}/ui/ActionBar/Theme.java", patch.THEME_COLORS}
+                | {f"{patch.MAIN}/assets/{asset}" for asset, _, _ in patch.DEFAULT_THEMES.values()}
+                | {rel for rel, _, _, _ in patch.BRAND_COLOURS})
+        for rel in rels:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(UPSTREAM / rel, root / rel)
+        return patch.Tree(root)
+
+    @unittest.skipUnless((ROOT / "upstream" / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.brand_theme_tree(pathlib.Path(d))
+            patch.brand_theme(tree)
+            patch.verify_theme(tree)
+            # DAMAGE: each colour literal taken back.
+            for rel, old, new, _ in patch.BRAND_COLOURS:
+                with self.subTest(file=rel, literal=old[:40]):
+                    text = tree.read(rel)
+                    tree.write(rel, text.replace(new, old, 1))
+                    with self.assertRaisesRegex(patch.PatchError, "is still there"):
+                        patch.verify_theme(tree)
+                    tree.write(rel, text)
+        # Without the ring in the tables, Telegram's blue is left in it in every theme.
+        tables = {asset: tuple(row for row in table if not row[0].startswith("stories_circle"))
+                  for asset, table in patch.THEME_FILES.items()}
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(patch, "THEME_FILES", tables):
+            tree = self.brand_theme_tree(pathlib.Path(d))
+            patch.brand_theme(tree)
+            with self.assertRaisesRegex(patch.PatchError, "stories_circle"):
+                patch.verify_theme(tree)
+
 
 class GoogleServicesTest(unittest.TestCase):
     def test_placeholder_is_well_formed(self):
@@ -3287,6 +3331,43 @@ class CallColoursTest(unittest.TestCase):
             with self.assertRaisesRegex(patch.PatchError, "the call screen is gone"):
                 patch.verify_call_colours(tree)
 
+    def test_dark_sheets(self):
+        # By meaning: a fill under white, text and controls, links, the bluish greys.
+        table = {(rel, key): new for rel, key, _, new in patch._DARK_SHEET_COLOURS}
+        self.assertEqual(table[(patch.DARK_THEME_PROVIDER, "featuredStickers_addButton")], patch.CALL_CONNECTED[0])
+        self.assertEqual(table[(patch.DARK_BLUE_PROVIDER, "checkbox")], patch.CALL_CONNECTED[0])
+        self.assertEqual(table[(patch.DARK_THEME_PROVIDER, "radioBackgroundChecked")], patch.CALL_ACCENT)
+        self.assertEqual(table[(patch.DARK_BLUE_PROVIDER, "windowBackgroundWhiteBlueIcon")], patch.CALL_ACCENT)
+        self.assertEqual(table[(patch.DARK_THEME_PROVIDER, "dialogTextLink")], patch.CALL_LINK)
+        self.assertEqual(table[(patch.DARK_BLUE_PROVIDER, "actionBarDefaultSubmenuBackground")], 0xFF364137)
+        for (rel, key), colour in table.items():
+            with self.subTest(file=rel, key=key):
+                self.assertFalse(patch.telegram_call_colour(colour), f"{colour:08X}")
+                self.assertNotIn(key, patch.DARK_SHEET_KEPT)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.call_colours(tree)
+            patch.verify_call_colours(tree)
+            text = tree.read(patch.DARK_BLUE_PROVIDER)
+            # A Telegram colour in decimal or in hex (the literals of the call screens), in a
+            # key the table maps or a new one.
+            for line, error in (
+                ("        sparseIntArray.put(Theme.key_dialogButton, -10177041);\n", "-10177041 is still there in dialogButton"),
+                ("        sparseIntArray.put(Theme.key_newKey, 0xFF1A9CFF);\n", "0xff1a9cff is still there"),
+            ):
+                with self.subTest(line=line):
+                    tree.write(patch.DARK_BLUE_PROVIDER, text + line)
+                    with self.assertRaisesRegex(patch.PatchError, error):
+                        patch.verify_call_colours(tree)
+            # The kept reds and the green of a secret chat pass; a provider the check cannot read fails.
+            tree.write(patch.DARK_BLUE_PROVIDER, text + "        sparseIntArray.put(Theme.key_color_red, -832444);\n"
+                       "        sparseIntArray.put(Theme.key_chats_secretName, -9316522);\n")
+            patch.verify_call_colours(tree)
+            # A way of setting the colours the check cannot read stops it.
+            with unittest.mock.patch.object(patch, "DARK_SHEET_PUT", re.compile(r"sparseIntArray\.set\((\w+), (\w+)\)")):
+                with self.assertRaisesRegex(patch.PatchError, "reads no colours"):
+                    patch.verify_call_colours(tree)
+
     @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
     def test_real_upstream(self):
         java = pathlib.Path(patch.JAVA)
@@ -3737,6 +3818,138 @@ class MapsTest(unittest.TestCase):
                     self.assertEqual(text.count("GoogleMapsProvider"), 1)
 
 
+class UiTextsTest(unittest.TestCase):
+    """The texts the code writes are keys of the language pack."""
+
+    FOLDERS = ("values", "values-ar", "values-de", "values-es", "values-it", "values-ko", "values-nl",
+               "values-pt-rBR", "values-ru", "values-uk")
+    CONTACTS = "messenger/ContactsController.java"
+
+    def tree(self, root, edits=patch.UI_TEXT_EDITS):
+        files = {f"{patch.JAVA}/{self.CONTACTS}": "".join(
+            f"x({new});\n" for rel, old, new, _ in patch.JAVA_NAMES if rel == self.CONTACTS)}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "\nx();\n"
+        for folder in self.FOLDERS:
+            files[f"{patch.RES}/{folder}/strings.xml"] = '<resources>\n    <string name="A">a</string>\n</resources>\n'
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_texts(self):
+        # Every key in every bundled language, as resource text, naming Pluma and not Telegram;
+        # the English of the audio error is Telegram's own.
+        for key, texts in patch.UI_TEXTS.items():
+            self.assertEqual(set(texts), set(self.FOLDERS), key)
+            self.assertTrue(key.startswith("Pluma"), key)
+            for folder, text in texts.items():
+                with self.subTest(key=key, folder=folder):
+                    self.assertTrue(patch.valid_resource_text(text), text)
+                    self.assertNotRegex(text, r"(?i)telegram|телеграм")
+                    if key.startswith("PlumaContact"):
+                        self.assertIn("Pluma", text)
+        self.assertEqual(patch.UI_TEXTS["PlumaCallAudioError"]["values"], "Error initializing audio hardware")
+        # The actions of a contact are the keys, not literals.
+        names = {old: new for rel, old, new, _ in patch.JAVA_NAMES if rel == self.CONTACTS}
+        self.assertEqual(set(names.values()), {f"LocaleController.getString(R.string.{k})" for k in
+                                               ("PlumaContactProfile", "PlumaContactVoiceCall", "PlumaContactVideoCall")})
+        self.assertEqual({key for _, key in patch.UI_TEXT_USES} - {"FolderLinkShareButton"}, set(patch.UI_TEXTS))
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_ui_texts(tree)
+            patch.ui_texts(tree)
+            patch.verify_ui_texts(tree)
+            self.assertIn("showErrorDialog(LocaleController.getString(R.string.PlumaCallAudioError));",
+                          tree.read(f"{patch.JAVA}/ui/VoIPFragment.java"))
+            self.assertIn('    <string name="PlumaContactVoiceCall">Голосовой звонок Pluma</string>\n',
+                          tree.read(f"{patch.RES}/values-ru/strings.xml"))
+            # A second run finds no upstream text and writes nothing.
+            before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+            with self.assertRaises(patch.PatchError):
+                patch.ui_texts(tree)
+            self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.UI_TEXT_EDITS):
+            changed = old.replace("(", "( ", 1)
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.UI_TEXT_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = tree.read(rel)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.ui_texts(tree)
+                self.assertEqual(tree.read(rel), before)
+        # A key upstream already has, and a bundled language without the texts.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values-de/strings.xml"
+            tree.write(rel, tree.read(rel).replace("</resources>", '<string name="PlumaContactProfile">x</string>\n</resources>'))
+            with self.assertRaisesRegex(patch.PatchError, "upstream has a string PlumaContactProfile"):
+                patch.ui_texts(tree)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            (pathlib.Path(d) / patch.RES / "values-fr").mkdir()
+            (pathlib.Path(d) / patch.RES / "values-fr/strings.xml").write_text("<resources>\n</resources>\n")
+            with self.assertRaisesRegex(patch.PatchError, "values-fr"):
+                patch.ui_texts(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.ui_texts(tree)
+            # DAMAGE: an edit taken back, a key used twice, a text missing or changed in a language.
+            for rel, old, new in patch.UI_TEXT_EDITS:
+                text = tree.read(rel)
+                for damaged in (text.replace(new, old), text + new):
+                    with self.subTest(file=rel):
+                        tree.write(rel, damaged)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_ui_texts(tree)
+                tree.write(rel, text)
+            contacts = f"{patch.JAVA}/{self.CONTACTS}"
+            text = tree.read(contacts)
+            tree.write(contacts, text.replace("R.string.PlumaContactVideoCall", "R.string.PlumaContactVoiceCall"))
+            with self.assertRaisesRegex(patch.PatchError, "PlumaContact"):
+                patch.verify_ui_texts(tree)
+            tree.write(contacts, text)
+            rel = f"{patch.RES}/values-ko/strings.xml"
+            xml = tree.read(rel)
+            for damaged in (xml.replace(patch._ui_text_line("PlumaCallAudioError", "values-ko"), ""),
+                            xml.replace("Pluma 프로필", "Pluma")):
+                tree.write(rel, damaged)
+                with self.assertRaisesRegex(patch.PatchError, "values-ko"):
+                    patch.verify_ui_texts(tree)
+            tree.write(rel, xml)
+            patch.verify_ui_texts(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = [f"{patch.JAVA}/{self.CONTACTS}"] + [rel for rel, _, _ in patch.UI_TEXT_EDITS]
+        rels += [str(p.relative_to(UPSTREAM)) for p in sorted((UPSTREAM / patch.RES).glob("values*/strings.xml"))]
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            for rel, old, new, count in patch.JAVA_NAMES:
+                if rel == self.CONTACTS:
+                    tree.replace(f"{patch.JAVA}/{rel}", old, new, count)
+            patch.ui_texts(tree)
+            patch.verify_ui_texts(tree)
+            # The button's key is upstream's, with its English text.
+            self.assertIn('<string name="FolderLinkShareButton">Create Invite Link</string>',
+                          tree.read(f"{patch.RES}/values/strings.xml"))
+            # No English literal is left at these places.
+            for rel, old, _ in patch.UI_TEXT_EDITS:
+                self.assertNotIn(old, tree.read(rel))
+            self.assertNotRegex(tree.read(f"{patch.JAVA}/{self.CONTACTS}"), r'DATA2, "')
+
+
 class BundledStringsTest(unittest.TestCase):
     # The login screen uses a string, a plural and a button; the intro and the
     # country list use nothing; English has every string, Russian none.
@@ -3884,11 +4097,16 @@ class BundledStringsTest(unittest.TestCase):
             for p in sorted((UPSTREAM / patch.RES).glob("values*/strings.xml")):
                 (root / patch.RES / p.parent.name).mkdir(parents=True)
                 shutil.copy(p, root / patch.RES / p.parent.name / "strings.xml")
+            shutil.copytree(UPSTREAM / patch.RES / "xml", root / patch.RES / "xml")
             tree = patch.Tree(root)
             patch.bundled_strings(tree)
             patch.verify_bundled_strings(tree)
             english = dict(patch.STRING_ELEMENT.findall(tree.read(f"{patch.RES}/values/strings.xml")))
             scope = patch.bundled_scope(tree, english)
+            # The texts the system reads from the resources alone: the account's
+            # settings item and the descriptions of the widgets.
+            for key in ("AccountSettings", "EditWidgetChatsInfo", "EditWidgetContactsInfo"):
+                self.assertIn(key, scope)
             for folder in patch.bundled_data():
                 with self.subTest(folder=folder):
                     names = {k for k, _ in patch.STRING_ELEMENT.findall(tree.read(f"{patch.RES}/{folder}/strings.xml"))}

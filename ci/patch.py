@@ -424,6 +424,7 @@ def patch(tree, c):
     brand(tree)
     login_screens(tree)
     bundled_strings(tree)
+    ui_texts(tree)
 
 
 # --- the server's edges -------------------------------------------------------
@@ -5611,11 +5612,13 @@ STRING_REWRITES = (
      r"Some videos can\'t be streamed – e.g., all videos that were sent from Android using Telegram 4.7 and earlier versions.",
      r"Some videos can\'t be streamed – e.g., videos that were sent from very old versions of the app."),
 )
-# The name in Java string literals the user sees.
+# The name in Java string literals the user sees. The actions of a contact in
+# the system's Contacts app (the summary column data2, res/xml/contacts.xml)
+# become keys of the language pack (UI_TEXTS).
 JAVA_NAMES = (
-    ("messenger/ContactsController.java", '"Telegram Profile"', '"Pluma Profile"', 1),
-    ("messenger/ContactsController.java", '"Telegram Voice Call"', '"Pluma Voice Call"', 1),
-    ("messenger/ContactsController.java", '"Telegram Video Call"', '"Pluma Video Call"', 1),
+    ("messenger/ContactsController.java", '"Telegram Profile"', "LocaleController.getString(R.string.PlumaContactProfile)", 1),
+    ("messenger/ContactsController.java", '"Telegram Voice Call"', "LocaleController.getString(R.string.PlumaContactVoiceCall)", 1),
+    ("messenger/ContactsController.java", '"Telegram Video Call"', "LocaleController.getString(R.string.PlumaContactVideoCall)", 1),
     ("messenger/MessagesController.java", 'user.first_name = "Telegram";', 'user.first_name = "Pluma";', 2),
     ("ui/Components/ChatAttachAlertDocumentLayout.java", 'fs.title = "Telegram";', 'fs.title = "Pluma";', 1),
     ("ui/LoginActivity.java", "But Telegram says it's", "But Pluma says it's", 2),
@@ -6196,6 +6199,11 @@ PALETTE_LIGHT = (
     ("chat_outSentClockSelected", -260332598, "#5B7A5E"),
     ("chat_outViews", -259216707, "#5B7A5E"),
     ("chat_outViewsSelected", -260332598, "#5B7A5E"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's blue to green: sage
+    ("stories_circle1", None, "#5B7A5E"),
+    ("stories_circle2", None, "#7FA082"),
+    ("stories_circle_dialog1", None, "#5B7A5E"),
+    ("stories_circle_dialog2", None, "#7FA082"),
 )
 # darkblue.attheme ("Dark Blue").
 PALETTE_DARK = (
@@ -6321,6 +6329,11 @@ PALETTE_DARK = (
     ("chat_outSentClockSelected", -4268038, "#B2CEB4"),
     ("chat_outViews", -7357217, "#B2CEB4"),
     ("chat_outViewsSelected", -4268038, "#B2CEB4"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's green to blue: sage
+    ("stories_circle1", -12984516, "#9DBB9F"),
+    ("stories_circle2", -11682817, "#B2CEB4"),
+    ("stories_circle_dialog1", -11866795, "#9DBB9F"),
+    ("stories_circle_dialog2", -11680769, "#B2CEB4"),
 )
 # day.attheme ("Day"): the keys of PALETTE_LIGHT, except in the outgoing
 # bubble. Day and Arctic Blue colour that bubble and write on it in white, as
@@ -6422,6 +6435,11 @@ PALETTE_DAY = (
     ("chat_outVenueInfoText", -3676417, "#E3EAE2"),
     ("chat_outVenueInfoSelectedText", -3676417, "#E3EAE2"),
     ("chat_outContactPhoneText", -3676417, "#E3EAE2"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's blue to green: sage
+    ("stories_circle1", None, "#5B7A5E"),
+    ("stories_circle2", None, "#7FA082"),
+    ("stories_circle_dialog1", None, "#5B7A5E"),
+    ("stories_circle_dialog2", None, "#7FA082"),
 )
 # arctic.attheme ("Arctic Blue"): as PALETTE_DAY; its outgoing bubble has no
 # gradient.
@@ -6505,6 +6523,11 @@ PALETTE_ARCTIC = (
     ("chat_inBubbleSelected", -1706753, "#E3EAE2"),
     ("chat_outBubble", -13332245, "#5B7A5E"),
     ("chat_outBubbleSelected", -13332255, "#4F6E52"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's blue to green: sage
+    ("stories_circle1", None, "#5B7A5E"),
+    ("stories_circle2", None, "#7FA082"),
+    ("stories_circle_dialog1", None, "#5B7A5E"),
+    ("stories_circle_dialog2", None, "#7FA082"),
 )
 # night.attheme ("Night"): the keys of PALETTE_DARK, except the neutral greys
 # of its bars, menus, sections and dialogs, which are Night's own and not
@@ -6620,6 +6643,11 @@ PALETTE_NIGHT = (
     ("chat_outSentClockSelected", -4268038, "#B2CEB4"),
     ("chat_outViews", -7357217, "#B2CEB4"),
     ("chat_outViewsSelected", -4268038, "#B2CEB4"),
+    # the ring of unseen stories (StoriesUtilities), Telegram's green to blue: sage
+    ("stories_circle1", -12984516, "#9DBB9F"),
+    ("stories_circle2", -11682817, "#B2CEB4"),
+    ("stories_circle_dialog1", -11866795, "#9DBB9F"),
+    ("stories_circle_dialog2", -11680769, "#B2CEB4"),
 )
 # The theme files and their tables.
 THEME_FILES = {
@@ -6705,6 +6733,54 @@ BRAND_COLOURS = (
      "{111 / 255.0f, 143 / 255.0f, 114 / 255.0f, 1}", 1),
     ("TMessagesProj/jni/intro/IntroRenderer.c", "{47 / 255.f, 90 / 255.f, 131 / 255.f, 1}",
      "{79 / 255.f, 110 / 255.f, 82 / 255.f, 1}", 1),
+    # The story editor, always dark (task 118): the share button and the round
+    # of the caption's send button fill sage under white; the crop button, the
+    # link sheet's icon, progress, title, handles and cursor take the dark accent;
+    # the "everyone" privacy gradient takes the connected set's.
+    (f"{JAVA}/ui/Stories/recorder/PreviewButtons.java", "0xff199cff", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Stories/recorder/CaptionContainerView.java", "0xff1A9CFF", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Stories/recorder/CaptionStory.java", "0xFF1A9CFF", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Stories/recorder/CropEditor.java", "0xff199cff", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/recorder/CropInlineEditor.java", "0xff199cff", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/recorder/StoryLinkSheet.java", "0xFF1A9CFF", "0xff9dbb9f", 3),
+    (f"{JAVA}/ui/Stories/recorder/StoryLinkSheet.java", "0xFF419FE8", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/recorder/StoryLinkSheet.java", "0xff54a1db", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/Stories/StoryPrivacyButton.java", "0xFF16A5F2, 0xFF1180F7", "0xff6f8f72, 0xff4f6e52", 2),
+    (f"{JAVA}/ui/Stories/recorder/StoryPrivacyBottomSheet.java", "0xFF16A5F2, 0xFF1180F7", "0xff6f8f72, 0xff4f6e52", 1),
+    # The media viewer, always dark: repeat and casting when on, the compression
+    # steps of a video, the caption's links, the round "done" of its editor and
+    # the bluish grey of its sheets.
+    (f"{JAVA}/ui/PhotoViewer.java", "0xFF73B4EC", "0xff9dbb9f", 4),
+    (f"{JAVA}/ui/PhotoViewer.java", "0xff53aeef", "0xff9dbb9f", 1),
+    (f"{JAVA}/ui/PhotoViewer.java", "0xff79c4fc", "0xffb2ceb4", 1),
+    (f"{JAVA}/ui/PhotoViewer.java", "0xff1C2229", "0xff1f2620", 3),
+    (f"{JAVA}/ui/Components/PhotoViewerCaptionEnterView.java", "0xff76c2f1", "0xffb2ceb4", 1),
+    (f"{JAVA}/ui/Components/PhotoViewerCaptionEnterView.java", "0xff66bffa", "0xff5b7a5e", 1),
+    # The links of the caption field of the story editor and the media viewer
+    # (EditTextEmoji.STYLE_STORY and STYLE_PHOTOVIEWER).
+    (f"{JAVA}/ui/Components/EditTextEmoji.java", "0xFF46A3EB", "0xffb2ceb4", 1),
+    # The playback speed of videos and stories, on their dark menus.
+    (f"{JAVA}/ui/ChooseSpeedLayout.java", "0xff6BB6F9", "0xff9dbb9f", 2),
+    (f"{JAVA}/ui/SpeedButtonsLayout.java", "0xff6BB6F9", "0xff9dbb9f", 2),
+    # Light screens without a theme colour: the buttons of the light picker
+    # bar, the progress of the photo pickers (Telegram's former brand blue, as
+    # in styles.xml above), the terms of service, the default text cursor.
+    (f"{JAVA}/ui/Components/PickerBottomLayoutViewer.java", "0xff19a7e8", "0xff5b7a5e", 4),
+    (f"{JAVA}/ui/PhotoPickerActivity.java", "0xff527da3", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/PhotoAlbumPickerActivity.java", "0xff527da3", "0xff5b7a5e", 1),
+    (f"{JAVA}/ui/Components/TermsOfServiceView.java", "0xff50a8eb", "0xff5b7a5e", 2),
+    (f"{JAVA}/ui/Components/TermsOfServiceView.java", "0xff439bde", "0xff4f6e52", 1),
+    (f"{JAVA}/ui/Components/EditTextBoldCursor.java", "0xff54a1db", "0xff5b7a5e", 4),
+    # Either theme: the progress of the embedded video player, the unread dot
+    # of a featured sticker set; the proximity alert circle on the map, the
+    # dark accent on a dark map and the light one on a light map, alpha kept.
+    (f"{JAVA}/ui/Components/WebPlayerView.java", "0xff19a7e8", "0xff7fa082", 1),
+    (f"{JAVA}/ui/Cells/FeaturedStickerSetCell.java", "0xff44a8ea", "0xff7fa082", 1),
+    (f"{JAVA}/ui/Cells/FeaturedStickerSetCell2.java", "0xff44a8ea", "0xff7fa082", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x9666A3D7", "0x969DBB9F", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x1c66A3D7", "0x1c9DBB9F", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x964286F5", "0x965B7A5E", 1),
+    (f"{JAVA}/ui/LocationActivity.java", "0x1c4286F5", "0x1c5B7A5E", 1),
 )
 
 
@@ -6925,10 +7001,14 @@ def telegram_blue(c):
 #   (UserObject.getColorId), now sage and teal; the other five keep
 #   Telegram's colours;
 # - Telegram's blue and light blue as plain colours and the internal storage
-#   of the file picker.
+#   of the file picker;
+# - the ring of unseen stories around avatars, in the chat list and in
+#   profiles (StoriesUtilities); the rings of close friends and of a live
+#   story keep Telegram's green and red.
 ALSO_CHECKED = ("avatar_backgroundBlue", "avatar_background2Blue", "avatar_nameInMessageBlue",
                 "avatar_backgroundCyan", "avatar_background2Cyan", "avatar_nameInMessageCyan",
-                "color_blue", "color_lightblue", "chat_attachGalleryBackground")
+                "color_blue", "color_lightblue", "chat_attachGalleryBackground",
+                "stories_circle1", "stories_circle2", "stories_circle_dialog1", "stories_circle_dialog2")
 
 
 def default_theme_blues(theme_java, colors_java, theme_files):
@@ -7492,6 +7572,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_login_screens(tree)
     verify_bundled_strings(tree)
+    verify_ui_texts(tree)
 
 
 
@@ -8198,7 +8279,9 @@ def verify_login_screens(tree):
 # (pkg/langpack RebrandValue of the server repository), written as resource
 # text by resource_text into ci/strings/<folder>.json. The keys are taken
 # from the patched tree: a key upstream adds to these screens or starts to
-# bundle stops the patch, which names it, until the data is refreshed.
+# bundle stops the patch, which names it, until the data is refreshed. The
+# strings the resources name (res/xml) are bundled too (task 118): the system
+# reads them without the app, so the pack never reaches them.
 BUNDLED_STRINGS = pathlib.Path(__file__).resolve().parent / "strings"
 BUNDLED_CLASSES = ("ui/LoginActivity.java", "ui/IntroActivity.java", "ui/CountrySelectActivity.java")
 BUNDLED_PREFIXES = ("Allow", "Permission")
@@ -8275,6 +8358,13 @@ def bundled_scope(tree, english):
         if key not in english:
             raise PatchError(f"{RES}/values/strings.xml: no button {key}; upstream changed it")
         scope[key] = False
+    # The texts the system shows from the resources alone, never through the
+    # language pack: the account's settings item (auth_menu.xml) and the
+    # descriptions of the widgets.
+    for p in sorted((tree.root / RES / "xml").glob("*.xml")):
+        for key in re.findall(r"@string/(\w+)", p.read_text(encoding="utf-8")):
+            if key in english:
+                scope[key] = False
     for key in BUNDLED_EXCLUDED:
         scope.pop(key, None)
     return scope
@@ -8333,6 +8423,125 @@ def verify_bundled_strings(tree):
         for name, text in texts.items():
             if xml.count(f'    <string name="{name}">{text}</string>\n') != 1 or xml.count(f'<string name="{name}">') != 1:
                 raise PatchError(f"{rel}: {name} is not the bundled string of ci/strings once")
+
+
+# --- Texts the code writes ----------------------------------------------------
+# A text the user sees is a key of the language pack, never a literal (task 118
+# of the server repository). Upstream writes in English:
+# - the error of a call whose audio device does not start (VoIPFragment.java
+#   1975): Telegram's own words under a new key;
+# - the button of a shared folder before its link exists
+#   (FilterChatlistActivity.java 1045): the key upstream gives the same button
+#   on the folder's screen (FilterCreateActivity.java 2456,
+#   FolderLinkShareButton, "Create Invite Link");
+# - the actions of a contact in the system's Contacts app
+#   (ContactsController.java 2358, 2367, 2376): JAVA_NAMES makes them keys.
+# The new keys come in every language the app bundles, the server's pack has
+# them in all of its languages (own.json).
+UI_TEXTS = {
+    "PlumaCallAudioError": {
+        "values": "Error initializing audio hardware",
+        "values-ar": "خطأ في تهيئة أجهزة الصوت",
+        "values-de": "Fehler beim Initialisieren der Audio-Hardware",
+        "values-es": "Error al inicializar el hardware de audio",
+        "values-it": "Errore durante l\\'inizializzazione dell\\'hardware audio",
+        "values-ko": "오디오 하드웨어를 초기화하는 중 오류가 발생했습니다",
+        "values-nl": "Fout bij het initialiseren van de audiohardware",
+        "values-pt-rBR": "Erro ao inicializar o hardware de áudio",
+        "values-ru": "Ошибка инициализации аудиоустройства",
+        "values-uk": "Помилка ініціалізації аудіопристрою",
+    },
+    "PlumaContactProfile": {
+        "values": "Pluma Profile",
+        "values-ar": "ملف Pluma الشخصي",
+        "values-de": "Pluma-Profil",
+        "values-es": "Perfil de Pluma",
+        "values-it": "Profilo Pluma",
+        "values-ko": "Pluma 프로필",
+        "values-nl": "Pluma-profiel",
+        "values-pt-rBR": "Perfil do Pluma",
+        "values-ru": "Профиль Pluma",
+        "values-uk": "Профіль Pluma",
+    },
+    "PlumaContactVideoCall": {
+        "values": "Pluma Video Call",
+        "values-ar": "مكالمة فيديو عبر Pluma",
+        "values-de": "Pluma-Videoanruf",
+        "values-es": "Videollamada de Pluma",
+        "values-it": "Videochiamata Pluma",
+        "values-ko": "Pluma 영상 통화",
+        "values-nl": "Pluma-videogesprek",
+        "values-pt-rBR": "Chamada de vídeo do Pluma",
+        "values-ru": "Видеозвонок Pluma",
+        "values-uk": "Відеодзвінок Pluma",
+    },
+    "PlumaContactVoiceCall": {
+        "values": "Pluma Voice Call",
+        "values-ar": "مكالمة صوتية عبر Pluma",
+        "values-de": "Pluma-Sprachanruf",
+        "values-es": "Llamada de voz de Pluma",
+        "values-it": "Chiamata vocale Pluma",
+        "values-ko": "Pluma 음성 통화",
+        "values-nl": "Pluma-spraakoproep",
+        "values-pt-rBR": "Chamada de voz do Pluma",
+        "values-ru": "Голосовой звонок Pluma",
+        "values-uk": "Голосовий дзвінок Pluma",
+    },
+}
+# Where each key is used, once: (file under JAVA, key).
+UI_TEXT_USES = (
+    ("ui/VoIPFragment.java", "PlumaCallAudioError"),
+    ("messenger/ContactsController.java", "PlumaContactProfile"),
+    ("messenger/ContactsController.java", "PlumaContactVoiceCall"),
+    ("messenger/ContactsController.java", "PlumaContactVideoCall"),
+    ("ui/FilterChatlistActivity.java", "FolderLinkShareButton"),
+)
+UI_TEXT_EDITS = (
+    (f"{JAVA}/ui/VoIPFragment.java", 'showErrorDialog("Error initializing audio hardware");',
+     "showErrorDialog(LocaleController.getString(R.string.PlumaCallAudioError));"),
+    (f"{JAVA}/ui/FilterChatlistActivity.java", 'generateButton.setText("Generate Invite Link");',
+     "generateButton.setText(LocaleController.getString(R.string.FolderLinkShareButton));"),
+)
+
+
+def _ui_text_line(key, folder):
+    return f'    <string name="{key}">{UI_TEXTS[key][folder]}</string>\n'
+
+
+def ui_texts(tree):
+    for rel, old, _ in UI_TEXT_EDITS:
+        tree.expect(rel, old)
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    for key, texts in UI_TEXTS.items():
+        if set(files) != set(texts):
+            raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, {key} has {', '.join(sorted(texts))}")
+        for folder, text in texts.items():
+            if not valid_resource_text(text):
+                raise PatchError(f"UI_TEXTS: {key} in {folder} is not resource text: {text[:80]!r}")
+    for rel in files.values():
+        for key in UI_TEXTS:
+            if f'<string name="{key}">' in tree.read(rel):
+                raise PatchError(f"{rel}: upstream has a string {key}")
+    for rel, old, new in UI_TEXT_EDITS:
+        tree.replace(rel, old, new)
+    for folder, rel in files.items():
+        tree.replace(rel, "</resources>", "".join(_ui_text_line(key, folder) for key in UI_TEXTS) + "</resources>")
+
+
+def verify_ui_texts(tree):
+    for rel, old, new in UI_TEXT_EDITS:
+        text = tree.read(rel)
+        if old in text or text.count(new) != 1:
+            raise PatchError(f"{rel}: {old!r} is still there, or the key is not used once")
+    for rel, key in UI_TEXT_USES:
+        if tree.read(f"{JAVA}/{rel}").count(f"LocaleController.getString(R.string.{key})") != 1:
+            raise PatchError(f"{JAVA}/{rel}: the text {key} is not used once")
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        xml = p.read_text(encoding="utf-8")
+        for key, texts in UI_TEXTS.items():
+            if (p.parent.name not in texts or xml.count(_ui_text_line(key, p.parent.name)) != 1
+                    or xml.count(f'<string name="{key}">') != 1):
+                raise PatchError(f"{p.relative_to(tree.root)}: {key} is not the text of task 118")
 
 
 # --- What the server does not serve ------------------------------------------
@@ -10261,6 +10470,7 @@ GRADIENT_LAYOUT = f"{VOIP_UI}/VoIpGradientLayout.java"
 PREVIEW_DIALOG = f"{VOIP_UI}/PrivateVideoPreviewDialog.java"
 PREVIEW_DIALOG_NEW = f"{VOIP_UI}/PrivateVideoPreviewDialogNew.java"
 RECORD_ALERT = f"{UI}/Components/GroupCallRecordAlert.java"
+CONFERENCE_UI = f"{UI}/Components/conference"
 NO_VIDEO = ("0xff212E3A", "0xff2B5B4D", "0xff245863", "0xff274558")
 
 # The background of a private call, VoIpGradientLayout's constructor. Each
@@ -10427,18 +10637,116 @@ _CALL_LITERALS = (
      {"0xff658ffe": C4, "0xff956ffd": C2}, 1),
     # The notification of a call: Android 8 and later colour it with this.
     (VOIP_SERVICE, "builder.setColor(0xff282e31);", {"0xff282e31": call_neutral(0xFF282E31)}, 1),
+    # A message of the group call and the conference: its links, the bubble.
+    (f"{CONFERENCE_UI}/message/GroupCallMessageCell.java", "messageTextView.setLinkTextColor(0xFF4db8ff);",
+     {"0xFF4db8ff": CALL_LINK}, 1),
+    (f"{CONFERENCE_UI}/message/GroupCallMessageCell.java", "bgPaint.setColor(0xFF2B333B);",
+     {"0xFF2B333B": call_neutral(0xFF2B333B)}, 1),
 )
+
+# The dark sheets of the calls and the conferences (task 118). The group call
+# and the conference draw their sheet, menus, rows, message field and the
+# sheets they open (add people, the call link, a restricted call) with
+# DarkBlueThemeResourcesProvider (GroupCallActivity.java 1888, 3722, 3808,
+# 5351, 5535, 6607, 8767, 8771, 10367, 10504; VoIPFragment.java 1213;
+# VoIPService.java 2584, 2678); it extends Stories/DarkThemeResourceProvider,
+# which the new call and the join sheet of a conference use as they are
+# (CreateGroupCallSheet.java 64, GroupCallSheet.java 148), as do the story
+# viewer and editor, the media viewer and other dark sheets. Their colours by
+# meaning: a fill under white (the main button, checkboxes, the switch, the
+# recorded voice) the connected set's #5B7A5E, white reading about 2:1 on the
+# dark accent; text, icons, cursors, progress and radio buttons the dark
+# accent; links the dark link colour; the avatar of Saved Messages the soft
+# accent of the dark themes; the bluish greys the sage grey of the same
+# lightness, as the group call's own. Each line: (file, key, upstream value,
+# Pluma's).
+DARK_THEME_PROVIDER = f"{UI}/Stories/DarkThemeResourceProvider.java"
+DARK_BLUE_PROVIDER = f"{UI}/DarkBlueThemeResourcesProvider.java"
+_DARK_SHEET_COLOURS = (
+    (DARK_THEME_PROVIDER, "statisticChartSignature", "-1214008894", call_neutral(0xB7A3B1C2)),
+    (DARK_THEME_PROVIDER, "statisticChartActiveLine", "-665229191", call_neutral(0xD8596879)),
+    (DARK_THEME_PROVIDER, "statisticChartInactivePickerChart", "-667862461", call_neutral(0xD8313A43)),
+    (DARK_THEME_PROVIDER, "statisticChartActivePickerChart", "-665229191", call_neutral(0xD8596879)),
+    (DARK_THEME_PROVIDER, "dialogButton", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_emojiPanelBackground", "0xFF20242A", call_neutral(0xFF20242A)),
+    (DARK_THEME_PROVIDER, "chat_recordedVoiceBackground", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "chat_recordVoiceCancel", "-10638868", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_messageLinkOut", "-5316609", CALL_LINK),
+    (DARK_THEME_PROVIDER, "chat_messagePanelBackground", "0xFF20242A", call_neutral(0xFF20242A)),
+    (DARK_THEME_PROVIDER, "dialog_inlineProgressBackground", "-15393241", call_neutral(0xFF151E27)),
+    (DARK_THEME_PROVIDER, "progressCircle", "-10177027", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_emojiPanelStickerPackSelector", "181267199", call_neutral(0x0ACDEAFF)),
+    (DARK_THEME_PROVIDER, "chat_emojiPanelStickerPackSelectorLine", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "chat_editMediaButton", "-15033089", G1),
+    (DARK_THEME_PROVIDER, "windowBackgroundWhiteBlueHeader", "0xFF1A9CFF", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "windowBackgroundWhiteInputFieldActivated", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "windowBackgroundWhiteInputField", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "undo_background", "0xFF212426", call_neutral(0xFF212426)),
+    (DARK_THEME_PROVIDER, "undo_cancelColor", "0xFF8BC8F5", CALL_LINK),
+    (DARK_THEME_PROVIDER, "voipgroup_inviteMembersBackground", "0xff222A33", call_neutral(0xFF222A33)),
+    (DARK_THEME_PROVIDER, "dialogScrollGlow", "0xff222A33", call_neutral(0xFF222A33)),
+    (DARK_THEME_PROVIDER, "chat_serviceBackground", "-2110438831", call_neutral(0x82354251)),
+    (DARK_THEME_PROVIDER, "switchTrackChecked", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "dialogRoundCheckBox", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "dialogRadioBackgroundChecked", "0xFF1A9CFF", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "dialogTextBlue2", "0xFF1A9CFF", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "checkbox", "-12692893", call_neutral(0xFF3E5263)),
+    (DARK_THEME_PROVIDER, "groupcreate_cursor", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "fastScrollActive", "-13133079", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "featuredStickers_addButton", "0xFF1A9CFF", G1),
+    (DARK_THEME_PROVIDER, "dialogTextLink", "-10177041", CALL_LINK),
+    (DARK_THEME_PROVIDER, "chat_messageLinkIn", "0xFF46A3EB", CALL_LINK),
+    (DARK_THEME_PROVIDER, "location_actionActiveIcon", "-8796932", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "radioBackgroundChecked", "-10177041", CALL_ACCENT),
+    (DARK_THEME_PROVIDER, "avatar_backgroundSaved", "0xFF5CADF6", G4),
+    (DARK_THEME_PROVIDER, "avatar_background2Saved", "0xFF408BCF", G4),
+    (DARK_THEME_PROVIDER, "player_progress", "-11292689", CALL_ACCENT),
+    (DARK_BLUE_PROVIDER, "windowBackgroundWhite", "0xff222b33", call_neutral(0xFF222B33)),
+    (DARK_BLUE_PROVIDER, "dialogBackground", "0xff222B33", call_neutral(0xFF222B33)),
+    (DARK_BLUE_PROVIDER, "windowBackgroundGray", "0xff303B47", call_neutral(0xFF303B47)),
+    (DARK_BLUE_PROVIDER, "graySection", "0xff28323B", call_neutral(0xFF28323B)),
+    (DARK_BLUE_PROVIDER, "graySectionText", "0xff848D94", call_neutral(0xFF848D94)),
+    (DARK_BLUE_PROVIDER, "groupcreate_spanBackground", "0xff28323B", call_neutral(0xFF28323B)),
+    (DARK_BLUE_PROVIDER, "actionBarDefaultSubmenuBackground", "0xFF303B47", call_neutral(0xFF303B47)),
+    (DARK_BLUE_PROVIDER, "actionBarDefaultSubmenuSeparator", "-14733761", call_neutral(0xFF1F2E3F)),
+    (DARK_BLUE_PROVIDER, "undo_background", "-231982259", call_neutral(0xF22C3B4D)),
+    (DARK_BLUE_PROVIDER, "windowBackgroundWhiteBlueIcon", "0xFF4DB8FF", CALL_ACCENT),
+    (DARK_BLUE_PROVIDER, "windowBackgroundWhiteBlueButton", "0xFF5DAFEE", CALL_ACCENT),
+    (DARK_BLUE_PROVIDER, "checkboxSquareBackground", "-12692893", call_neutral(0xFF3E5263)),
+    (DARK_BLUE_PROVIDER, "checkbox", "0xFF1A9CFF", G1),
+)
+# Kept as Telegram has them: the reds of destructive actions and of the
+# recording dot, the green name of a secret chat (the themes keep both).
+DARK_SHEET_KEPT = ("text_RedBold", "text_RedRegular", "chat_recordedVoiceDot", "color_red", "chats_secretName")
+DARK_SHEET_PUT = re.compile(r"sparseIntArray\.put\(Theme\.key_(\w+), (-?0x[0-9A-Fa-f]{1,8}|-?\d+)\);")
+
+
+def _dark_sheet_line(key, value):
+    return f"        sparseIntArray.put(Theme.key_{key}, {value});\n"
+
+
+# The emoji status of a participant: Telegram paints it with its Premium blue
+# (GroupCallUserCell.java 505, 545); the chat list paints it with the accent
+# of the verified badge, sage in Pluma, where everyone has one (ADR 0041).
+_EMOJI_STATUS_EDITS = tuple(
+    (f"{UI}/Cells/GroupCallUserCell.java", f"            {side}.setColor(Theme.getColor(Theme.key_premiumGradient1));\n",
+     f"            {side}.setColor({jhex(CALL_ACCENT)}); // pluma: the sage accent, as in the chat list\n", 1)
+    for side in ("rightDrawable", "leftDrawable"))
 
 CALL_COLOUR_EDITS = (
     tuple((rel, old, _recoloured(old, colours), count) for rel, old, colours, count in _CALL_LITERALS)
+    + tuple((rel, _dark_sheet_line(key, old), _dark_sheet_line(key, jhex(new)), 1)
+            for rel, key, old, new in _DARK_SHEET_COLOURS)
+    + _EMOJI_STATUS_EDITS
     + ((_GRADIENT_EDIT[0], _GRADIENT_EDIT[1], _GRADIENT_EDIT[2], 1),
        (f"{RES}/drawable/call_notification_bg.xml", '<solid android:color="#282e31"/>',
         f'<solid android:color="#{call_neutral(0xFF282E31) & 0xFFFFFF:06x}"/>', 1))
 )
 
 # The files of the call screens the check reads in full: the private call, the
-# group call with its sheets, cells, bubble and alerts, the chat's call panel,
-# the notifications of a call.
+# group call and the conference with their sheets, cells, messages, bubble and
+# alerts, the dark sheets they draw with, the chat's call panel, the
+# notifications of a call.
 CALL_UI_FILES = (
     f"{UI}/VoIPFragment.java", f"{UI}/GroupCallActivity.java", f"{UI}/GroupCallSheet.java",
     f"{UI}/CreateGroupCallSheet.java", f"{UI}/GroupCallTabletGridAdapter.java",
@@ -10447,8 +10755,10 @@ CALL_UI_FILES = (
     f"{UI}/Components/CapsuleBlobDrawable.java", f"{UI}/Components/FragmentContextView.java",
     f"{UI}/Components/FragmentContextViewWavesDrawable.java", f"{RES}/drawable/call_notification_bg.xml",
     VOIP_SERVICE, f"{VOIP}/VoIPGroupNotification.java", f"{VOIP}/VoIPPreNotificationService.java",
+    DARK_THEME_PROVIDER, DARK_BLUE_PROVIDER,
 )
-CALL_UI_GLOBS = (f"{VOIP_UI}/*.java", f"{UI}/Cells/GroupCall*.java", f"{UI}/Components/GroupCall*.java")
+CALL_UI_GLOBS = (f"{VOIP_UI}/*.java", f"{UI}/Cells/GroupCall*.java", f"{UI}/Components/GroupCall*.java",
+                 f"{CONFERENCE_UI}/**/*.java")
 # The literals kept as Telegram has them (see above), with how many times.
 CALL_COLOURS_KEPT = {
     (f"{UI}/VoIPFragment.java", "0xfff01d2c"): 2,
@@ -10469,6 +10779,8 @@ CALL_COLOURS_KEPT = {
     (f"{VOIP}/VoIPGroupNotification.java", "0xff00aa00"): 1,
     (f"{VOIP}/VoIPPreNotificationService.java", "0xfff44336"): 1,
     (f"{VOIP}/VoIPPreNotificationService.java", "0xff00aa00"): 1,
+    # The red of a destructive action on the dark sheets (DARK_SHEET_KEPT).
+    (DARK_THEME_PROVIDER, "0xffdb4646"): 1,
 }
 
 
@@ -10556,6 +10868,14 @@ def verify_call_colours(tree):
         for (kept_rel, literal), n in CALL_COLOURS_KEPT.items():
             if kept_rel == rel and found[literal] != n:
                 raise PatchError(f"{rel}: {literal}, which the call keeps, is there {found[literal]} times, expected {n}")
+    # Every colour the dark sheets set, written in hex or in decimal.
+    for rel in (DARK_THEME_PROVIDER, DARK_BLUE_PROVIDER):
+        puts = DARK_SHEET_PUT.findall(tree.read(rel))
+        if not puts:
+            raise PatchError(f"{rel}: the check reads no colours; upstream changed it")
+        for key, value in puts:
+            if telegram_call_colour(int(value, 0) & 0xFFFFFFFF) and key not in DARK_SHEET_KEPT:
+                raise PatchError(f"{rel}: Telegram's colour {value} is still there in {key}")
 
 
 # --- HTTPS CDN (task 107 of the server repository, ADR 0071) ---------------------
