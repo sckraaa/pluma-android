@@ -3818,6 +3818,138 @@ class MapsTest(unittest.TestCase):
                     self.assertEqual(text.count("GoogleMapsProvider"), 1)
 
 
+class UiTextsTest(unittest.TestCase):
+    """The texts the code writes are keys of the language pack."""
+
+    FOLDERS = ("values", "values-ar", "values-de", "values-es", "values-it", "values-ko", "values-nl",
+               "values-pt-rBR", "values-ru", "values-uk")
+    CONTACTS = "messenger/ContactsController.java"
+
+    def tree(self, root, edits=patch.UI_TEXT_EDITS):
+        files = {f"{patch.JAVA}/{self.CONTACTS}": "".join(
+            f"x({new});\n" for rel, old, new, _ in patch.JAVA_NAMES if rel == self.CONTACTS)}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "\nx();\n"
+        for folder in self.FOLDERS:
+            files[f"{patch.RES}/{folder}/strings.xml"] = '<resources>\n    <string name="A">a</string>\n</resources>\n'
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_texts(self):
+        # Every key in every bundled language, as resource text, naming Pluma and not Telegram;
+        # the English of the audio error is Telegram's own.
+        for key, texts in patch.UI_TEXTS.items():
+            self.assertEqual(set(texts), set(self.FOLDERS), key)
+            self.assertTrue(key.startswith("Pluma"), key)
+            for folder, text in texts.items():
+                with self.subTest(key=key, folder=folder):
+                    self.assertTrue(patch.valid_resource_text(text), text)
+                    self.assertNotRegex(text, r"(?i)telegram|телеграм")
+                    if key.startswith("PlumaContact"):
+                        self.assertIn("Pluma", text)
+        self.assertEqual(patch.UI_TEXTS["PlumaCallAudioError"]["values"], "Error initializing audio hardware")
+        # The actions of a contact are the keys, not literals.
+        names = {old: new for rel, old, new, _ in patch.JAVA_NAMES if rel == self.CONTACTS}
+        self.assertEqual(set(names.values()), {f"LocaleController.getString(R.string.{k})" for k in
+                                               ("PlumaContactProfile", "PlumaContactVoiceCall", "PlumaContactVideoCall")})
+        self.assertEqual({key for _, key in patch.UI_TEXT_USES} - {"FolderLinkShareButton"}, set(patch.UI_TEXTS))
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_ui_texts(tree)
+            patch.ui_texts(tree)
+            patch.verify_ui_texts(tree)
+            self.assertIn("showErrorDialog(LocaleController.getString(R.string.PlumaCallAudioError));",
+                          tree.read(f"{patch.JAVA}/ui/VoIPFragment.java"))
+            self.assertIn('    <string name="PlumaContactVoiceCall">Голосовой звонок Pluma</string>\n',
+                          tree.read(f"{patch.RES}/values-ru/strings.xml"))
+            # A second run finds no upstream text and writes nothing.
+            before = {p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+            with self.assertRaises(patch.PatchError):
+                patch.ui_texts(tree)
+            self.assertEqual({p: p.read_bytes() for p in pathlib.Path(d).rglob("*") if p.is_file()}, before)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.UI_TEXT_EDITS):
+            changed = old.replace("(", "( ", 1)
+            edits = [(r, changed if j == i else o, n) for j, (r, o, n) in enumerate(patch.UI_TEXT_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                before = tree.read(rel)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.ui_texts(tree)
+                self.assertEqual(tree.read(rel), before)
+        # A key upstream already has, and a bundled language without the texts.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            rel = f"{patch.RES}/values-de/strings.xml"
+            tree.write(rel, tree.read(rel).replace("</resources>", '<string name="PlumaContactProfile">x</string>\n</resources>'))
+            with self.assertRaisesRegex(patch.PatchError, "upstream has a string PlumaContactProfile"):
+                patch.ui_texts(tree)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            (pathlib.Path(d) / patch.RES / "values-fr").mkdir()
+            (pathlib.Path(d) / patch.RES / "values-fr/strings.xml").write_text("<resources>\n</resources>\n")
+            with self.assertRaisesRegex(patch.PatchError, "values-fr"):
+                patch.ui_texts(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.ui_texts(tree)
+            # DAMAGE: an edit taken back, a key used twice, a text missing or changed in a language.
+            for rel, old, new in patch.UI_TEXT_EDITS:
+                text = tree.read(rel)
+                for damaged in (text.replace(new, old), text + new):
+                    with self.subTest(file=rel):
+                        tree.write(rel, damaged)
+                        with self.assertRaises(patch.PatchError):
+                            patch.verify_ui_texts(tree)
+                tree.write(rel, text)
+            contacts = f"{patch.JAVA}/{self.CONTACTS}"
+            text = tree.read(contacts)
+            tree.write(contacts, text.replace("R.string.PlumaContactVideoCall", "R.string.PlumaContactVoiceCall"))
+            with self.assertRaisesRegex(patch.PatchError, "PlumaContact"):
+                patch.verify_ui_texts(tree)
+            tree.write(contacts, text)
+            rel = f"{patch.RES}/values-ko/strings.xml"
+            xml = tree.read(rel)
+            for damaged in (xml.replace(patch._ui_text_line("PlumaCallAudioError", "values-ko"), ""),
+                            xml.replace("Pluma 프로필", "Pluma")):
+                tree.write(rel, damaged)
+                with self.assertRaisesRegex(patch.PatchError, "values-ko"):
+                    patch.verify_ui_texts(tree)
+            tree.write(rel, xml)
+            patch.verify_ui_texts(tree)
+
+    @unittest.skipUnless((UPSTREAM / "TMessagesProj").is_dir(), "no ./upstream (ci/fetch-upstream.sh)")
+    def test_real_upstream(self):
+        rels = [f"{patch.JAVA}/{self.CONTACTS}"] + [rel for rel, _, _ in patch.UI_TEXT_EDITS]
+        rels += [str(p.relative_to(UPSTREAM)) for p in sorted((UPSTREAM / patch.RES).glob("values*/strings.xml"))]
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(UPSTREAM / rel, root / rel)
+            tree = patch.Tree(root)
+            for rel, old, new, count in patch.JAVA_NAMES:
+                if rel == self.CONTACTS:
+                    tree.replace(f"{patch.JAVA}/{rel}", old, new, count)
+            patch.ui_texts(tree)
+            patch.verify_ui_texts(tree)
+            # The button's key is upstream's, with its English text.
+            self.assertIn('<string name="FolderLinkShareButton">Create Invite Link</string>',
+                          tree.read(f"{patch.RES}/values/strings.xml"))
+            # No English literal is left at these places.
+            for rel, old, _ in patch.UI_TEXT_EDITS:
+                self.assertNotIn(old, tree.read(rel))
+            self.assertNotRegex(tree.read(f"{patch.JAVA}/{self.CONTACTS}"), r'DATA2, "')
+
+
 class BundledStringsTest(unittest.TestCase):
     # The login screen uses a string, a plural and a button; the intro and the
     # country list use nothing; English has every string, Russian none.

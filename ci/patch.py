@@ -424,6 +424,7 @@ def patch(tree, c):
     brand(tree)
     login_screens(tree)
     bundled_strings(tree)
+    ui_texts(tree)
 
 
 # --- the server's edges -------------------------------------------------------
@@ -5611,11 +5612,13 @@ STRING_REWRITES = (
      r"Some videos can\'t be streamed – e.g., all videos that were sent from Android using Telegram 4.7 and earlier versions.",
      r"Some videos can\'t be streamed – e.g., videos that were sent from very old versions of the app."),
 )
-# The name in Java string literals the user sees.
+# The name in Java string literals the user sees. The actions of a contact in
+# the system's Contacts app (the summary column data2, res/xml/contacts.xml)
+# become keys of the language pack (UI_TEXTS).
 JAVA_NAMES = (
-    ("messenger/ContactsController.java", '"Telegram Profile"', '"Pluma Profile"', 1),
-    ("messenger/ContactsController.java", '"Telegram Voice Call"', '"Pluma Voice Call"', 1),
-    ("messenger/ContactsController.java", '"Telegram Video Call"', '"Pluma Video Call"', 1),
+    ("messenger/ContactsController.java", '"Telegram Profile"', "LocaleController.getString(R.string.PlumaContactProfile)", 1),
+    ("messenger/ContactsController.java", '"Telegram Voice Call"', "LocaleController.getString(R.string.PlumaContactVoiceCall)", 1),
+    ("messenger/ContactsController.java", '"Telegram Video Call"', "LocaleController.getString(R.string.PlumaContactVideoCall)", 1),
     ("messenger/MessagesController.java", 'user.first_name = "Telegram";', 'user.first_name = "Pluma";', 2),
     ("ui/Components/ChatAttachAlertDocumentLayout.java", 'fs.title = "Telegram";', 'fs.title = "Pluma";', 1),
     ("ui/LoginActivity.java", "But Telegram says it's", "But Pluma says it's", 2),
@@ -7569,6 +7572,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_login_screens(tree)
     verify_bundled_strings(tree)
+    verify_ui_texts(tree)
 
 
 
@@ -8410,6 +8414,125 @@ def verify_bundled_strings(tree):
         for name, text in texts.items():
             if xml.count(f'    <string name="{name}">{text}</string>\n') != 1 or xml.count(f'<string name="{name}">') != 1:
                 raise PatchError(f"{rel}: {name} is not the bundled string of ci/strings once")
+
+
+# --- Texts the code writes ----------------------------------------------------
+# A text the user sees is a key of the language pack, never a literal (task 118
+# of the server repository). Upstream writes in English:
+# - the error of a call whose audio device does not start (VoIPFragment.java
+#   1975): Telegram's own words under a new key;
+# - the button of a shared folder before its link exists
+#   (FilterChatlistActivity.java 1045): the key upstream gives the same button
+#   on the folder's screen (FilterCreateActivity.java 2456,
+#   FolderLinkShareButton, "Create Invite Link");
+# - the actions of a contact in the system's Contacts app
+#   (ContactsController.java 2358, 2367, 2376): JAVA_NAMES makes them keys.
+# The new keys come in every language the app bundles, the server's pack has
+# them in all of its languages (own.json).
+UI_TEXTS = {
+    "PlumaCallAudioError": {
+        "values": "Error initializing audio hardware",
+        "values-ar": "خطأ في تهيئة أجهزة الصوت",
+        "values-de": "Fehler beim Initialisieren der Audio-Hardware",
+        "values-es": "Error al inicializar el hardware de audio",
+        "values-it": "Errore durante l\\'inizializzazione dell\\'hardware audio",
+        "values-ko": "오디오 하드웨어를 초기화하는 중 오류가 발생했습니다",
+        "values-nl": "Fout bij het initialiseren van de audiohardware",
+        "values-pt-rBR": "Erro ao inicializar o hardware de áudio",
+        "values-ru": "Ошибка инициализации аудиоустройства",
+        "values-uk": "Помилка ініціалізації аудіопристрою",
+    },
+    "PlumaContactProfile": {
+        "values": "Pluma Profile",
+        "values-ar": "ملف Pluma الشخصي",
+        "values-de": "Pluma-Profil",
+        "values-es": "Perfil de Pluma",
+        "values-it": "Profilo Pluma",
+        "values-ko": "Pluma 프로필",
+        "values-nl": "Pluma-profiel",
+        "values-pt-rBR": "Perfil do Pluma",
+        "values-ru": "Профиль Pluma",
+        "values-uk": "Профіль Pluma",
+    },
+    "PlumaContactVideoCall": {
+        "values": "Pluma Video Call",
+        "values-ar": "مكالمة فيديو عبر Pluma",
+        "values-de": "Pluma-Videoanruf",
+        "values-es": "Videollamada de Pluma",
+        "values-it": "Videochiamata Pluma",
+        "values-ko": "Pluma 영상 통화",
+        "values-nl": "Pluma-videogesprek",
+        "values-pt-rBR": "Chamada de vídeo do Pluma",
+        "values-ru": "Видеозвонок Pluma",
+        "values-uk": "Відеодзвінок Pluma",
+    },
+    "PlumaContactVoiceCall": {
+        "values": "Pluma Voice Call",
+        "values-ar": "مكالمة صوتية عبر Pluma",
+        "values-de": "Pluma-Sprachanruf",
+        "values-es": "Llamada de voz de Pluma",
+        "values-it": "Chiamata vocale Pluma",
+        "values-ko": "Pluma 음성 통화",
+        "values-nl": "Pluma-spraakoproep",
+        "values-pt-rBR": "Chamada de voz do Pluma",
+        "values-ru": "Голосовой звонок Pluma",
+        "values-uk": "Голосовий дзвінок Pluma",
+    },
+}
+# Where each key is used, once: (file under JAVA, key).
+UI_TEXT_USES = (
+    ("ui/VoIPFragment.java", "PlumaCallAudioError"),
+    ("messenger/ContactsController.java", "PlumaContactProfile"),
+    ("messenger/ContactsController.java", "PlumaContactVoiceCall"),
+    ("messenger/ContactsController.java", "PlumaContactVideoCall"),
+    ("ui/FilterChatlistActivity.java", "FolderLinkShareButton"),
+)
+UI_TEXT_EDITS = (
+    (f"{JAVA}/ui/VoIPFragment.java", 'showErrorDialog("Error initializing audio hardware");',
+     "showErrorDialog(LocaleController.getString(R.string.PlumaCallAudioError));"),
+    (f"{JAVA}/ui/FilterChatlistActivity.java", 'generateButton.setText("Generate Invite Link");',
+     "generateButton.setText(LocaleController.getString(R.string.FolderLinkShareButton));"),
+)
+
+
+def _ui_text_line(key, folder):
+    return f'    <string name="{key}">{UI_TEXTS[key][folder]}</string>\n'
+
+
+def ui_texts(tree):
+    for rel, old, _ in UI_TEXT_EDITS:
+        tree.expect(rel, old)
+    files = {p.parent.name: str(p.relative_to(tree.root)) for p in sorted((tree.root / RES).glob("values*/strings.xml"))}
+    for key, texts in UI_TEXTS.items():
+        if set(files) != set(texts):
+            raise PatchError(f"{RES}: strings.xml in {', '.join(sorted(files))}, {key} has {', '.join(sorted(texts))}")
+        for folder, text in texts.items():
+            if not valid_resource_text(text):
+                raise PatchError(f"UI_TEXTS: {key} in {folder} is not resource text: {text[:80]!r}")
+    for rel in files.values():
+        for key in UI_TEXTS:
+            if f'<string name="{key}">' in tree.read(rel):
+                raise PatchError(f"{rel}: upstream has a string {key}")
+    for rel, old, new in UI_TEXT_EDITS:
+        tree.replace(rel, old, new)
+    for folder, rel in files.items():
+        tree.replace(rel, "</resources>", "".join(_ui_text_line(key, folder) for key in UI_TEXTS) + "</resources>")
+
+
+def verify_ui_texts(tree):
+    for rel, old, new in UI_TEXT_EDITS:
+        text = tree.read(rel)
+        if old in text or text.count(new) != 1:
+            raise PatchError(f"{rel}: {old!r} is still there, or the key is not used once")
+    for rel, key in UI_TEXT_USES:
+        if tree.read(f"{JAVA}/{rel}").count(f"LocaleController.getString(R.string.{key})") != 1:
+            raise PatchError(f"{JAVA}/{rel}: the text {key} is not used once")
+    for p in sorted((tree.root / RES).glob("values*/strings.xml")):
+        xml = p.read_text(encoding="utf-8")
+        for key, texts in UI_TEXTS.items():
+            if (p.parent.name not in texts or xml.count(_ui_text_line(key, p.parent.name)) != 1
+                    or xml.count(f'<string name="{key}">') != 1):
+                raise PatchError(f"{p.relative_to(tree.root)}: {key} is not the text of task 118")
 
 
 # --- What the server does not serve ------------------------------------------
